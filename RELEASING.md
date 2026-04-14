@@ -43,12 +43,12 @@ This validates the build without trying to publish.
 1. Make sure `main` is clean and pushed
 2. Update version in `pyproject.toml`
 3. Commit the version bump
-4. Create and push a tag:
+4. Create and push a tag that matches the release you want to publish:
 
 ```bash
-git tag -a v0.1.0 -m "Release v0.1.0"
+git tag -a v0.1.1 -m "Release v0.1.1"
 git push origin main
-git push origin v0.1.0
+git push origin v0.1.1
 ```
 
 Tag pushes matching `v*` trigger the release workflow and publish to PyPI.

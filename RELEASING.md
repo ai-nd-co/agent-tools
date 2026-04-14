@@ -1,9 +1,9 @@
-# Releasing `ai-agent-tools`
+# Releasing `ai-nd-co-agent-tools`
 
-This package is published to PyPI as `ai-agent-tools` and installed as:
+This package is published to PyPI as `ai-nd-co-agent-tools` and installed as:
 
 ```bash
-pip install ai-agent-tools
+pip install ai-nd-co-agent-tools
 ```
 
 The CLI command remains:
@@ -16,7 +16,7 @@ agent-tools
 
 1. Confirm the GitHub repo is public: `ai-nd-co/agent-tools`
 2. Confirm the release workflow exists at `.github/workflows/release.yml`
-3. On PyPI, create or claim the project `ai-agent-tools`
+3. On PyPI, create or claim the project `ai-nd-co-agent-tools`
 4. In PyPI project settings, add a Trusted Publisher with:
    - owner: `ai-nd-co`
    - repository: `agent-tools`
@@ -58,7 +58,7 @@ Tag pushes matching `v*` trigger the release workflow and publish to PyPI.
 After publish:
 
 ```bash
-pip install ai-agent-tools
+pip install ai-nd-co-agent-tools
 agent-tools --help
 ```
 

@@ -3,7 +3,7 @@ requires = ["hatchling>=1.24.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ai-agent-tools"
+name = "ai-nd-co-agent-tools"
 version = "0.1.0"
 description = "Codex-backed text transformation and Kokoro TTS command-line tools."
 readme = "README.md"

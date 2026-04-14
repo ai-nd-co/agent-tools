@@ -42,7 +42,7 @@ uv pip install -e ".[dev]"
 Public package install:
 
 ```bash
-pip install ai-agent-tools
+pip install ai-nd-co-agent-tools
 ```
 
 ## Usage

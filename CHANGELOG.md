@@ -1,3 +1,9 @@
+## [0.2.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.1.3...py-v0.2.0) (2026-04-14)
+
+### Features
+
+* add ttsify playback queue and desktop controller ([31dd029](https://github.com/ai-nd-co/agent-tools/commit/31dd02953ed6c4ae6cec9e63cd6639731ac4c96a))
+
 ## [0.1.3](https://github.com/ai-nd-co/agent-tools/compare/py-v0.1.2...py-v0.1.3) (2026-04-14)
 
 ### Bug Fixes

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-nd-co-agent-tools"
-version = "0.1.3"
+version = "0.2.0"
 description = "Codex-backed text transformation and Kokoro TTS command-line tools."
 readme = "README.md"
 requires-python = ">=3.12"

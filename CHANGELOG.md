@@ -1,3 +1,9 @@
+## [0.1.3](https://github.com/ai-nd-co/agent-tools/compare/py-v0.1.2...py-v0.1.3) (2026-04-14)
+
+### Bug Fixes
+
+* clarify semantic-release publish handoff ([175cbed](https://github.com/ai-nd-co/agent-tools/commit/175cbeda189ba83c09af4b1387dab12886d6fb65))
+
 ## [0.1.2](https://github.com/ai-nd-co/agent-tools/compare/py-v0.1.1...py-v0.1.2) (2026-04-14)
 
 ### Bug Fixes

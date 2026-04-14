@@ -79,6 +79,8 @@ If the bootstrap version already exists on PyPI, the publish workflow skips uplo
 
 Git tags created by a workflow using `GITHUB_TOKEN` do not reliably trigger downstream workflows.
 
+This dispatch step is required for fully automated PyPI publishing from semantic-release.
+
 To keep trusted publishing in `release.yml`, the semantic-release workflow explicitly dispatches
 that workflow against the new `py-v*` tag after creating it.
 

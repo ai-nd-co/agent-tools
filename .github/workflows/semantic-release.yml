@@ -44,6 +44,15 @@ jobs:
             echo "has_bootstrap_tag=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Capture current semantic-release tag
+        if: steps.bootstrap.outputs.has_bootstrap_tag == 'true'
+        id: before
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest_tag="$(git tag --list 'py-v*' --sort=-v:refname | head -n 1)"
+          echo "latest_tag=${latest_tag}" >> "$GITHUB_OUTPUT"
+
       - name: Skip until bootstrap tag exists
         if: steps.bootstrap.outputs.has_bootstrap_tag != 'true'
         shell: bash
@@ -79,6 +88,7 @@ jobs:
 
       - name: Run semantic-release
         if: steps.bootstrap.outputs.has_bootstrap_tag == 'true'
+        id: semantic
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -93,3 +103,28 @@ jobs:
             -p conventional-changelog-conventionalcommits \
             semantic-release
 
+      - name: Detect new release tag
+        if: steps.bootstrap.outputs.has_bootstrap_tag == 'true'
+        id: after
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest_tag="$(git tag --list 'py-v*' --sort=-v:refname | head -n 1)"
+          echo "latest_tag=${latest_tag}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${latest_tag}" && "${latest_tag}" != "${{ steps.before.outputs.latest_tag }}" ]]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch release workflow for new tag
+        if: steps.after.outputs.released == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml \
+            --ref "${{ steps.after.outputs.latest_tag }}" \
+            -f publish_to_pypi=true

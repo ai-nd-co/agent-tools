@@ -49,7 +49,8 @@ Normal flow:
 3. it updates version files + changelog
 4. it commits the release bump back to `main`
 5. it creates a `py-vX.Y.Z` tag
-6. the tag-triggered release workflow publishes to PyPI
+6. it dispatches `release.yml` against that new tag
+7. `release.yml` builds and publishes to PyPI
 
 Versioning rules:
 
@@ -73,6 +74,13 @@ git push origin py-v0.1.1
 ```
 
 If the bootstrap version already exists on PyPI, the publish workflow skips upload cleanly.
+
+## Why the dispatch exists
+
+Git tags created by a workflow using `GITHUB_TOKEN` do not reliably trigger downstream workflows.
+
+To keep trusted publishing in `release.yml`, the semantic-release workflow explicitly dispatches
+that workflow against the new `py-v*` tag after creating it.
 
 ## Verification
 

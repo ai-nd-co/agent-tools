@@ -12,6 +12,16 @@ DEFAULT_CODEX_HOME = Path.home() / ".codex"
 DEFAULT_CHATGPT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_ORIGINATOR = "codex_cli_rs"
 DEFAULT_MODEL = "gpt-5"
+DEFAULT_TTSIFY_MODEL = "gpt-5.4-mini"
+DEFAULT_TTSIFY_VOICE = "af_heart"
+
+ENV_CODEX_MODEL = "AGENT_TOOLS_CODEX_MODEL"
+ENV_CODEX_REASONING_EFFORT = "AGENT_TOOLS_CODEX_REASONING_EFFORT"
+ENV_KOKORO_VOICE = "AGENT_TOOLS_KOKORO_VOICE"
+ENV_KOKORO_LANGUAGE = "AGENT_TOOLS_KOKORO_LANGUAGE"
+ENV_KOKORO_SPEED = "AGENT_TOOLS_KOKORO_SPEED"
+ENV_KOKORO_DEVICE = "AGENT_TOOLS_KOKORO_DEVICE"
+ENV_SOURCE = "AGENT_TOOLS_SOURCE"
 
 
 @dataclass(frozen=True)
@@ -80,3 +90,17 @@ def _coerce_str(value: object) -> str | None:
         stripped = value.strip()
         return stripped or None
     return None
+
+
+def read_string_env(name: str) -> str | None:
+    return _coerce_str(os.environ.get(name))
+
+
+def read_float_env(name: str) -> float | None:
+    value = read_string_env(name)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {name} must be a float, got {value!r}") from exc

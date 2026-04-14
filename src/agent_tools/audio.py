@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import sys
+import time
 import wave
 
 import numpy as np
@@ -33,3 +35,31 @@ def wav_bytes(audio: np.ndarray, sample_rate: int = KOKORO_SAMPLE_RATE) -> bytes
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(pcm16_bytes(audio))
     return buffer.getvalue()
+
+
+def wav_duration_ms(wav_data: bytes) -> int:
+    with wave.open(io.BytesIO(wav_data), "rb") as wav_file:
+        frames = wav_file.getnframes()
+        rate = wav_file.getframerate()
+    if rate <= 0:
+        return 0
+    return int((frames / rate) * 1000)
+
+
+def play_wav_blocking(wav_data: bytes) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("Playback mode is currently supported only on Windows.")
+
+    import winsound
+
+    duration_s = wav_duration_ms(wav_data) / 1000.0
+    try:
+        winsound.PlaySound(wav_data, winsound.SND_MEMORY | winsound.SND_ASYNC)
+        deadline = time.monotonic() + duration_s
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        winsound.PlaySound(None, 0)
+        raise
+    finally:
+        winsound.PlaySound(None, 0)

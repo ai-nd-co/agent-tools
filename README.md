@@ -2,6 +2,7 @@
 
 Python CLI tools for:
 
+- transforming raw text into TTS-ready narration and synthesizing it in one command
 - transforming piped text through the private Codex ChatGPT-backed backend used by local Codex
 - synthesizing the result to WAV with Kokoro-82M
 
@@ -45,7 +46,49 @@ Public package install:
 pip install ai-nd-co-agent-tools
 ```
 
+UI-enabled install:
+
+```bash
+pip install "ai-nd-co-agent-tools[ui]"
+```
+
 ## Usage
+
+### Single-command path: `ttsify`
+
+```bash
+echo "Turn this note into natural spoken narration." | agent-tools ttsify --output-file out.wav
+```
+
+`ttsify` uses a built-in rewrite prompt stored in the package and then pipes the transformed text
+into Kokoro TTS.
+
+Default `ttsify` settings:
+
+- model: `gpt-5.4-mini`
+- voice: `af_heart`
+
+Configurable via env vars:
+
+```bash
+AGENT_TOOLS_CODEX_MODEL=gpt-5.4-mini
+AGENT_TOOLS_CODEX_REASONING_EFFORT=medium
+AGENT_TOOLS_KOKORO_VOICE=af_heart
+AGENT_TOOLS_KOKORO_LANGUAGE=a
+AGENT_TOOLS_KOKORO_SPEED=1.0
+AGENT_TOOLS_KOKORO_DEVICE=auto
+```
+
+CLI flags override env vars.
+
+Queue for playback on Windows:
+
+```bash
+echo "Turn this note into natural spoken narration." | agent-tools ttsify --device cpu --output-mode play --source agent-a
+```
+
+This enqueues the generated audio, starts the background controller if needed, and returns
+immediately.
 
 ### Transform text
 
@@ -70,6 +113,21 @@ echo "Input text" | agent-tools transform \
 echo "Hello world." | agent-tools tts --output-file hello.wav
 ```
 
+Queue already-prepared speech on Windows:
+
+```bash
+echo "Hello world." | agent-tools tts --device cpu --output-mode play --source agent-a
+```
+
+### Desktop controller UI
+
+```bash
+agent-tools ui
+```
+
+If the controller is already running, this focuses the existing window instead of starting a
+second process.
+
 ### End-to-end pipeline
 
 ```bash
@@ -80,8 +138,13 @@ cat input.txt | agent-tools transform \
 
 ## Notes
 
+- `ttsify` is the recommended end-user path; `transform` and `tts` remain available as building blocks.
 - `transform` reads stdin by default and writes plain text to stdout.
 - `tts` reads stdin by default and writes WAV bytes to stdout unless `--output-file` is set.
+- `tts` and `ttsify` support `--output-mode play` on Windows.
+- in play mode, audio is queued into a single background controller process.
+- `agent-tools ui` launches or focuses the popup/tray controller window.
+- controller shortcuts: `Space` pause/resume, `Esc` stop, `Ctrl+R` replay, `Ctrl+N` next.
 - `tts --device auto` prefers CUDA and falls back to CPU.
 - `transform` refreshes ChatGPT tokens when the Codex backend returns `401`.
 - semantic-release now owns future Python package version bumps and `py-v*` tags.

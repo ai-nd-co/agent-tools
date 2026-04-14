@@ -38,20 +38,41 @@ From GitHub Actions:
 
 This validates the build without trying to publish.
 
-## Real release
+## Automatic semantic-release flow
 
-1. Make sure `main` is clean and pushed
-2. Update version in `pyproject.toml`
-3. Commit the version bump
-4. Create and push a tag that matches the release you want to publish:
+This repo now uses semantic-release on pushes to `main`.
+
+Normal flow:
+
+1. merge a Conventional Commit to `main`
+2. semantic-release computes the next version
+3. it updates version files + changelog
+4. it commits the release bump back to `main`
+5. it creates a `py-vX.Y.Z` tag
+6. the tag-triggered release workflow publishes to PyPI
+
+Versioning rules:
+
+- `feat:` => minor
+- `fix:` => patch
+- `feat!:` / `BREAKING CHANGE:` => major
+
+Commits like `chore:` or `docs:` do not cut a release.
+
+## Bootstrap
+
+The automated Python release flow uses `py-v*` tags.
+
+Older `v0.1.x` tags are intentionally ignored.
+
+One-time bootstrap tag:
 
 ```bash
-git tag -a v0.1.1 -m "Release v0.1.1"
-git push origin main
-git push origin v0.1.1
+git tag -a py-v0.1.1 -m "Bootstrap semantic-release at 0.1.1"
+git push origin py-v0.1.1
 ```
 
-Tag pushes matching `v*` trigger the release workflow and publish to PyPI.
+If the bootstrap version already exists on PyPI, the publish workflow skips upload cleanly.
 
 ## Verification
 
@@ -74,4 +95,4 @@ echo "hello" | agent-tools tts --output-file hello.wav
 
 - `transform` depends on local Codex ChatGPT login and `~/.codex/auth.json`
 - the backend path is intentionally private/experimental and may break with Codex changes
-- tag pushes publish; manual workflow runs build only unless explicitly told to publish
+- semantic-release owns version bumps and `py-v*` tags; manual workflow runs build only unless explicitly told to publish

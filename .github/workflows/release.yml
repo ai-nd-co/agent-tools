@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "py-v*"
   workflow_dispatch:
     inputs:
       publish_to_pypi:
@@ -13,7 +13,69 @@ on:
         type: boolean
 
 jobs:
+  context:
+    runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+      already_published: ${{ steps.version.outputs.already_published }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve package version and publish state
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import tomllib
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          cfg = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          package_name = cfg["project"]["name"]
+          package_version = cfg["project"]["version"]
+          print(f"package_name={package_name}")
+          print(f"package_version={package_version}")
+
+          with open(Path.cwd() / "version_outputs.txt", "w", encoding="utf-8") as handle:
+              handle.write(f"package_version={package_version}\n")
+
+              try:
+                  with urllib.request.urlopen(f"https://pypi.org/pypi/{package_name}/json") as response:
+                      data = json.load(response)
+                  already = package_version in data.get("releases", {})
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      already = False
+                  else:
+                      raise
+
+              handle.write(f"already_published={'true' if already else 'false'}\n")
+          PY
+          cat version_outputs.txt >> "$GITHUB_OUTPUT"
+
+      - name: Validate tag matches package version
+        if: startsWith(github.ref, 'refs/tags/py-v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#py-v}"
+          package_version="${{ steps.version.outputs.package_version }}"
+          [[ "$tag_version" == "$package_version" ]] || {
+            echo "Tag version '$tag_version' does not match pyproject version '$package_version'"
+            exit 1
+          }
+
   build:
+    needs: context
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -36,8 +98,8 @@ jobs:
           path: dist/*
 
   publish-pypi:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_to_pypi == true
+    needs: [context, build]
+    if: (startsWith(github.ref, 'refs/tags/py-v') || inputs.publish_to_pypi == true) && needs.context.outputs.already_published != 'true'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -52,3 +114,12 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-skipped:
+    needs: [context, build]
+    if: (startsWith(github.ref, 'refs/tags/py-v') || inputs.publish_to_pypi == true) && needs.context.outputs.already_published == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report skipped publish
+        run: |
+          echo "Package version ${{ needs.context.outputs.package_version }} is already on PyPI; skipping publish."

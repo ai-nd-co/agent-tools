@@ -31,7 +31,7 @@ def synthesize_wav(
     if lang_code not in SUPPORTED_LANGUAGES:
         raise ValueError(f"Unsupported Kokoro language code: {lang_code}")
 
-    from kokoro import KPipeline  # type: ignore[import-untyped]
+    from kokoro import KPipeline
 
     pipeline_device = None if device == "auto" else device
     pipeline = KPipeline(lang_code=lang_code, device=pipeline_device)

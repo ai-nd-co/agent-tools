@@ -84,6 +84,7 @@ cat input.txt | agent-tools transform \
 - `tts` reads stdin by default and writes WAV bytes to stdout unless `--output-file` is set.
 - `tts --device auto` prefers CUDA and falls back to CPU.
 - `transform` refreshes ChatGPT tokens when the Codex backend returns `401`.
+- semantic-release now owns future Python package version bumps and `py-v*` tags.
 
 ## CPU performance
 

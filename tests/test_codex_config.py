@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agent_tools.codex_config import DEFAULT_CHATGPT_CODEX_BASE_URL, load_codex_defaults
+from agent_tools.codex_config import (
+    DEFAULT_CHATGPT_CODEX_BASE_URL,
+    load_codex_defaults,
+    read_preferred_tts_speed,
+)
 
 
 def test_load_codex_defaults_reads_config_and_version(tmp_path: Path) -> None:
@@ -30,3 +34,15 @@ def test_load_codex_defaults_falls_back_when_files_missing(tmp_path: Path) -> No
     assert defaults.model is None
     assert defaults.reasoning_effort is None
     assert defaults.version == "0.0.0"
+
+
+def test_read_preferred_tts_speed_reads_numeric_value(monkeypatch: object) -> None:
+    import agent_tools.codex_config as config_module
+
+    monkeypatch.setattr(
+        config_module,
+        "load_preferences",
+        lambda: {"preferred_tts_speed": 1.15},
+    )
+
+    assert read_preferred_tts_speed() == 1.15

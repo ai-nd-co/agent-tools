@@ -5,7 +5,13 @@ import json
 import sys
 from pathlib import Path
 
-from agent_tools.codex_config import ENV_SOURCE, read_string_env
+from agent_tools.codex_config import (
+    ENV_KOKORO_SPEED,
+    ENV_SOURCE,
+    read_float_env,
+    read_preferred_tts_speed,
+    read_string_env,
+)
 from agent_tools.codex_notify import dispatch_codex_notify
 from agent_tools.controller_client import (
     ProcessingNotice,
@@ -71,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     tts_parser = subparsers.add_parser("tts", help="Synthesize text with Kokoro.")
     tts_parser.add_argument("--voice", default="af_heart")
     tts_parser.add_argument("--language", choices=SUPPORTED_LANGUAGES)
-    tts_parser.add_argument("--speed", type=float, default=1.0)
+    tts_parser.add_argument("--speed", type=float)
     tts_parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     tts_parser.add_argument("--input-file", type=Path)
     tts_parser.add_argument("--output-file", default="-")
@@ -160,6 +166,9 @@ def _run_transform(args: argparse.Namespace) -> int:
 
 def _run_tts(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
+    speed = args.speed if args.speed is not None else read_float_env(ENV_KOKORO_SPEED)
+    if speed is None:
+        speed = read_preferred_tts_speed() or 1.0
     source_label = args.source or read_string_env(ENV_SOURCE)
     processing_notice = _maybe_start_processing_notice(
         output_mode=args.output_mode,
@@ -172,7 +181,7 @@ def _run_tts(args: argparse.Namespace) -> int:
             input_text,
             voice=args.voice,
             language=args.language,
-            speed=args.speed,
+            speed=speed,
             device=args.device,
         )
         _handle_audio_output(
@@ -184,7 +193,7 @@ def _run_tts(args: argparse.Namespace) -> int:
             source_label=source_label,
             voice=args.voice,
             language=args.language,
-            speed=args.speed,
+            speed=speed,
             model=None,
             reasoning_effort=None,
         )

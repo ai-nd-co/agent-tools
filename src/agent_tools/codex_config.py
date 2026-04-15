@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_tools.runtime import load_preferences
+
 DEFAULT_CODEX_HOME = Path.home() / ".codex"
 DEFAULT_CHATGPT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_ORIGINATOR = "codex_cli_rs"
@@ -22,6 +24,7 @@ ENV_KOKORO_LANGUAGE = "AGENT_TOOLS_KOKORO_LANGUAGE"
 ENV_KOKORO_SPEED = "AGENT_TOOLS_KOKORO_SPEED"
 ENV_KOKORO_DEVICE = "AGENT_TOOLS_KOKORO_DEVICE"
 ENV_SOURCE = "AGENT_TOOLS_SOURCE"
+DEFAULT_PREFERRED_TTS_SPEED = 1.0
 
 
 @dataclass(frozen=True)
@@ -104,3 +107,10 @@ def read_float_env(name: str) -> float | None:
         return float(value)
     except ValueError as exc:
         raise ValueError(f"Environment variable {name} must be a float, got {value!r}") from exc
+
+
+def read_preferred_tts_speed() -> float | None:
+    value = load_preferences().get("preferred_tts_speed")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None

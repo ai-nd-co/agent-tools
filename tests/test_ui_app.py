@@ -3,12 +3,12 @@ from __future__ import annotations
 from agent_tools.queue_db import STATUS_COMPLETED, STATUS_QUEUED, STATUS_STOPPED, QueueItem
 from agent_tools.ui_app import (
     ProcessingItem,
-    clamp_playback_rate,
+    clamp_tts_speed,
     interrupted_status_for_switch,
     merged_feed_entries,
-    playback_rate_label,
     processing_stage_label,
     restored_scroll_value,
+    tts_speed_label,
 )
 
 
@@ -85,12 +85,12 @@ def test_restored_scroll_value_preserves_distance_from_bottom() -> None:
     assert restored_scroll_value(old_value=120, old_max=200, new_max=260) == 180
 
 
-def test_clamp_playback_rate_respects_bounds() -> None:
-    assert clamp_playback_rate(0.1) == 0.5
-    assert clamp_playback_rate(1.37) == 1.37
-    assert clamp_playback_rate(3.0) == 2.0
+def test_clamp_tts_speed_respects_bounds() -> None:
+    assert clamp_tts_speed(0.1) == 0.7
+    assert clamp_tts_speed(1.12) == 1.12
+    assert clamp_tts_speed(3.0) == 1.3
 
 
-def test_playback_rate_label_formats_single_decimal() -> None:
-    assert playback_rate_label(1.0) == "1.0x"
-    assert playback_rate_label(1.25) == "1.2x"
+def test_tts_speed_label_formats_two_decimals() -> None:
+    assert tts_speed_label(1.0) == "TTS 1.00x"
+    assert tts_speed_label(1.25) == "TTS 1.25x"

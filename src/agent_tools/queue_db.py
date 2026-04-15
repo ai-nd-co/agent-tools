@@ -178,6 +178,23 @@ def get_next_queued_item(conn: sqlite3.Connection) -> QueueItem | None:
     return None if row is None else row_to_item(row)
 
 
+def get_next_queued_item_after(
+    conn: sqlite3.Connection,
+    *,
+    after_queue_id: int,
+) -> QueueItem | None:
+    row = conn.execute(
+        """
+        SELECT * FROM queue_items
+        WHERE status = ? AND queue_id > ?
+        ORDER BY queue_id ASC
+        LIMIT 1
+        """,
+        (STATUS_QUEUED, after_queue_id),
+    ).fetchone()
+    return None if row is None else row_to_item(row)
+
+
 def list_queue_items(conn: sqlite3.Connection, limit: int = 50) -> list[QueueItem]:
     rows = conn.execute(
         """

@@ -20,11 +20,12 @@ from agent_tools.queue_db import (
     get_current_item,
     get_item_by_item_id,
     get_next_queued_item,
+    get_next_queued_item_after,
     list_all_items,
     normalize_inflight_items,
     update_status,
 )
-from agent_tools.runtime import CONTROLLER_HOST, CONTROLLER_PORT
+from agent_tools.runtime import CONTROLLER_HOST, CONTROLLER_PORT, load_preferences, save_preferences
 
 
 @dataclass(frozen=True)
@@ -57,9 +58,9 @@ class FeedEntry:
 
 FEED_ROW_HEIGHT = 58
 FEED_PREVIEW_LIMIT = 96
-PLAYBACK_RATE_MIN = 0.5
-PLAYBACK_RATE_MAX = 2.0
-PLAYBACK_RATE_STEP = 0.1
+TTS_SPEED_MIN = 0.7
+TTS_SPEED_MAX = 1.3
+TTS_SPEED_STEP = 0.05
 
 
 def interrupted_status_for_switch(status: str) -> str:
@@ -80,12 +81,12 @@ def restored_scroll_value(*, old_value: int, old_max: int, new_max: int) -> int:
     return max(0, new_max - distance_from_bottom)
 
 
-def clamp_playback_rate(rate: float) -> float:
-    return max(PLAYBACK_RATE_MIN, min(PLAYBACK_RATE_MAX, round(rate, 2)))
+def clamp_tts_speed(speed: float) -> float:
+    return max(TTS_SPEED_MIN, min(TTS_SPEED_MAX, round(speed, 2)))
 
 
-def playback_rate_label(rate: float) -> str:
-    return f"{rate:.1f}x"
+def tts_speed_label(speed: float) -> str:
+    return f"TTS {speed:.2f}x"
 
 
 def run_ui(*, hidden: bool) -> int:
@@ -309,12 +310,11 @@ def run_ui(*, hidden: bool) -> int:
             self.is_scrubbing = False
             self.processing_items: dict[str, ProcessingItem] = {}
             self.processing_sequence = 0
-            self.playback_rate = 1.0
+            self.tts_speed = clamp_tts_speed(_load_preferred_tts_speed())
 
             self.audio_output = QAudioOutput(QMediaDevices.defaultAudioOutput())
             self.player = QMediaPlayer()
             self.player.setAudioOutput(self.audio_output)
-            self.player.setPlaybackRate(self.playback_rate)
             self.player.positionChanged.connect(self._on_position_changed)
             self.player.durationChanged.connect(self._on_duration_changed)
             self.player.playbackStateChanged.connect(self._on_playback_state_changed)
@@ -378,9 +378,9 @@ def run_ui(*, hidden: bool) -> int:
             self.play_pause_button = QPushButton("Play/Pause")
             self.stop_button = QPushButton("Stop")
             self.next_button = QPushButton("Next queued")
-            self.slower_button = QPushButton("Slower")
-            self.faster_button = QPushButton("Faster")
-            self.playback_rate_value = QLabel(playback_rate_label(self.playback_rate))
+            self.slower_button = QPushButton("TTS slower")
+            self.faster_button = QPushButton("TTS faster")
+            self.playback_rate_value = QLabel(tts_speed_label(self.tts_speed))
             self.playback_rate_value.setStyleSheet("font-size: 12px; font-weight: 600;")
 
             self.play_pause_button.clicked.connect(self.play_pause)
@@ -515,12 +515,12 @@ def run_ui(*, hidden: bool) -> int:
                     count = len(processing_items)
                     label = "item" if count == 1 else "items"
                     self.now_label.setText(f"Processing {count} {label}")
-                    self.current_meta_label.setText(_format_processing_meta(processing_items[0]))
-                    self.current_text.setPlainText(processing_items[0].detail_text)
+                    self._set_current_meta_text(_format_processing_meta(processing_items[0]))
+                    self._set_current_plain_text(processing_items[0].detail_text)
                 else:
                     self.now_label.setText("No audio playing")
-                    self.current_meta_label.setText("")
-                    self.current_text.setPlainText("")
+                    self._set_current_meta_text("")
+                    self._set_current_plain_text("")
                 self.timeline_slider.setRange(0, 0)
                 self.timeline_slider.setValue(0)
                 self.timeline_slider.setEnabled(False)
@@ -532,14 +532,34 @@ def run_ui(*, hidden: bool) -> int:
 
             label = current.source_label or "unknown source"
             self.now_label.setText(label)
-            self.current_meta_label.setText(_format_item_meta(current))
-            self.current_text.setPlainText(current.tts_text)
+            self._set_current_meta_text(_format_item_meta(current))
+            self._set_current_plain_text(current.tts_text)
             self.timeline_slider.setEnabled(True)
             if self.current_duration_ms <= 0:
                 self.current_duration_ms = current.duration_ms
             if self.current_duration_ms > 0:
                 self.timeline_slider.setRange(0, self.current_duration_ms)
                 self.total_label.setText(_format_duration_ms(self.current_duration_ms))
+
+        def _set_current_meta_text(self, text: str) -> None:
+            if self.current_meta_label.text() == text:
+                return
+            self.current_meta_label.setText(text)
+
+        def _set_current_plain_text(self, text: str) -> None:
+            if self.current_text.toPlainText() == text:
+                return
+            scroll_bar = self.current_text.verticalScrollBar()
+            old_value = scroll_bar.value()
+            old_max = scroll_bar.maximum()
+            self.current_text.setPlainText(text)
+            scroll_bar.setValue(
+                restored_scroll_value(
+                    old_value=old_value,
+                    old_max=old_max,
+                    new_max=scroll_bar.maximum(),
+                )
+            )
 
         def _render_feed(
             self,
@@ -689,7 +709,7 @@ def run_ui(*, hidden: bool) -> int:
                 return False
             if self.player.playbackState() != QMediaPlayer.PlaybackState.PausedState:
                 return False
-            return get_next_queued_item(self.conn) is not None
+            return self._next_queued_item_for_advance() is not None
 
         def _maybe_autoplay(self) -> None:
             if self.current_item_id is not None:
@@ -698,6 +718,18 @@ def run_ui(*, hidden: bool) -> int:
             if next_item is None:
                 return
             self._start_item(next_item, origin="queue")
+
+        def _next_queued_item_for_advance(self) -> QueueItem | None:
+            if self.current_item_id is None or self.current_play_origin != "queue":
+                return get_next_queued_item(self.conn)
+            try:
+                current_item = get_item_by_item_id(self.conn, self.current_item_id)
+            except KeyError:
+                return get_next_queued_item(self.conn)
+            return get_next_queued_item_after(
+                self.conn,
+                after_queue_id=current_item.queue_id,
+            )
 
         def _activate_item(self, item_id: str) -> None:
             try:
@@ -734,7 +766,6 @@ def run_ui(*, hidden: bool) -> int:
             self.total_label.setText(_format_duration_ms(item.duration_ms))
             self.player.setSource(QUrl.fromLocalFile(item.audio_path))
             self.player.setPosition(0)
-            self.player.setPlaybackRate(self.playback_rate)
             self.player.play()
             self.refresh_views()
 
@@ -768,22 +799,22 @@ def run_ui(*, hidden: bool) -> int:
             self.refresh_views()
 
         def slower_playback(self) -> None:
-            self._set_playback_rate(self.playback_rate - PLAYBACK_RATE_STEP)
+            self._set_tts_speed(self.tts_speed - TTS_SPEED_STEP)
 
         def faster_playback(self) -> None:
-            self._set_playback_rate(self.playback_rate + PLAYBACK_RATE_STEP)
+            self._set_tts_speed(self.tts_speed + TTS_SPEED_STEP)
 
-        def _set_playback_rate(self, rate: float) -> None:
-            self.playback_rate = clamp_playback_rate(rate)
-            self.player.setPlaybackRate(self.playback_rate)
-            self.playback_rate_value.setText(playback_rate_label(self.playback_rate))
+        def _set_tts_speed(self, speed: float) -> None:
+            self.tts_speed = clamp_tts_speed(speed)
+            _save_preferred_tts_speed(self.tts_speed)
+            self.playback_rate_value.setText(tts_speed_label(self.tts_speed))
 
         def skip_next(self) -> None:
+            next_item = self._next_queued_item_for_advance()
             if self.current_item_id is not None:
                 self.player.stop()
                 update_status(self.conn, self.current_item_id, STATUS_STOPPED)
                 self._clear_current_playback_state(reset_slider=True)
-            next_item = get_next_queued_item(self.conn)
             if next_item is not None:
                 self._start_item(next_item, origin="queue")
             else:
@@ -932,3 +963,16 @@ def _format_processing_meta(item: ProcessingItem) -> str:
     if detail and detail != _preview_text(item.preview_text, limit=220):
         parts.append(detail)
     return " | ".join(part for part in parts if part)
+
+
+def _load_preferred_tts_speed() -> float:
+    value = load_preferences().get("preferred_tts_speed")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 1.0
+
+
+def _save_preferred_tts_speed(speed: float) -> None:
+    preferences = load_preferences()
+    preferences["preferred_tts_speed"] = clamp_tts_speed(speed)
+    save_preferences(preferences)

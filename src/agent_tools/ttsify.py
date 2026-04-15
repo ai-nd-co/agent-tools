@@ -15,6 +15,7 @@ from agent_tools.codex_config import (
     ENV_KOKORO_SPEED,
     ENV_KOKORO_VOICE,
     read_float_env,
+    read_preferred_tts_speed,
     read_string_env,
 )
 from agent_tools.transformer import TransformOptions, TransformResult, transform_text
@@ -66,7 +67,11 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
     prompt_text = load_ttsify_prompt()
     voice = options.voice or read_string_env(ENV_KOKORO_VOICE) or DEFAULT_TTSIFY_VOICE
     language = options.language or read_string_env(ENV_KOKORO_LANGUAGE)
-    speed = options.speed if options.speed is not None else read_float_env(ENV_KOKORO_SPEED) or 1.0
+    speed = (
+        options.speed
+        if options.speed is not None
+        else read_float_env(ENV_KOKORO_SPEED) or read_preferred_tts_speed() or 1.0
+    )
     device = options.device or read_string_env(ENV_KOKORO_DEVICE) or "auto"
     if device not in SUPPORTED_TTSIFY_DEVICES:
         raise ValueError(

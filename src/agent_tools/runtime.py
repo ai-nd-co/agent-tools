@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -29,7 +30,31 @@ def queue_db_path() -> Path:
     return state_dir() / "queue.sqlite3"
 
 
+def preferences_path() -> Path:
+    return state_dir() / "preferences.json"
+
+
 def ensure_runtime_dirs() -> None:
     state_dir().mkdir(parents=True, exist_ok=True)
     audio_cache_dir().mkdir(parents=True, exist_ok=True)
 
+
+def load_preferences() -> dict[str, object]:
+    path = preferences_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(key): value for key, value in payload.items()}
+
+
+def save_preferences(preferences: dict[str, object]) -> None:
+    ensure_runtime_dirs()
+    preferences_path().write_text(
+        json.dumps(preferences, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )

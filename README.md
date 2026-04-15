@@ -8,6 +8,12 @@ Python CLI tools for:
 
 This repo is intentionally wired to the local Codex login state in `~/.codex/`.
 
+Release policy:
+
+- semantic-release owns version bumps, changelog updates, and `py-v*` tags
+- do not manually edit `project.version` in `pyproject.toml` during normal work
+- do not create release tags by hand unless the release workflow explicitly calls for it
+
 ## Status
 
 This is an **experimental public package** with a **private Codex dependency**.

@@ -1,3 +1,15 @@
+## [0.3.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.2.0...py-v0.3.0) (2026-04-15)
+
+### Features
+
+* add codex notify playback integration ([3ac3d8b](https://github.com/ai-nd-co/agent-tools/commit/3ac3d8b1b4f25499aeb1b2d5e747478c1b18091b))
+* improve tts rewrite guidance ([a2a8e34](https://github.com/ai-nd-co/agent-tools/commit/a2a8e3445896565664d61197c163395a747709a0))
+
+### Bug Fixes
+
+* ignore torch imports in mypy ([c2c0894](https://github.com/ai-nd-co/agent-tools/commit/c2c0894f6c33ae4e8329866a8c53121c59c6b568))
+* improve queue navigation and tts speed controls ([6974098](https://github.com/ai-nd-co/agent-tools/commit/6974098ec5bd2d705e0f09b1d33a3abb6b1a0239))
+
 ## [0.2.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.1.3...py-v0.2.0) (2026-04-14)
 
 ### Features

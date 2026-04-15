@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import httpx
@@ -8,6 +9,7 @@ import pytest
 
 from agent_tools.codex_auth import load_auth_state
 from agent_tools.codex_private_api import (
+    PROMPT_CACHE_NAMESPACE,
     ClientSettings,
     CodexPrivateClient,
     CodexTransportError,
@@ -32,7 +34,7 @@ def test_build_transform_request_includes_reasoning_and_fast() -> None:
     assert request["input"][0]["role"] == "user"
     assert request["reasoning"]["effort"] == "medium"
     assert request["service_tier"] == "priority"
-    assert request["prompt_cache_key"] == "session-1"
+    assert request["prompt_cache_key"] == str(uuid.uuid5(PROMPT_CACHE_NAMESPACE, "rewrite"))
 
 
 def test_build_request_headers_sets_codex_fields() -> None:

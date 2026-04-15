@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from agent_tools.codex_config import ENV_SOURCE, read_string_env
-from agent_tools.controller_client import send_controller_command
+from agent_tools.codex_notify import dispatch_codex_notify
+from agent_tools.controller_client import (
+    ProcessingNotice,
+    send_controller_command,
+    start_processing_notice,
+)
+from agent_tools.cuda_install import install_cuda
+from agent_tools.cuda_runtime import SUPPORTED_CUDA_TRACKS, probe_cuda_runtime
+from agent_tools.hook_install import install_codex_integration
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
 from agent_tools.transformer import TransformOptions, transform_text
 from agent_tools.tts import SUPPORTED_LANGUAGES, synthesize_wav
@@ -28,6 +37,16 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ttsify(args)
     if args.command == "ui":
         return _run_ui(args)
+    if args.command == "install-codex-integration":
+        return _run_install_codex_integration(args)
+    if args.command == "install-codex-stop-hook":
+        return _run_install_codex_integration(args)
+    if args.command == "install-cuda":
+        return _run_install_cuda(args)
+    if args.command == "codex-notify-dispatch":
+        return _run_codex_notify_dispatch(args)
+    if args.command == "cuda-self-check":
+        return _run_cuda_self_check(args)
 
     parser.print_help()
     return 1
@@ -81,6 +100,43 @@ def build_parser() -> argparse.ArgumentParser:
 
     ui_parser = subparsers.add_parser("ui", help="Run or focus the desktop queue controller.")
     ui_parser.add_argument("--hidden", action="store_true", help=argparse.SUPPRESS)
+    ui_parser.add_argument("--quit", action="store_true", help="Stop the desktop queue controller.")
+
+    install_integration_parser = subparsers.add_parser(
+        "install-codex-integration",
+        help="Install the supported Codex audio integration for the current platform.",
+    )
+    install_integration_parser.add_argument("--codex-home", type=Path)
+
+    install_hook_parser = subparsers.add_parser(
+        "install-codex-stop-hook",
+        help="Install the Codex audio integration (compatibility alias).",
+    )
+    install_hook_parser.add_argument("--codex-home", type=Path)
+
+    install_cuda_parser = subparsers.add_parser(
+        "install-cuda",
+        help="Install a CUDA-enabled PyTorch build into this Python environment.",
+    )
+    install_cuda_parser.add_argument(
+        "--cuda-track",
+        choices=("auto",) + SUPPORTED_CUDA_TRACKS,
+        default="auto",
+    )
+    install_cuda_parser.add_argument("--no-validate", action="store_true")
+
+    notify_dispatch_parser = subparsers.add_parser(
+        "codex-notify-dispatch",
+        help=argparse.SUPPRESS,
+    )
+    notify_dispatch_parser.add_argument("payload_json")
+    notify_dispatch_parser.add_argument("--codex-home", type=Path)
+
+    cuda_self_check_parser = subparsers.add_parser(
+        "cuda-self-check",
+        help=argparse.SUPPRESS,
+    )
+    cuda_self_check_parser.add_argument("--json", action="store_true")
 
     return parser
 
@@ -104,70 +160,170 @@ def _run_transform(args: argparse.Namespace) -> int:
 
 def _run_tts(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
-    result = synthesize_wav(
-        input_text,
-        voice=args.voice,
-        language=args.language,
-        speed=args.speed,
-        device=args.device,
-    )
     source_label = args.source or read_string_env(ENV_SOURCE)
-    _handle_audio_output(
+    processing_notice = _maybe_start_processing_notice(
         output_mode=args.output_mode,
-        output_file=args.output_file,
-        data=result.wav,
-        raw_text=input_text,
-        tts_text=input_text,
         source_label=source_label,
-        voice=args.voice,
-        language=args.language,
-        speed=args.speed,
-        model=None,
-        reasoning_effort=None,
+        preview_text=input_text,
+        stage="Synthesizing audio",
     )
+    try:
+        result = synthesize_wav(
+            input_text,
+            voice=args.voice,
+            language=args.language,
+            speed=args.speed,
+            device=args.device,
+        )
+        _handle_audio_output(
+            output_mode=args.output_mode,
+            output_file=args.output_file,
+            data=result.wav,
+            raw_text=input_text,
+            tts_text=input_text,
+            source_label=source_label,
+            voice=args.voice,
+            language=args.language,
+            speed=args.speed,
+            model=None,
+            reasoning_effort=None,
+        )
+    finally:
+        processing_notice.finish()
     return 0
 
 
 def _run_ttsify(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
-    result = ttsify_text(
-        input_text,
-        TtsifyOptions(
-            model=args.model,
-            reasoning_effort=args.reasoning_effort,
-            fast=args.fast,
-            voice=args.voice,
-            language=args.language,
-            speed=args.speed,
-            device=args.device,
-            codex_home=args.codex_home,
-            base_url=args.base_url,
-            originator=args.originator,
-            timeout_seconds=args.timeout_seconds,
-        ),
-    )
     source_label = args.source or read_string_env(ENV_SOURCE)
-    _handle_audio_output(
+    processing_notice = _maybe_start_processing_notice(
         output_mode=args.output_mode,
-        output_file=args.output_file,
-        data=result.tts_result.wav,
-        raw_text=input_text,
-        tts_text=result.transformed_text,
         source_label=source_label,
-        voice=result.voice,
-        language=result.language,
-        speed=result.speed,
-        model=result.model,
-        reasoning_effort=result.reasoning_effort,
+        preview_text=input_text,
+        stage="Transforming for speech",
     )
+    try:
+        result = ttsify_text(
+            input_text,
+            TtsifyOptions(
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
+                fast=args.fast,
+                voice=args.voice,
+                language=args.language,
+                speed=args.speed,
+                device=args.device,
+                codex_home=args.codex_home,
+                base_url=args.base_url,
+                originator=args.originator,
+                timeout_seconds=args.timeout_seconds,
+            ),
+        )
+        _handle_audio_output(
+            output_mode=args.output_mode,
+            output_file=args.output_file,
+            data=result.tts_result.wav,
+            raw_text=input_text,
+            tts_text=result.transformed_text,
+            source_label=source_label,
+            voice=result.voice,
+            language=result.language,
+            speed=result.speed,
+            model=result.model,
+            reasoning_effort=result.reasoning_effort,
+        )
+    finally:
+        processing_notice.finish()
     return 0
 
 
 def _run_ui(args: argparse.Namespace) -> int:
-    action = "refresh" if args.hidden else "show"
+    action = "shutdown" if args.quit else "refresh" if args.hidden else "show"
     if send_controller_command(action):
         return 0
+    if args.quit:
+        return 0
     return run_ui(hidden=args.hidden)
+
+
+def _run_install_codex_integration(args: argparse.Namespace) -> int:
+    result = install_codex_integration(args.codex_home)
+    print(f"Installed Codex integration in {result.mode} mode.")
+    print(f"  config: {result.config_path}")
+    if result.notify_command is not None:
+        print(f"  notify command: {list(result.notify_command)}")
+        print(f"  notify log: {result.codex_home / 'notify_tts.log'}")
+        print(f"  child log: {result.codex_home / 'notify_tts_agent_tools.log'}")
+    if result.hooks_json_path is not None:
+        print(f"  hooks.json: {result.hooks_json_path}")
+    if result.hook_script_path is not None:
+        print(f"  script: {result.hook_script_path}")
+        print(f"  hook log: {result.codex_home / 'hooks' / 'stop_tts.log'}")
+        print(f"  child log: {result.codex_home / 'hooks' / 'stop_tts_agent_tools.log'}")
+    if result.backups:
+        print("  backups:")
+        for backup in result.backups:
+            print(f"    - {backup}")
+    return 0
+
+
+def _run_install_cuda(args: argparse.Namespace) -> int:
+    result = install_cuda(
+        cuda_track=args.cuda_track,
+        validate=not args.no_validate,
+    )
+    print("Installed CUDA-enabled torch for this Python environment.")
+    print(f"  python: {sys.executable}")
+    if result.detected_cuda_version is not None:
+        print(f"  detected runtime: {result.detected_cuda_version}")
+    print(f"  selected track: {result.selected_track}")
+    print(f"  install command: {list(result.install_command)}")
+    if result.validation_payload is not None:
+        print("  validation:")
+        for key in (
+            "ok",
+            "torch_version",
+            "torch_cuda_version",
+            "device_count",
+            "device_name",
+            "reason",
+            "warning_text",
+        ):
+            value = result.validation_payload.get(key)
+            if value not in (None, ""):
+                print(f"    {key}: {value}")
+    return 0
+
+
+def _run_codex_notify_dispatch(args: argparse.Namespace) -> int:
+    result = dispatch_codex_notify(args.payload_json, codex_home=args.codex_home)
+    success_statuses = {"queued", "duplicate", "ignored-event", "ignored-blank-message"}
+    return 0 if result.status in success_statuses else 1
+
+
+def _run_cuda_self_check(args: argparse.Namespace) -> int:
+    result = probe_cuda_runtime()
+    if args.json:
+        sys.stdout.write(result.to_json())
+        sys.stdout.write("\n")
+    else:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "ok": result.ok,
+                    "torch_version": result.torch_version,
+                    "torch_cuda_version": result.torch_cuda_version,
+                    "device_count": result.device_count,
+                    "device_name": result.device_name,
+                    "reason": result.reason,
+                    "warning_text": result.warning_text,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        sys.stdout.write("\n")
+    return 0 if result.ok else 1
 
 
 def _read_text_input(input_file: Path | None) -> str:
@@ -227,4 +383,21 @@ def _handle_audio_output(
             model=model,
             reasoning_effort=reasoning_effort,
         )
+    )
+
+
+def _maybe_start_processing_notice(
+    *,
+    output_mode: str,
+    source_label: str | None,
+    preview_text: str,
+    stage: str,
+)-> ProcessingNotice:
+    if output_mode != "play" or sys.platform != "win32":
+        return ProcessingNotice(progress_id="", available=False)
+    return start_processing_notice(
+        source_label=source_label,
+        preview_text=preview_text,
+        detail_text=preview_text,
+        stage=stage,
     )

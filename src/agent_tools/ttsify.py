@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
+from time import perf_counter
 
 from agent_tools.codex_config import (
     DEFAULT_TTSIFY_MODEL,
@@ -48,9 +49,20 @@ class TtsifyResult:
     language: str | None
     speed: float
     device: str
+    resolved_device: str = "cpu"
+    device_fallback_reason: str | None = None
+    metrics: TtsifyMetrics = field(default_factory=lambda: TtsifyMetrics())
+
+
+@dataclass(frozen=True)
+class TtsifyMetrics:
+    transform_ms: float = 0.0
+    tts_ms: float = 0.0
+    total_ms: float = 0.0
 
 
 def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
+    total_started = perf_counter()
     prompt_text = load_ttsify_prompt()
     voice = options.voice or read_string_env(ENV_KOKORO_VOICE) or DEFAULT_TTSIFY_VOICE
     language = options.language or read_string_env(ENV_KOKORO_LANGUAGE)
@@ -70,7 +82,10 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         originator=options.originator,
         timeout_seconds=options.timeout_seconds,
     )
+    transform_started = perf_counter()
     transform_result = transform_text(input_text, transform_options)
+    transform_ms = (perf_counter() - transform_started) * 1000.0
+    tts_started = perf_counter()
     tts_result = synthesize_wav(
         transform_result.text,
         voice=voice,
@@ -78,6 +93,8 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         speed=speed,
         device=device,
     )
+    tts_ms = (perf_counter() - tts_started) * 1000.0
+    total_ms = (perf_counter() - total_started) * 1000.0
     return TtsifyResult(
         transformed_text=transform_result.text,
         transform_result=transform_result,
@@ -88,6 +105,13 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         language=language,
         speed=speed,
         device=device,
+        resolved_device=tts_result.resolved_device,
+        device_fallback_reason=tts_result.device_fallback_reason,
+        metrics=TtsifyMetrics(
+            transform_ms=transform_ms,
+            tts_ms=tts_ms,
+            total_ms=total_ms,
+        ),
     )
 
 

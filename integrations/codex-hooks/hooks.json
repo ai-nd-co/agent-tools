@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc '$HOME/.codex/hooks/stop_tts.sh'",
+            "timeout": 30,
+            "statusMessage": "Queueing final assistant message for TTS"
+          }
+        ]
+      }
+    ]
+  }
+}

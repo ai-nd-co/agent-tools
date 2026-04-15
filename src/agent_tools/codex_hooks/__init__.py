@@ -1,0 +1,2 @@
+"""Packaged Codex hook templates."""
+

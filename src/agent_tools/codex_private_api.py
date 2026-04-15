@@ -18,6 +18,7 @@ from agent_tools.codex_auth import (
 from agent_tools.codex_config import build_user_agent
 
 ReasoningEffort = str
+PROMPT_CACHE_NAMESPACE = uuid.UUID("75f0f17d-8430-5a44-a76d-678d5aee9c5c")
 
 
 class CodexTransportError(RuntimeError):
@@ -146,6 +147,7 @@ def build_transform_request(
     reasoning_effort: ReasoningEffort | None,
     fast: bool,
 ) -> dict[str, Any]:
+    prompt_cache_key = str(uuid.uuid5(PROMPT_CACHE_NAMESPACE, system_prompt))
     request: dict[str, Any] = {
         "model": model,
         "instructions": system_prompt,
@@ -162,7 +164,7 @@ def build_transform_request(
         "store": False,
         "stream": True,
         "include": [],
-        "prompt_cache_key": session_id,
+        "prompt_cache_key": prompt_cache_key,
     }
     if reasoning_effort:
         request["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}

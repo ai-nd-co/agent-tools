@@ -204,6 +204,18 @@ def list_history_items(conn: sqlite3.Connection, limit: int = 50) -> list[QueueI
     return [row_to_item(row) for row in rows]
 
 
+def list_all_items(conn: sqlite3.Connection, limit: int = 100) -> list[QueueItem]:
+    rows = conn.execute(
+        """
+        SELECT * FROM queue_items
+        ORDER BY queue_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [row_to_item(row) for row in rows]
+
+
 def update_status(
     conn: sqlite3.Connection,
     item_id: str,
@@ -258,4 +270,3 @@ def row_to_item(row: sqlite3.Row) -> QueueItem:
 
 def utc_now() -> str:
     return datetime.now(tz=UTC).isoformat()
-

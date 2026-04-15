@@ -47,7 +47,11 @@ agent-tools = "agent_tools.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_tools"]
-include = ["src/agent_tools/prompts/*.md"]
+include = [
+  "src/agent_tools/prompts/*.md",
+  "src/agent_tools/codex_hooks/*.json",
+  "src/agent_tools/codex_hooks/*.sh",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [

@@ -52,6 +52,18 @@ UI-enabled install:
 pip install "ai-nd-co-agent-tools[ui]"
 ```
 
+Install a CUDA-enabled PyTorch runtime for this CLI environment:
+
+```bash
+agent-tools install-cuda
+```
+
+Pass an explicit track if you do not want auto-detection:
+
+```bash
+agent-tools install-cuda --cuda-track cu130
+```
+
 ## Usage
 
 ### Single-command path: `ttsify`
@@ -84,8 +96,28 @@ CLI flags override env vars.
 Queue for playback on Windows:
 
 ```bash
-echo "Turn this note into natural spoken narration." | agent-tools ttsify --device cpu --output-mode play --source agent-a
+echo "Turn this note into natural spoken narration." | agent-tools ttsify --output-mode play --source agent-a
 ```
+
+### Codex integration
+
+Install the supported Codex integration for the current platform:
+
+```bash
+agent-tools install-codex-integration
+```
+
+- On native Windows Codex, this installs a `notify` command in `~/.codex/config.toml`.
+- On non-Windows, this keeps the Stop-hook integration path.
+- The compatibility alias `agent-tools install-codex-stop-hook` remains available.
+
+Windows debug logs:
+
+- `~/.codex/notify_tts.log`
+- `~/.codex/notify_tts_agent_tools.log`
+
+On Windows, Codex passes the notify payload as the final JSON argv argument to the installed
+Python command. No PowerShell or bash wrapper is used.
 
 This enqueues the generated audio, starts the background controller if needed, and returns
 immediately.
@@ -116,7 +148,7 @@ echo "Hello world." | agent-tools tts --output-file hello.wav
 Queue already-prepared speech on Windows:
 
 ```bash
-echo "Hello world." | agent-tools tts --device cpu --output-mode play --source agent-a
+echo "Hello world." | agent-tools tts --output-mode play --source agent-a
 ```
 
 ### Desktop controller UI
@@ -145,8 +177,11 @@ cat input.txt | agent-tools transform \
 - in play mode, audio is queued into a single background controller process.
 - `agent-tools ui` launches or focuses the popup/tray controller window.
 - controller shortcuts: `Space` pause/resume, `Esc` stop, `Ctrl+R` replay, `Ctrl+N` next.
-- `tts --device auto` prefers CUDA and falls back to CPU.
+- `tts` and `ttsify` default to `--device auto`.
+- auto device selection uses a real CUDA probe, not just `torch.cuda.is_available()`.
+- `agent-tools install-cuda` installs a CUDA-enabled PyTorch build into the current Python environment and validates it in a fresh subprocess by default.
 - `transform` refreshes ChatGPT tokens when the Codex backend returns `401`.
+- Native Windows Codex uses `notify`; `hooks.json` lifecycle hooks are not used there.
 - semantic-release now owns future Python package version bumps and `py-v*` tags.
 
 ## CPU performance

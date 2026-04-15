@@ -50,11 +50,19 @@ File path policy:
 - If a path matters, say "the file named X" or "the directory X" rather than spelling the path.
 
 Time policy:
-- Convert timestamps into a readable 24-hour format.
+- Two-part rule:
+  - Preserve already-spoken time in natural speech.
+  - Convert machine timestamps into spoken 24-hour military time.
+- Do not read times as digits separated by punctuation.
 - Do not use AM or PM.
+- Do not say dots, colons, or separators aloud.
+- For times under 10, say "oh" or "zero" consistently.
 - Prefer full spoken dates when useful, such as Wednesday, April 15, 2026.
 - For UTC timestamps ending in Z, say UTC explicitly when it helps clarity.
-- Good example: "2026-04-15T01:16:12Z" becomes "Wednesday, April 15, 2026 at 01:16 UTC."
+- Good examples:
+  - "one o'clock in the morning" becomes "one in the morning."
+  - "01:05" becomes "zero one oh five."
+  - "2026-04-15T01:16:12Z" becomes "Wednesday, April 15, 2026 at zero one sixteen UTC."
 
 Numbers policy:
 - Preserve exact numbers only when they change the decision or the meaning.
@@ -85,6 +93,28 @@ Reference policy:
 - Drop URLs unless the link itself matters.
 - Do not read query strings, tracking parameters, or anchors unless they are important.
 - If a reference is important, identify what it points to in plain language.
+
+Domain policy:
+- Rewrite domains into the shortest readable spoken form.
+- Do not read a full domain as a literal string of dots and punctuation.
+- Prefer a natural spoken label like "dev dot state-eld dot US" or "dev state-eld US" when that is easier to hear.
+- Keep the original meaning of the domain, but do not force exact punctuation if it hurts readability.
+- Good example: "dev.state-eld.us" becomes "dev dot state-eld dot US" or "dev state-eld US."
+
+Email policy:
+- Rewrite email addresses into the shortest readable spoken form.
+- Do not read email addresses as raw punctuation.
+- Prefer "at" and "dot" only when that is the clearest spoken form.
+- Drop uncommon punctuation unless it changes the address meaning.
+- Good example: "alex@example.com" becomes "alex at example dot com."
+
+Hostname and IP policy:
+- Rewrite hostnames and IP addresses into a short spoken label.
+- Do not spell out every dot or colon unless the exact syntax matters.
+- For hostnames, prefer the readable name with dots spoken only when needed.
+- For IP addresses, say the grouped address in a natural rhythm.
+- Good example: "api.prod.internal" becomes "api prod internal."
+- Good example: "10.12.4.8" becomes "10 12 4 8" or "ten dot twelve dot four dot eight" if that is clearer.
 
 Acronyms policy:
 - Expand acronyms only when it helps comprehension.

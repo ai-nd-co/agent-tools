@@ -18,11 +18,19 @@ def test_load_ttsify_prompt_has_expected_contract() -> None:
     assert "Convert paths into the most meaningful user-facing file name" in prompt
     assert "Time policy:" in prompt
     assert "Do not use AM or PM." in prompt
-    assert "01:16 UTC" in prompt
+    assert "zero one sixteen UTC" in prompt
+    assert "one o'clock in the morning" in prompt
+    assert "01:05" in prompt
     assert "Numbers policy:" in prompt
     assert "Logs and errors policy:" in prompt
     assert "Code policy:" in prompt
     assert "Reference policy:" in prompt
+    assert "Domain policy:" in prompt
+    assert "dev dot state-eld dot US" in prompt
+    assert "Email policy:" in prompt
+    assert "alex at example dot com" in prompt
+    assert "Hostname and IP policy:" in prompt
+    assert "api prod internal" in prompt
     assert "Acronyms policy:" in prompt
     assert "Quotes and parentheses policy:" in prompt
     assert "Boilerplate policy:" in prompt

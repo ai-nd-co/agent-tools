@@ -10,7 +10,23 @@ from agent_tools.ttsify import TtsifyOptions, load_ttsify_prompt, ttsify_text
 
 def test_load_ttsify_prompt_has_expected_contract() -> None:
     prompt = load_ttsify_prompt()
-    assert "TTS system" in prompt
+    assert "Table policy:" in prompt
+    assert "File path policy:" in prompt
+    assert "Rewrite any path to the shortest meaningful spoken label." in prompt
+    assert "Do not speak literal slash characters" in prompt
+    assert "do not read every cell verbatim" in prompt.lower()
+    assert "Convert paths into the most meaningful user-facing file name" in prompt
+    assert "Time policy:" in prompt
+    assert "Do not use AM or PM." in prompt
+    assert "01:16 UTC" in prompt
+    assert "Numbers policy:" in prompt
+    assert "Logs and errors policy:" in prompt
+    assert "Code policy:" in prompt
+    assert "Reference policy:" in prompt
+    assert "Acronyms policy:" in prompt
+    assert "Quotes and parentheses policy:" in prompt
+    assert "Boilerplate policy:" in prompt
+    assert "Core narration rule:" in prompt
     assert "Output only the final TTS-ready text." in prompt
 
 

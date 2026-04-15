@@ -1,3 +1,9 @@
+## [0.4.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.3.0...py-v0.4.0) (2026-04-15)
+
+### Features
+
+* refine TTS time guidance ([3834ae8](https://github.com/ai-nd-co/agent-tools/commit/3834ae86e08f4b5083b4fdecd585b9aa7c299a47))
+
 ## [0.3.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.2.0...py-v0.3.0) (2026-04-15)
 
 ### Features

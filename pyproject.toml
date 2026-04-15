@@ -7,7 +7,7 @@ name = "ai-nd-co-agent-tools"
 version = "0.4.0"
 description = "Codex-backed text transformation and Kokoro TTS command-line tools."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ai-nd-co" }]
 keywords = ["codex", "tts", "kokoro", "cli", "speech"]
@@ -17,6 +17,7 @@ classifiers = [
   "Intended Audience :: Developers",
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Multimedia :: Sound/Audio :: Speech",
   "Topic :: Software Development :: Libraries :: Python Modules",
@@ -72,13 +73,13 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_return_any = true

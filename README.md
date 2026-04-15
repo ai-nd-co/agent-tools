@@ -28,7 +28,7 @@ That means:
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.11+
 - local Codex already logged in via ChatGPT
 - `espeak-ng` installed for best Kokoro English fallback behavior
 

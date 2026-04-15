@@ -58,7 +58,7 @@ UI-enabled install:
 pip install "ai-nd-co-agent-tools[ui]"
 ```
 
-Install a CUDA-enabled PyTorch runtime for this CLI environment:
+Install a CUDA-enabled PyTorch stack for this CLI environment:
 
 ```bash
 agent-tools install-cuda
@@ -185,7 +185,7 @@ cat input.txt | agent-tools transform \
 - controller shortcuts: `Space` pause/resume, `Esc` stop, `Ctrl+R` replay, `Ctrl+N` next.
 - `tts` and `ttsify` default to `--device auto`.
 - auto device selection uses a real CUDA probe, not just `torch.cuda.is_available()`.
-- `agent-tools install-cuda` installs a CUDA-enabled PyTorch build into the current Python environment and validates it in a fresh subprocess by default.
+- `agent-tools install-cuda` reinstalls the full PyTorch stack (`torch`, `torchvision`, `torchaudio`) into the current Python environment and validates the full Kokoro import chain in a fresh subprocess by default.
 - `transform` refreshes ChatGPT tokens when the Codex backend returns `401`.
 - Native Windows Codex uses `notify`; `hooks.json` lifecycle hooks are not used there.
 - semantic-release now owns future Python package version bumps and `py-v*` tags.
@@ -219,3 +219,4 @@ python scripts/benchmark_tts_cpu.py
 - Expired auth: rerun `codex login` if refresh fails permanently
 - Missing `espeak-ng`: install it for better English fallback behavior
 - Slow first run: expected; Kokoro downloads voices/models and initializes the pipeline
+- After changing Python versions for the interpreter that runs `agent-tools`, rerun `agent-tools install-cuda` in that same interpreter to repair the PyTorch stack for Kokoro

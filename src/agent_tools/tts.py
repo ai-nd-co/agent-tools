@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import platform
+import sys
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any
@@ -50,7 +52,7 @@ def synthesize_wav(
         raise ValueError(f"Unsupported Kokoro language code: {lang_code}")
 
     import_started = perf_counter()
-    from kokoro import KPipeline
+    KPipeline = _load_kokoro_pipeline()
     import_ms = (perf_counter() - import_started) * 1000.0
 
     device_resolution = resolve_torch_device(device)
@@ -113,3 +115,17 @@ def _extract_audio_chunk(result: Any) -> np.ndarray | None:
     if hasattr(audio, "detach"):
         audio = audio.detach().cpu().numpy()
     return np.asarray(audio, dtype=np.float32)
+
+
+def _load_kokoro_pipeline() -> Any:
+    try:
+        from kokoro import KPipeline
+    except Exception as exc:
+        raise RuntimeError(
+            "Kokoro TTS could not be imported in this Python environment. "
+            "The active PyTorch stack is likely missing or mismatched for this interpreter. "
+            "Re-run `agent-tools install-cuda` with the same Python executable and retry. "
+            f"python={sys.executable} python_version={platform.python_version()} "
+            f"original_error={exc}"
+        ) from exc
+    return KPipeline

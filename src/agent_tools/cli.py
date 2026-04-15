@@ -19,7 +19,7 @@ from agent_tools.controller_client import (
     start_processing_notice,
 )
 from agent_tools.cuda_install import install_cuda
-from agent_tools.cuda_runtime import SUPPORTED_CUDA_TRACKS, probe_cuda_runtime
+from agent_tools.cuda_runtime import SUPPORTED_CUDA_TRACKS, probe_tts_runtime
 from agent_tools.hook_install import install_codex_integration
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
 from agent_tools.transformer import TransformOptions, transform_text
@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_cuda_parser = subparsers.add_parser(
         "install-cuda",
-        help="Install a CUDA-enabled PyTorch build into this Python environment.",
+        help="Install a CUDA-enabled PyTorch stack into this Python environment.",
     )
     install_cuda_parser.add_argument(
         "--cuda-track",
@@ -281,8 +281,11 @@ def _run_install_cuda(args: argparse.Namespace) -> int:
         cuda_track=args.cuda_track,
         validate=not args.no_validate,
     )
-    print("Installed CUDA-enabled torch for this Python environment.")
-    print(f"  python: {sys.executable}")
+    print("Installed CUDA-enabled PyTorch stack for this Python environment.")
+    print(f"  python: {result.python_executable}")
+    print(f"  python_version: {result.python_version}")
+    print(f"  platform: {result.platform}")
+    print(f"  machine: {result.machine}")
     if result.detected_cuda_version is not None:
         print(f"  detected runtime: {result.detected_cuda_version}")
     print(f"  selected track: {result.selected_track}")
@@ -291,8 +294,18 @@ def _run_install_cuda(args: argparse.Namespace) -> int:
         print("  validation:")
         for key in (
             "ok",
+            "cuda_ok",
+            "tts_stack_ok",
+            "python_executable",
+            "python_version",
+            "platform",
+            "machine",
             "torch_version",
             "torch_cuda_version",
+            "torchvision_version",
+            "torchaudio_version",
+            "transformers_version",
+            "kokoro_version",
             "device_count",
             "device_name",
             "reason",
@@ -311,7 +324,7 @@ def _run_codex_notify_dispatch(args: argparse.Namespace) -> int:
 
 
 def _run_cuda_self_check(args: argparse.Namespace) -> int:
-    result = probe_cuda_runtime()
+    result = probe_tts_runtime()
     if args.json:
         sys.stdout.write(result.to_json())
         sys.stdout.write("\n")
@@ -320,8 +333,18 @@ def _run_cuda_self_check(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "ok": result.ok,
+                    "cuda_ok": result.cuda_ok,
+                    "tts_stack_ok": result.tts_stack_ok,
+                    "python_executable": result.python_executable,
+                    "python_version": result.python_version,
+                    "platform": result.platform,
+                    "machine": result.machine,
                     "torch_version": result.torch_version,
                     "torch_cuda_version": result.torch_cuda_version,
+                    "torchvision_version": result.torchvision_version,
+                    "torchaudio_version": result.torchaudio_version,
+                    "transformers_version": result.transformers_version,
+                    "kokoro_version": result.kokoro_version,
                     "device_count": result.device_count,
                     "device_name": result.device_name,
                     "reason": result.reason,

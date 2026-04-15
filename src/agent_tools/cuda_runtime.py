@@ -9,6 +9,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from functools import lru_cache
+from importlib import metadata as importlib_metadata
 from time import perf_counter
 
 SUPPORTED_CUDA_TRACKS = ("cu130", "cu129", "cu128", "cu126", "cu124", "cu121")
@@ -34,6 +35,30 @@ class CudaProbeResult:
     reason: str | None = None
     torch_version: str | None = None
     torch_cuda_version: str | None = None
+    device_count: int = 0
+    device_name: str | None = None
+    warning_text: str | None = None
+
+    def to_json(self) -> str:
+        return json.dumps(asdict(self), indent=2, sort_keys=True)
+
+
+@dataclass(frozen=True)
+class TtsRuntimeProbeResult:
+    ok: bool
+    cuda_ok: bool
+    tts_stack_ok: bool
+    python_executable: str
+    python_version: str
+    platform: str
+    machine: str
+    reason: str | None = None
+    torch_version: str | None = None
+    torch_cuda_version: str | None = None
+    torchvision_version: str | None = None
+    torchaudio_version: str | None = None
+    transformers_version: str | None = None
+    kokoro_version: str | None = None
     device_count: int = 0
     device_name: str | None = None
     warning_text: str | None = None
@@ -127,6 +152,8 @@ def build_cuda_install_command(
         "--index-url",
         f"https://download.pytorch.org/whl/{cuda_track}",
         "torch",
+        "torchvision",
+        "torchaudio",
     ]
 
 
@@ -179,6 +206,36 @@ def resolve_torch_device(requested_device: str) -> DeviceResolution:
 
 def probe_cuda_runtime() -> CudaProbeResult:
     return _probe_cuda_runtime_cached()
+
+
+def probe_tts_runtime() -> TtsRuntimeProbeResult:
+    cuda_probe = probe_cuda_runtime()
+    tts_probe = _probe_tts_stack()
+    warning_text = _merge_detail_text(cuda_probe.warning_text, tts_probe.warning_text)
+    reason = None
+    if not cuda_probe.ok:
+        reason = cuda_probe.reason
+    elif not tts_probe.ok:
+        reason = tts_probe.reason
+    return TtsRuntimeProbeResult(
+        ok=cuda_probe.ok and tts_probe.ok,
+        cuda_ok=cuda_probe.ok,
+        tts_stack_ok=tts_probe.ok,
+        python_executable=sys.executable,
+        python_version=platform.python_version(),
+        platform=sys.platform,
+        machine=platform.machine(),
+        reason=reason,
+        torch_version=cuda_probe.torch_version or _distribution_version("torch"),
+        torch_cuda_version=cuda_probe.torch_cuda_version,
+        torchvision_version=_distribution_version("torchvision"),
+        torchaudio_version=_distribution_version("torchaudio"),
+        transformers_version=_distribution_version("transformers"),
+        kokoro_version=_distribution_version("kokoro"),
+        device_count=cuda_probe.device_count,
+        device_name=cuda_probe.device_name,
+        warning_text=warning_text,
+    )
 
 
 def clear_cuda_probe_cache() -> None:
@@ -253,6 +310,42 @@ def _probe_cuda_runtime_cached() -> CudaProbeResult:
         )
 
 
+@dataclass(frozen=True)
+class _ImportProbeResult:
+    ok: bool
+    reason: str | None = None
+    warning_text: str | None = None
+
+
+def _probe_tts_stack() -> _ImportProbeResult:
+    warning_text: str | None = None
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            import torchaudio  # noqa: F401
+            import torchvision  # noqa: F401
+            import transformers  # noqa: F401
+            from kokoro import KPipeline  # noqa: F401
+
+            warning_text = _collect_warning_text(caught)
+            return _ImportProbeResult(ok=True, warning_text=warning_text)
+    except Exception as exc:
+        detail = warning_text or ""
+        suffix = f" Warning: {detail}" if detail else ""
+        return _ImportProbeResult(
+            ok=False,
+            reason=f"{exc}{suffix}",
+            warning_text=warning_text,
+        )
+
+
+def _distribution_version(name: str) -> str | None:
+    try:
+        return importlib_metadata.version(name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+
+
 def _collect_warning_text(caught: list[warnings.WarningMessage]) -> str | None:
     messages: list[str] = []
     for warning in caught:
@@ -262,6 +355,13 @@ def _collect_warning_text(caught: list[warnings.WarningMessage]) -> str | None:
     if not messages:
         return None
     return " | ".join(messages)
+
+
+def _merge_detail_text(*parts: str | None) -> str | None:
+    merged = [part for part in parts if part]
+    if not merged:
+        return None
+    return " | ".join(merged)
 
 
 def _parse_version_tuple(value: str) -> tuple[int, int]:

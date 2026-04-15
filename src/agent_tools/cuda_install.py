@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -18,6 +19,10 @@ from agent_tools.cuda_runtime import (
 class InstallCudaResult:
     selected_track: str
     detected_cuda_version: str | None
+    python_executable: str
+    python_version: str
+    platform: str
+    machine: str
     install_command: tuple[str, ...]
     validation_payload: dict[str, object] | None
 
@@ -49,7 +54,10 @@ def install_cuda(
     install_result = subprocess.run(install_command, check=False)
     if install_result.returncode != 0:
         raise RuntimeError(
-            f"CUDA torch installation failed with exit code {install_result.returncode}."
+            "PyTorch stack installation failed for the active Python interpreter "
+            f"{sys.executable} (Python {platform.python_version()}, "
+            f"{sys.platform}/{platform.machine()}) with exit code "
+            f"{install_result.returncode}."
         )
 
     validation_payload: dict[str, object] | None = None
@@ -64,6 +72,10 @@ def install_cuda(
     return InstallCudaResult(
         selected_track=selected_track,
         detected_cuda_version=detected_cuda_version,
+        python_executable=sys.executable,
+        python_version=platform.python_version(),
+        platform=sys.platform,
+        machine=platform.machine(),
         install_command=install_command,
         validation_payload=validation_payload,
     )

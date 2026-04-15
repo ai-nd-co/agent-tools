@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import builtins
 import sys
 import types
 import wave
 from io import BytesIO
 
 import numpy as np
+import pytest
 
 from agent_tools.audio import KOKORO_SAMPLE_RATE, concat_audio, wav_bytes
 from agent_tools.cuda_runtime import DeviceResolution
@@ -66,3 +68,21 @@ def test_synthesize_wav_uses_resolved_device(monkeypatch: object) -> None:
     assert result.resolved_device == "cpu"
     assert result.device_fallback_reason == "cuda probe failed"
     assert result.metrics.device_probe_ms == 1.25
+
+
+def test_synthesize_wav_reports_actionable_kokoro_import_error(
+    monkeypatch: object,
+) -> None:
+    import agent_tools.tts as tts_module
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object):
+        if name == "kokoro":
+            raise ModuleNotFoundError("broken kokoro import")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(RuntimeError, match="Re-run `agent-tools install-cuda`"):
+        tts_module._load_kokoro_pipeline()

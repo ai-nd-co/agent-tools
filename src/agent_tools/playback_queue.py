@@ -24,6 +24,12 @@ class QueuePlaybackRequest:
 
 def enqueue_for_playback(request: QueuePlaybackRequest) -> QueueItem:
     ensure_runtime_dirs()
+    if not ensure_controller_running(show_window=False, detached=True):
+        raise RuntimeError(
+            "AgentTools controller playback is unavailable. "
+            "Install with: pip install \"ai-nd-co-agent-tools[ui]\" "
+            "and ensure Qt multimedia audio support is available."
+        )
     audio_path = audio_cache_dir() / f"{uuid4()}.wav"
     audio_path.write_bytes(request.wav_data)
     duration_ms = wav_duration_ms(request.wav_data)
@@ -43,5 +49,4 @@ def enqueue_for_playback(request: QueuePlaybackRequest) -> QueueItem:
                 reasoning_effort=request.reasoning_effort,
             ),
         )
-    ensure_controller_running(show_window=False, detached=True)
     return item

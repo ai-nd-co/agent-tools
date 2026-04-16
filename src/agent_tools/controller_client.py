@@ -100,13 +100,13 @@ def start_processing_notice(
 def ensure_controller_running(*, show_window: bool, detached: bool) -> bool:
     action = "show" if show_window else "refresh"
     if send_controller_command(action):
-        return False
+        return True
     launch_controller(hidden=not show_window, detached=detached)
     for _ in range(20):
         if send_controller_command(action):
             return True
         time.sleep(0.1)
-    return True
+    return False
 
 def launch_controller(*, hidden: bool, detached: bool) -> None:
     args = [sys.executable, "-m", "agent_tools", "ui"]

@@ -5,11 +5,12 @@ import sys
 import types
 import wave
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from agent_tools.audio import KOKORO_SAMPLE_RATE, concat_audio, wav_bytes
+from agent_tools.audio import KOKORO_SAMPLE_RATE, concat_audio, play_wav_blocking, wav_bytes
 from agent_tools.cuda_runtime import DeviceResolution
 from agent_tools.tts import infer_language_from_voice, synthesize_wav
 
@@ -86,3 +87,67 @@ def test_synthesize_wav_reports_actionable_kokoro_import_error(
 
     with pytest.raises(RuntimeError, match="Re-run `agent-tools install-cuda`"):
         tts_module._load_kokoro_pipeline()
+
+
+def test_play_wav_blocking_uses_winsound_backend(monkeypatch: object) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeWinSound:
+        SND_MEMORY = 1
+
+        @staticmethod
+        def PlaySound(data: bytes, flags: int) -> None:
+            captured["data"] = data
+            captured["flags"] = flags
+
+    monkeypatch.setitem(__import__("sys").modules, "winsound", FakeWinSound)
+
+    play_wav_blocking(b"WAV", backend="winsound")
+
+    assert captured == {"data": b"WAV", "flags": 1}
+
+
+def test_play_wav_blocking_uses_external_player_for_unix_backend(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.audio as audio_module
+
+    output_path = tmp_path / "out.wav"
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            captured["wait_timeout"] = timeout
+            return 0
+
+    def fake_popen(command: list[str]) -> FakeProcess:
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(audio_module.subprocess, "Popen", fake_popen)
+
+    play_wav_blocking(b"WAV", backend="ffplay", output_path=output_path)
+
+    assert output_path.read_bytes() == b"WAV"
+    assert captured["command"] == ["ffplay", "-nodisp", "-autoexit", str(output_path)]
+
+
+def test_play_wav_blocking_raises_when_player_fails(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.audio as audio_module
+
+    class FakeProcess:
+        returncode = 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+    monkeypatch.setattr(audio_module.subprocess, "Popen", lambda _command: FakeProcess())
+
+    with pytest.raises(RuntimeError, match="ffplay exited with status 1"):
+        play_wav_blocking(b"WAV", backend="ffplay", output_path=tmp_path / "out.wav")

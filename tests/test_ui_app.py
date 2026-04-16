@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_tools.agent_integration import AgentIntegrationStatus
 from agent_tools.claude_integration import ClaudeIntegrationStatus
 from agent_tools.codex_integration import CodexIntegrationStatus
 from agent_tools.queue_db import STATUS_COMPLETED, STATUS_QUEUED, STATUS_STOPPED, QueueItem
 from agent_tools.ui_app import (
     ProcessingItem,
+    _ensure_audio_outputs_available,
     _load_preferred_transform_provider,
     _save_preferred_transform_provider,
     clamp_tts_speed,
@@ -256,3 +259,8 @@ def test_codex_install_panel_hidden_when_installed() -> None:
     status = _make_agent_status(enabled=True, install_state="installed")
 
     assert should_show_codex_install_panel(status) is False
+
+
+def test_ensure_audio_outputs_available_requires_backend() -> None:
+    with pytest.raises(RuntimeError, match="Qt audio output backend"):
+        _ensure_audio_outputs_available(0)

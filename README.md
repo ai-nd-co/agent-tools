@@ -44,6 +44,21 @@ That means:
 - local Claude Code CLI installed if you want Claude-backed transforms or Claude auto-TTS integration
 - `espeak-ng` installed for best Kokoro English fallback behavior
 
+## Platform support
+
+| OS | `transform` | `tts` / `ttsify` write mode | `tts` / `ttsify` play mode | Auto-TTS hooks | `agent-tools ui` |
+|---|---|---|---|---|---|
+| Windows | supported | supported | supported through the desktop controller queue | supported (`notify` for Codex, Stop hook for Claude) | supported with `PySide6` |
+| Linux | supported | supported | supported when `paplay`, `aplay`, or `ffplay` is available on `PATH` | supported through Stop hooks using the same CLI play path | supported with `PySide6` and a working Qt audio backend |
+| macOS | supported | supported | supported when `afplay` or `ffplay` is available on `PATH` | supported through Stop hooks using the same CLI play path | supported with `PySide6` and a working Qt audio backend |
+
+AgentTools deliberately uses two playback models:
+
+- **Windows**: `--output-mode play` queues audio into the desktop controller.
+- **Linux/macOS**: `--output-mode play` uses direct local playback from the CLI or hook process.
+
+The queue database, controller socket protocol, runtime directories, and PySide6 controller code are cross-platform, but Unix CLI and hook playback intentionally stay on the direct-play path so they do not require the optional UI dependency.
+
 ## Install
 
 ```bash
@@ -63,6 +78,23 @@ UI-enabled install:
 ```bash
 pip install "ai-nd-co-agent-tools[ui]"
 ```
+
+Linux playback helpers:
+
+- PulseAudio / PipeWire: `paplay`
+- ALSA: `aplay` (usually from `alsa-utils`)
+- FFmpeg fallback: `ffplay`
+
+Example Debian/Ubuntu packages:
+
+```bash
+sudo apt install espeak-ng ffmpeg alsa-utils pulseaudio-utils
+```
+
+macOS playback helpers:
+
+- `afplay` is normally available by default
+- `ffplay` is an optional fallback if you already install FFmpeg
 
 Install a CUDA-enabled PyTorch stack for this CLI environment:
 
@@ -116,7 +148,7 @@ Claude Code transform models are intentionally limited to:
 
 CLI flags override env vars.
 
-Queue for playback on Windows:
+Play immediately on Windows, Linux, or macOS:
 
 ```bash
 echo "Turn this note into natural spoken narration." | agent-tools ttsify --output-mode play --source agent-a
@@ -137,8 +169,8 @@ agent-tools install-codex-integration
 agent-tools install-claude-integration
 ```
 
-- On native Windows Codex, this installs a `notify` command in `~/.codex/config.toml`.
-- On non-Windows, this keeps the Stop-hook integration path.
+- On native Windows Codex, this installs a `notify` command in `~/.codex/config.toml` and uses the controller queue at runtime.
+- On non-Windows, Codex uses the Stop-hook integration path and the hook script runs `agent-tools ttsify --output-mode play`.
 - Claude Code integration installs an AgentTools `Stop` hook into `~/.claude/settings.json`
   and writes the hook script to `~/.claude/agent-tools/stop_tts.sh`.
 - The compatibility alias `agent-tools install-codex-stop-hook` remains available.
@@ -215,7 +247,7 @@ Important limitation:
 echo "Hello world." | agent-tools tts --output-file hello.wav
 ```
 
-Queue already-prepared speech on Windows:
+Play already-prepared speech:
 
 ```bash
 echo "Hello world." | agent-tools tts --output-mode play --source agent-a
@@ -229,6 +261,14 @@ agent-tools ui
 
 If the controller is already running, this focuses the existing window instead of starting a
 second process.
+
+The UI is optional and requires:
+
+- `pip install "ai-nd-co-agent-tools[ui]"`
+- a working Qt multimedia/audio backend
+
+If PySide6 is installed but Qt cannot find any audio output backend, `agent-tools ui` fails with
+an explicit runtime error instead of silently pretending playback support exists.
 
 The controller behavior is:
 
@@ -255,8 +295,9 @@ cat input.txt | agent-tools transform \
 - `ttsify` is the recommended end-user path; `transform` and `tts` remain available as building blocks.
 - `transform` reads stdin by default and writes plain text to stdout.
 - `tts` reads stdin by default and writes WAV bytes to stdout unless `--output-file` is set.
-- `tts` and `ttsify` support `--output-mode play` on Windows.
-- in play mode, audio is queued into a single background controller process.
+- `tts` and `ttsify` support `--output-mode play` on Windows, Linux, and macOS.
+- on Windows, play mode queues audio into a single background controller process.
+- on Linux and macOS, play mode uses direct playback from the current CLI or hook process.
 - `agent-tools ui` launches or focuses the popup/tray controller window.
 - controller shortcuts: `Space` pause/resume, `Esc` stop, `Ctrl+R` replay, `Ctrl+N` next.
 - `tts` and `ttsify` default to `--device auto`.
@@ -296,5 +337,14 @@ python scripts/benchmark_tts_cpu.py
 - Missing `~/.codex/auth.json`: run `codex login`
 - Expired auth: rerun `codex login` if refresh fails permanently
 - Missing `espeak-ng`: install it for better English fallback behavior
+- Linux play mode says no backend/player was found: install `pulseaudio-utils` (`paplay`), `alsa-utils` (`aplay`), or `ffmpeg` (`ffplay`) and retry
+- `agent-tools ui` says no Qt audio output backend is available: install the `ui` extra and ensure your OS audio stack is present and working (PipeWire/PulseAudio/ALSA on Linux, a default system output device on macOS/Windows)
+- macOS play mode fails because `afplay` is missing: verify `/usr/bin/afplay` is available or install FFmpeg so `ffplay` is on `PATH`
 - Slow first run: expected; Kokoro downloads voices/models and initializes the pipeline
 - After changing Python versions for the interpreter that runs `agent-tools`, rerun `agent-tools install-cuda` in that same interpreter to repair the PyTorch stack for Kokoro
+
+## Known limitations
+
+- Windows play mode still depends on the optional PySide6 controller runtime.
+- Linux and macOS play mode depends on a supported local audio player binary being available.
+- The Claude transform path remains limited to the official `claude` CLI in headless single-turn mode.

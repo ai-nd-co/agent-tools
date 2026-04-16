@@ -31,6 +31,7 @@ from agent_tools.hook_install import (
     install_claude_integration,
     install_codex_integration,
 )
+from agent_tools.playback import plan_playback, play_direct_wav
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
 from agent_tools.transformer import TransformOptions, transform_text
 from agent_tools.tts import SUPPORTED_LANGUAGES, synthesize_wav
@@ -310,6 +311,10 @@ def _run_ui(args: argparse.Namespace) -> int:
 def _run_install_codex_integration(args: argparse.Namespace) -> int:
     result = install_codex_integration(args.codex_home)
     print(f"Installed Codex integration in {result.mode} mode.")
+    if result.mode == "notify":
+        print("  runtime: Windows notify -> controller queue playback")
+    else:
+        print("  runtime: Unix stop hook -> `agent-tools ttsify --output-mode play`")
     print(f"  config: {result.config_path}")
     if result.notify_command is not None:
         print(f"  notify command: {list(result.notify_command)}")
@@ -331,6 +336,7 @@ def _run_install_codex_integration(args: argparse.Namespace) -> int:
 def _run_install_claude_integration(args: argparse.Namespace) -> int:
     result = install_claude_integration(args.claude_home)
     print("Installed Claude Code integration.")
+    print("  runtime: stop hook -> `agent-tools ttsify --output-mode play`")
     print(f"  settings: {result.settings_path}")
     print(f"  script: {result.hook_script_path}")
     print(f"  hook log: {result.claude_home / 'agent-tools' / 'stop_tts.log'}")
@@ -481,24 +487,33 @@ def _handle_audio_output(
         _write_binary_output(output_file, data)
         return
 
-    if sys.platform != "win32":
-        raise RuntimeError("Playback mode is currently supported only on Windows.")
+    playback_plan = plan_playback()
+    if not playback_plan.available or playback_plan.strategy is None:
+        raise RuntimeError(playback_plan.error_message or "Playback is unavailable.")
 
-    if output_file != "-":
-        Path(output_file).write_bytes(data)
-
-    enqueue_for_playback(
-        QueuePlaybackRequest(
-            raw_text=raw_text,
-            tts_text=tts_text,
-            wav_data=data,
-            source_label=source_label,
-            voice=voice or "unknown",
-            language=language,
-            speed=speed,
-            model=model,
-            reasoning_effort=reasoning_effort,
+    if playback_plan.strategy == "controller-queue":
+        if output_file != "-":
+            Path(output_file).write_bytes(data)
+        enqueue_for_playback(
+            QueuePlaybackRequest(
+                raw_text=raw_text,
+                tts_text=tts_text,
+                wav_data=data,
+                source_label=source_label,
+                voice=voice or "unknown",
+                language=language,
+                speed=speed,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         )
+        return
+
+    direct_output_path = None if output_file == "-" else Path(output_file)
+    play_direct_wav(
+        data,
+        backend=playback_plan.backend or "ffplay",
+        output_path=direct_output_path,
     )
 
 
@@ -509,7 +524,10 @@ def _maybe_start_processing_notice(
     preview_text: str,
     stage: str,
 )-> ProcessingNotice:
-    if output_mode != "play" or sys.platform != "win32":
+    if output_mode != "play":
+        return ProcessingNotice(progress_id="", available=False)
+    playback_plan = plan_playback()
+    if playback_plan.strategy != "controller-queue":
         return ProcessingNotice(progress_id="", available=False)
     return start_processing_notice(
         source_label=source_label,

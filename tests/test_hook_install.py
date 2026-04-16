@@ -151,6 +151,12 @@ def test_install_codex_stop_hook_writes_files(monkeypatch: object, tmp_path: Pat
     script_text = result.hook_script_path.read_text(encoding="utf-8")
     assert "stop_tts.log" in script_text
     assert "hook_start" in script_text
+    assert "ttsify --output-mode play" in script_text
+    assert "spawned_agent_tools_playback" in script_text
+    assert "afplay" not in script_text
+    assert "paplay" not in script_text
+    assert "aplay" not in script_text
+    assert "ffplay" not in script_text
 
 
 def test_install_codex_integration_marks_preference_enabled(
@@ -185,3 +191,9 @@ def test_install_claude_integration_writes_settings_and_script(
     script_text = result.hook_script_path.read_text(encoding="utf-8")
     assert "AGENT_TOOLS_CLAUDE_INTEGRATION_TRIGGERED=1" in script_text
     assert "stop_tts.log" in script_text
+    assert "ttsify --output-mode play" in script_text
+    assert "spawned_agent_tools_playback" in script_text
+    assert "afplay" not in script_text
+    assert "paplay" not in script_text
+    assert "aplay" not in script_text
+    assert "ffplay" not in script_text

@@ -122,6 +122,16 @@ def tts_speed_label(speed: float) -> str:
     return f"TTS {speed:.2f}x"
 
 
+def _ensure_audio_outputs_available(audio_output_count: int) -> None:
+    if audio_output_count > 0:
+        return
+    raise RuntimeError(
+        "PySide6 multimedia is installed, but no Qt audio output backend is available. "
+        "On Linux, install or enable PulseAudio, PipeWire, or ALSA output support; "
+        "on macOS and Windows, ensure a default system audio output device is available."
+    )
+
+
 def run_ui(*, hidden: bool) -> int:
     try:
         from PySide6.QtCore import QSize, Qt, QTimer, QUrl
@@ -349,7 +359,7 @@ def run_ui(*, hidden: bool) -> int:
             self.transform_provider = _load_preferred_transform_provider()
             self.codex_integration_status = load_codex_integration_status()
 
-            self.audio_output = QAudioOutput(QMediaDevices.defaultAudioOutput())
+            self.audio_output = QAudioOutput(audio_outputs[0])
             self.player = QMediaPlayer()
             self.player.setAudioOutput(self.audio_output)
             self.player.positionChanged.connect(self._on_position_changed)
@@ -1117,6 +1127,8 @@ def run_ui(*, hidden: bool) -> int:
                 QMessageBox.warning(self, "Playback error", message)
 
     app = QApplication.instance() or QApplication(sys.argv)
+    audio_outputs = QMediaDevices.audioOutputs()
+    _ensure_audio_outputs_available(len(audio_outputs))
     window = ControllerWindow()
     if not hidden:
         window.show_and_focus()

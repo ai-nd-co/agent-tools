@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
-import sys
-import time
+import subprocess
+import tempfile
 import wave
+from pathlib import Path
 
 import numpy as np
 
@@ -46,20 +47,61 @@ def wav_duration_ms(wav_data: bytes) -> int:
     return int((frames / rate) * 1000)
 
 
-def play_wav_blocking(wav_data: bytes) -> None:
-    if sys.platform != "win32":
-        raise RuntimeError("Playback mode is currently supported only on Windows.")
+def play_wav_blocking(
+    wav_data: bytes,
+    *,
+    backend: str,
+    output_path: Path | None = None,
+) -> None:
+    if backend == "winsound":
+        _play_wav_with_winsound(wav_data)
+        return
 
+    temp_path: Path | None = None
+    audio_path = output_path
+    if audio_path is None:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+            handle.write(wav_data)
+            temp_path = Path(handle.name)
+        audio_path = temp_path
+    else:
+        audio_path.write_bytes(wav_data)
+
+    try:
+        _play_audio_file_blocking(audio_path, backend=backend)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _play_wav_with_winsound(wav_data: bytes) -> None:
     import winsound
 
-    duration_s = wav_duration_ms(wav_data) / 1000.0
+    winsound.PlaySound(wav_data, winsound.SND_MEMORY)
+
+
+def _play_audio_file_blocking(audio_path: Path, *, backend: str) -> None:
+    command = _player_command(audio_path, backend=backend)
+    process = subprocess.Popen(command)
     try:
-        winsound.PlaySound(wav_data, winsound.SND_MEMORY | winsound.SND_ASYNC)
-        deadline = time.monotonic() + duration_s
-        while time.monotonic() < deadline:
-            time.sleep(0.05)
+        process.wait()
     except KeyboardInterrupt:
-        winsound.PlaySound(None, 0)
+        process.terminate()
+        process.wait(timeout=5)
         raise
-    finally:
-        winsound.PlaySound(None, 0)
+    if process.returncode:
+        raise RuntimeError(
+            f"{backend} exited with status {process.returncode} while playing {audio_path}."
+        )
+
+
+def _player_command(audio_path: Path, *, backend: str) -> list[str]:
+    if backend == "afplay":
+        return ["afplay", str(audio_path)]
+    if backend == "paplay":
+        return ["paplay", str(audio_path)]
+    if backend == "aplay":
+        return ["aplay", str(audio_path)]
+    if backend == "ffplay":
+        return ["ffplay", "-nodisp", "-autoexit", str(audio_path)]
+    raise RuntimeError(f"Unsupported playback backend: {backend}")

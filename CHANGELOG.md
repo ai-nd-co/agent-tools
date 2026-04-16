@@ -1,3 +1,15 @@
+## [0.5.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.4.0...py-v0.5.0) (2026-04-16)
+
+### Features
+
+* add claude code integration and transform controls ([a748070](https://github.com/ai-nd-co/agent-tools/commit/a748070dfe4b467c644ae4dbd18701807f34160e))
+
+### Bug Fixes
+
+* allow agent-tools to work with any available backend ([18b2f83](https://github.com/ai-nd-co/agent-tools/commit/18b2f835842dd0390c138c8713635ebcfc8e86a7))
+* pass ci type checks for backend fallback ([299feb8](https://github.com/ai-nd-co/agent-tools/commit/299feb84548db8be91b28dd8c48f5ea31b65ac36))
+* repair pytorch stack installation for Python 3.11 ([cb712ee](https://github.com/ai-nd-co/agent-tools/commit/cb712ee61d0d63a5bd3be0884b4b1309165268e7))
+
 ## [0.4.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.3.0...py-v0.4.0) (2026-04-15)
 
 ### Features

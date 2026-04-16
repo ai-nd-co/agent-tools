@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from agent_tools.codex_auth import AuthError, load_auth_state
 from agent_tools.codex_config import resolve_codex_home
 from agent_tools.runtime import load_preferences, save_preferences
 
@@ -24,9 +25,11 @@ class CodexIntegrationStatus:
     codex_home: Path
     config_path: Path
     enabled: bool
+    available: bool
     install_state: CodexIntegrationInstallState
     hooks_json_path: Path | None = None
     hook_script_path: Path | None = None
+    availability_issues: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
 
     @property
@@ -65,6 +68,7 @@ def load_codex_integration_status(
     mode = codex_integration_mode(platform_name)
     enabled = load_codex_integration_enabled()
     config_path = home / "config.toml"
+    available, availability_issues = _detect_codex_backend_availability(home)
 
     if mode == "notify":
         install_state, issues = _detect_windows_notify_install_state(config_path)
@@ -73,7 +77,9 @@ def load_codex_integration_status(
             codex_home=home,
             config_path=config_path,
             enabled=enabled,
+            available=available,
             install_state=install_state,
+            availability_issues=availability_issues,
             issues=issues,
         )
 
@@ -89,9 +95,11 @@ def load_codex_integration_status(
         codex_home=home,
         config_path=config_path,
         enabled=enabled,
+        available=available,
         install_state=install_state,
         hooks_json_path=hooks_json_path,
         hook_script_path=hook_script_path,
+        availability_issues=availability_issues,
         issues=issues,
     )
 
@@ -195,6 +203,14 @@ def _detect_stop_hook_install_state(
     if not issues:
         issues.append("stop-hook-incomplete")
     return "broken", tuple(issues)
+
+
+def _detect_codex_backend_availability(codex_home: Path) -> tuple[bool, tuple[str, ...]]:
+    try:
+        load_auth_state(codex_home)
+    except AuthError:
+        return False, ("auth-unavailable",)
+    return True, ()
 
 
 def _read_codex_hooks_feature(config: dict[str, Any] | None) -> bool | None:

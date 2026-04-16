@@ -24,6 +24,9 @@ from agent_tools.agent_integration import (
     load_agent_integration_status as load_codex_integration_status,
 )
 from agent_tools.agent_integration import (
+    selected_provider_fallback_note,
+)
+from agent_tools.agent_integration import (
     set_agent_integration_enabled as set_codex_integration_enabled,
 )
 from agent_tools.codex_config import DEFAULT_TRANSFORM_PROVIDER, read_preferred_transform_provider
@@ -44,7 +47,12 @@ from agent_tools.queue_db import (
     normalize_inflight_items,
     update_status,
 )
-from agent_tools.runtime import CONTROLLER_HOST, CONTROLLER_PORT, load_preferences, save_preferences
+from agent_tools.runtime import (
+    CONTROLLER_HOST,
+    CONTROLLER_PORT,
+    load_preferences,
+    save_preferences,
+)
 
 
 @dataclass(frozen=True)
@@ -988,16 +996,27 @@ def run_ui(*, hidden: bool) -> int:
             self.install_title_label.setText(codex_integration_install_title(status))
             self.install_body_label.setText(codex_integration_install_body(status))
             self.install_codex_integration_button.setText(codex_integration_install_action_text(status))
+            self.install_codex_integration_button.setVisible(False)
 
             _set_checked_without_signals(self.codex_integration_switch, checked)
             _set_checked_without_signals(self.codex_integration_action, checked)
             self.transform_provider = _load_preferred_transform_provider()
+            _refresh_transform_provider_options(
+                self.transform_provider_combo,
+                available_providers=status.available_providers,
+            )
             _set_combobox_value_without_signals(
                 self.transform_provider_combo,
                 self.transform_provider,
             )
-            self.codex_integration_switch.setEnabled(status.install_state == "installed")
-            self.transform_provider_combo.setEnabled(status.install_state == "installed")
+            self.codex_integration_switch.setEnabled(status.integration_state == "installed")
+            self.transform_provider_combo.setEnabled(status.any_provider_available)
+            fallback_note = selected_provider_fallback_note(
+                selected_provider=self.transform_provider,
+                available_providers=status.available_providers,
+            )
+            if fallback_note:
+                status_text = f"{status_text} | {fallback_note}"
             self.codex_integration_status_label.setText(status_text)
             tooltip = _codex_integration_tooltip(status)
             self.codex_integration_switch.setToolTip(tooltip)
@@ -1010,8 +1029,11 @@ def run_ui(*, hidden: bool) -> int:
             self.install_codex_integration_action.setText(
                 f"{codex_integration_install_action_text(status)} AgentTools integration"
             )
-            self.install_codex_integration_action.setVisible(show_install_panel)
-            self.codex_integration_action.setVisible(not show_install_panel)
+            self.install_codex_integration_action.setVisible(
+                status.any_provider_available and status.integration_state != "installed"
+            )
+            self.codex_integration_action.setVisible(status.any_provider_available)
+            self.codex_integration_action.setEnabled(status.integration_state == "installed")
 
         def skip_next(self) -> None:
             next_item = self._next_queued_item_for_advance()
@@ -1216,45 +1238,71 @@ def _set_combobox_value_without_signals(target: object, value: str) -> None:
     target.blockSignals(was_blocked)
 
 
+def _refresh_transform_provider_options(
+    target: object,
+    *,
+    available_providers: tuple[str, ...],
+) -> None:
+    if not hasattr(target, "count") or not hasattr(target, "itemData"):
+        return
+    for index in range(target.count()):
+        provider = target.itemData(index)
+        if not isinstance(provider, str):
+            continue
+        target.setItemText(
+            index,
+            _transform_provider_option_label(
+                provider=provider,
+                available=provider in available_providers,
+            ),
+        )
+
+
 def _codex_integration_tooltip(status: CodexIntegrationStatus) -> str:
     lines = [
         f"Codex home: {status.codex.codex_home}",
         f"Claude home: {status.claude.claude_home}",
     ]
+    if status.availability_issues:
+        lines.append(f"Availability: {', '.join(status.availability_issues)}")
     if status.issues:
         lines.append(f"Issues: {', '.join(status.issues)}")
     return "\n".join(lines)
 
 
 def should_show_codex_install_panel(status: CodexIntegrationStatus) -> bool:
-    return status.install_state != "installed"
+    return not status.any_provider_available
 
 
 def codex_integration_install_title(status: CodexIntegrationStatus) -> str:
-    if status.install_state == "broken":
-        return "We need to repair AgentTools"
-    return "We need to install AgentTools"
+    return "Install Codex or Claude Code first"
 
 
 def codex_integration_install_body(status: CodexIntegrationStatus) -> str:
-    if status.install_state == "broken":
-        return (
-            "The AgentTools integration looks incomplete. Repair it so completed "
-            "Codex and Claude Code replies can be queued as spoken audio in this controller."
-        )
     return (
-        "Install it once to connect Codex and Claude Code to this controller. "
-        "Completed Codex and Claude Code replies are queued as spoken audio automatically."
+        "AgentTools can work with either Codex or Claude Code, but it does not install them "
+        "for you. Install or sign in to any one backend first, then reopen this controller."
     )
 
 
 def codex_integration_install_action_text(status: CodexIntegrationStatus) -> str:
-    if status.install_state == "broken":
+    if not status.any_provider_available:
+        return ""
+    if status.integration_state == "broken":
         return "Repair"
-    return "Install"
+    if status.integration_state == "missing":
+        return "Install"
+    return ""
 
 
 def _transform_provider_tooltip(provider: str) -> str:
     if provider == "claude-code":
         return "Use Claude Code for text transform before TTS."
     return "Use Codex for text transform before TTS."
+
+
+def _transform_provider_option_label(*, provider: str, available: bool) -> str:
+    label = "Claude Code" if provider == "claude-code" else "Codex"
+    if available:
+        return label
+    return f"{label} (not available)"

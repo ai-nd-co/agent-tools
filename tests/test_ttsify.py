@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from agent_tools.codex_private_api import TransformResult
 from agent_tools.transformer import TransformOptions
@@ -72,6 +75,16 @@ def test_ttsify_uses_repo_defaults_and_env(monkeypatch: object) -> None:
 
     monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_transform_provider",
+        lambda value: value or "codex",
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex", "claude-code")),
+    )
     monkeypatch.setenv("AGENT_TOOLS_CODEX_REASONING_EFFORT", "medium")
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_VOICE", "bf_emma")
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_LANGUAGE", "b")
@@ -123,6 +136,16 @@ def test_ttsify_cli_values_override_env(monkeypatch: object) -> None:
 
     monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_transform_provider",
+        lambda value: value or "codex",
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex", "claude-code")),
+    )
     monkeypatch.setenv("AGENT_TOOLS_CODEX_MODEL", "env-model")
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_VOICE", "env-voice")
 
@@ -147,8 +170,18 @@ def test_ttsify_cli_values_override_env(monkeypatch: object) -> None:
 
 
 def test_ttsify_rejects_invalid_env_device(monkeypatch: object) -> None:
-    import pytest
+    import agent_tools.ttsify as ttsify_module
 
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_transform_provider",
+        lambda value: value or "codex",
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
+    )
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_DEVICE", "neural-engine")
 
     with pytest.raises(ValueError, match="Unsupported Kokoro device"):
@@ -184,6 +217,11 @@ def test_transformer_accepts_system_prompt_text(tmp_path: Path, monkeypatch: obj
         ),
     )
     monkeypatch.setattr(transformer_module, "load_auth_state", lambda _codex_home=None: object())
+    monkeypatch.setattr(
+        transformer_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
+    )
     monkeypatch.setattr(transformer_module, "CodexPrivateClient", FakeClient)
 
     result = transformer_module.transform_text(
@@ -223,6 +261,11 @@ def test_ttsify_can_select_claude_code_provider(monkeypatch: object) -> None:
 
     monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex", "claude-code")),
+    )
 
     result = ttsify_text(
         "raw text",
@@ -275,8 +318,79 @@ def test_ttsify_uses_preferred_provider_when_not_explicit(monkeypatch: object) -
     monkeypatch.delenv("AGENT_TOOLS_TRANSFORM_PROVIDER", raising=False)
     monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("claude-code",)),
+    )
 
     ttsify_text("raw text", TtsifyOptions())
 
     assert captured["provider"] == "claude-code"
     assert captured["claude_model"] == "haiku"
+
+
+def test_ttsify_falls_back_when_preferred_provider_unavailable(monkeypatch: object) -> None:
+    import agent_tools.transformer as transformer_module
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+
+    def fake_transform_text(_input_text: str, options: TransformOptions) -> TransformResult:
+        captured["provider"] = options.provider
+        return TransformResult(
+            text="spoken text",
+            response_id="resp_1",
+            usage=None,
+            session_id="session-1",
+        )
+
+    monkeypatch.setattr(
+        transformer_module,
+        "read_preferred_transform_provider",
+        lambda: "claude-code",
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
+    )
+    monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
+    monkeypatch.setattr(
+        ttsify_module,
+        "synthesize_wav",
+        lambda *_args, **_kwargs: TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1),
+    )
+
+    ttsify_text("raw text", TtsifyOptions())
+
+    assert captured["provider"] == "codex"
+
+
+def test_ttsify_rejects_explicit_unavailable_provider(monkeypatch: object) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
+    )
+
+    with pytest.raises(RuntimeError, match="claude-code is not available"):
+        ttsify_text("raw text", TtsifyOptions(provider="claude-code"))
+
+
+def test_transformer_rejects_when_no_provider_available(monkeypatch: object) -> None:
+    import agent_tools.transformer as transformer_module
+
+    monkeypatch.setattr(
+        transformer_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=()),
+    )
+
+    with pytest.raises(RuntimeError, match="Install or sign in to Codex"):
+        transformer_module.transform_text(
+            "hello",
+            transformer_module.TransformOptions(system_prompt_text="prompt"),
+        )

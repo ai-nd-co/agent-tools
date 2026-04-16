@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -22,8 +23,10 @@ class ClaudeIntegrationStatus:
     claude_home: Path
     settings_path: Path
     enabled: bool
+    available: bool
     install_state: ClaudeIntegrationInstallState
     hook_script_path: Path | None = None
+    availability_issues: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
 
     @property
@@ -41,6 +44,7 @@ def load_claude_integration_status(
     home = resolve_claude_home(claude_home)
     settings_path = home / "settings.json"
     hook_script_path = home / "agent-tools" / "stop_tts.sh"
+    available, availability_issues = _detect_claude_backend_availability()
     install_state, issues = _detect_claude_stop_hook_install_state(
         settings_path=settings_path,
         hook_script_path=hook_script_path,
@@ -50,8 +54,10 @@ def load_claude_integration_status(
         claude_home=home,
         settings_path=settings_path,
         enabled=load_codex_integration_enabled(),
+        available=available,
         install_state=install_state,
         hook_script_path=hook_script_path,
+        availability_issues=availability_issues,
         issues=issues,
     )
 
@@ -117,3 +123,9 @@ def _settings_payload_has_agent_tools_stop_entry(payload: dict[str, Any] | None)
             if command == CLAUDE_STOP_HOOK_COMMAND:
                 return True
     return False
+
+
+def _detect_claude_backend_availability() -> tuple[bool, tuple[str, ...]]:
+    if shutil.which("claude") is None:
+        return False, ("cli-unavailable",)
+    return True, ()

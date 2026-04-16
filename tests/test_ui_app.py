@@ -29,29 +29,44 @@ def _make_agent_status(
     *,
     enabled: bool,
     install_state: str,
+    integration_state: str | None = None,
+    codex_available: bool = True,
+    claude_available: bool = True,
     codex_mode: str = "notify",
     codex_install_state: str = "installed",
     claude_install_state: str = "installed",
+    availability_issues: tuple[str, ...] = (),
     issues: tuple[str, ...] = (),
 ) -> AgentIntegrationStatus:
+    available_providers: list[str] = []
+    if codex_available:
+        available_providers.append("codex")
+    if claude_available:
+        available_providers.append("claude-code")
     return AgentIntegrationStatus(
         enabled=enabled,
         install_state=install_state,
+        integration_state=integration_state or install_state,
+        available_providers=tuple(available_providers),
         codex=CodexIntegrationStatus(
             mode=codex_mode,
             codex_home=Path("/tmp/.codex"),
             config_path=Path("/tmp/.codex/config.toml"),
             enabled=enabled,
+            available=codex_available,
             install_state=codex_install_state,
+            availability_issues=availability_issues,
         ),
         claude=ClaudeIntegrationStatus(
             mode="stop-hook",
             claude_home=Path("/tmp/.claude"),
             settings_path=Path("/tmp/.claude/settings.json"),
             enabled=enabled,
+            available=claude_available,
             install_state=claude_install_state,
             hook_script_path=Path("/tmp/.claude/agent-tools/stop_tts.sh"),
         ),
+        availability_issues=availability_issues,
         issues=issues,
     )
 
@@ -155,7 +170,7 @@ def test_transform_provider_preference_round_trip(monkeypatch: object, tmp_path:
 def test_codex_integration_status_text_for_enabled_notify() -> None:
     status = _make_agent_status(enabled=True, install_state="installed", codex_mode="notify")
 
-    assert codex_integration_status_text(status) == "On - Codex notify + Claude stop hook"
+    assert codex_integration_status_text(status) == "On - Codex and Claude Code available"
     assert codex_integration_toggle_checked(status) is True
 
 
@@ -163,56 +178,78 @@ def test_codex_integration_status_text_for_soft_disabled() -> None:
     status = _make_agent_status(
         enabled=False,
         install_state="installed",
+        integration_state="installed",
         codex_mode="stop-hook",
     )
 
-    assert codex_integration_status_text(status) == "Off - soft disabled"
+    assert codex_integration_status_text(
+        status
+    ) == "Off - soft disabled (Codex and Claude Code available)"
     assert codex_integration_toggle_checked(status) is False
 
 
 def test_codex_integration_status_text_for_missing_or_broken() -> None:
     missing = _make_agent_status(
-        enabled=True,
+        enabled=False,
         install_state="missing",
-        codex_install_state="installed",
+        integration_state="missing",
+        codex_available=False,
+        claude_available=False,
+        codex_install_state="missing",
         claude_install_state="missing",
+        availability_issues=("codex:auth-unavailable", "claude:cli-unavailable"),
     )
     broken = _make_agent_status(
         enabled=True,
-        install_state="broken",
+        install_state="installed",
+        integration_state="broken",
+        claude_available=False,
         issues=("codex:config-invalid",),
     )
 
-    assert codex_integration_status_text(missing) == "Off - not installed"
-    assert codex_integration_status_text(broken) == "Off - repair needed"
+    assert codex_integration_status_text(missing) == "Install Codex or Claude Code first"
+    assert (
+        codex_integration_status_text(broken)
+        == "Codex available - auto-TTS integration needs repair"
+    )
     assert codex_integration_toggle_checked(missing) is False
 
 
 def test_codex_install_panel_helpers_for_missing_state() -> None:
     status = _make_agent_status(
-        enabled=True,
+        enabled=False,
         install_state="missing",
-        codex_install_state="installed",
+        integration_state="missing",
+        codex_available=False,
+        claude_available=False,
+        codex_install_state="missing",
         claude_install_state="missing",
     )
 
     assert should_show_codex_install_panel(status) is True
-    assert codex_integration_install_title(status) == "We need to install AgentTools"
-    assert codex_integration_install_action_text(status) == "Install"
-    assert "Codex and Claude Code replies" in codex_integration_install_body(status)
+    assert codex_integration_install_title(status) == "Install Codex or Claude Code first"
+    assert codex_integration_install_action_text(status) == ""
+    assert (
+        "AgentTools can work with either Codex or Claude Code"
+        in codex_integration_install_body(status)
+    )
 
 
 def test_codex_install_panel_helpers_for_broken_state() -> None:
     status = _make_agent_status(
         enabled=True,
-        install_state="broken",
+        install_state="installed",
+        integration_state="broken",
         issues=("claude:settings-json-invalid",),
     )
 
-    assert should_show_codex_install_panel(status) is True
-    assert codex_integration_install_title(status) == "We need to repair AgentTools"
+    assert should_show_codex_install_panel(status) is False
+    assert codex_integration_install_title(status) == "Install Codex or Claude Code first"
     assert codex_integration_install_action_text(status) == "Repair"
-    assert "Codex and Claude Code replies" in codex_integration_install_body(status)
+    assert (
+        "AgentTools can work with either Codex or Claude Code"
+        in codex_integration_install_body(status)
+    )
 
 
 def test_codex_install_panel_hidden_when_installed() -> None:

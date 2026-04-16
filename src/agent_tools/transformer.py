@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from agent_tools.agent_integration import (
+    load_agent_integration_status,
+    resolve_transform_provider_or_fallback,
+)
 from agent_tools.claude_code_transform import (
     ClaudeCodeTransformOptions,
     transform_with_claude_code,
@@ -44,7 +48,15 @@ class TransformOptions:
 
 
 def transform_text(input_text: str, options: TransformOptions) -> TransformResult:
-    provider = resolve_transform_provider(options.provider)
+    requested_provider = resolve_transform_provider(options.provider)
+    integration_status = load_agent_integration_status(
+        codex_home=options.codex_home,
+    )
+    provider = resolve_transform_provider_or_fallback(
+        requested_provider=requested_provider,
+        available_providers=integration_status.available_providers,
+        explicit=options.provider is not None,
+    )
     if provider == "claude-code":
         system_prompt = _read_system_prompt(options)
         return transform_with_claude_code(

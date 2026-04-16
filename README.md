@@ -159,8 +159,14 @@ Claude Code hook logs:
 - `~/.claude/agent-tools/stop_tts.log`
 - `~/.claude/agent-tools/stop_tts_agent_tools.log`
 
-You can also install, repair, enable, or soft-disable the combined Codex + Claude Code integration
-from the desktop controller UI and tray menu.
+You can also manage AgentTools auto-TTS integration from the desktop controller UI and tray menu.
+AgentTools only needs **one** backend to be available:
+
+- Codex, with local ChatGPT login working
+- or Claude Code installed on PATH
+
+If neither backend is available, the UI shows an info-only message telling you to install or sign
+in to any one of them first.
 
 ### Transform text
 
@@ -224,14 +230,17 @@ agent-tools ui
 If the controller is already running, this focuses the existing window instead of starting a
 second process.
 
-The controller exposes a shared Codex + Claude Code integration toggle:
+The controller behavior is:
 
-- when either provider is missing, the normal playback UI is hidden and the window shows a single
-  install or repair action
-- when both providers are installed, a single switch soft-disables or re-enables AgentTools audio
-  processing without removing Codex or Claude Code hook/config files
-- when both providers are installed, a dropdown chooses the default transform engine used for
-  `ttsify` and desktop auto-TTS: Codex or Claude Code
+- when neither Codex nor Claude Code is available, the normal playback UI is hidden and the window
+  shows an info-only message telling you to install or sign in to any one backend first
+- when either backend is available, the normal playback UI stays usable
+- a single switch soft-disables or re-enables AgentTools auto-TTS processing when the relevant
+  AgentTools hook/integration is installed
+- a dropdown chooses the default transform engine used for `ttsify` and desktop auto-TTS:
+  Codex or Claude Code
+- if the saved/default provider is unavailable but another backend is available, AgentTools falls
+  back automatically unless you explicitly force a provider on the CLI
 
 ### End-to-end pipeline
 

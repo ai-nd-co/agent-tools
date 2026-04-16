@@ -5,6 +5,10 @@ from importlib import resources
 from pathlib import Path
 from time import perf_counter
 
+from agent_tools.agent_integration import (
+    load_agent_integration_status,
+    resolve_transform_provider_or_fallback,
+)
 from agent_tools.codex_config import (
     DEFAULT_CLAUDE_CODE_EFFORT,
     DEFAULT_CLAUDE_CODE_MODEL,
@@ -81,7 +85,15 @@ class TtsifyMetrics:
 def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
     total_started = perf_counter()
     prompt_text = load_ttsify_prompt()
-    provider = resolve_transform_provider(options.provider)
+    requested_provider = resolve_transform_provider(options.provider)
+    integration_status = load_agent_integration_status(
+        codex_home=options.codex_home,
+    )
+    provider = resolve_transform_provider_or_fallback(
+        requested_provider=requested_provider,
+        available_providers=integration_status.available_providers,
+        explicit=options.provider is not None,
+    )
     voice = options.voice or read_string_env(ENV_KOKORO_VOICE) or DEFAULT_TTSIFY_VOICE
     language = options.language or read_string_env(ENV_KOKORO_LANGUAGE)
     speed = (

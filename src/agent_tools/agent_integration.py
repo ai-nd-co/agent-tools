@@ -17,19 +17,27 @@ from agent_tools.hook_install import (
 )
 
 AgentIntegrationInstallState = Literal["installed", "missing", "broken"]
+TransformProvider = Literal["codex", "claude-code"]
 
 
 @dataclass(frozen=True)
 class AgentIntegrationStatus:
     enabled: bool
     install_state: AgentIntegrationInstallState
+    integration_state: AgentIntegrationInstallState
+    available_providers: tuple[TransformProvider, ...]
     codex: CodexIntegrationStatus
     claude: ClaudeIntegrationStatus
+    availability_issues: tuple[str, ...] = ()
     issues: tuple[str, ...] = ()
 
     @property
     def effective_enabled(self) -> bool:
-        return self.install_state == "installed" and self.enabled
+        return self.integration_state == "installed" and self.enabled
+
+    @property
+    def any_provider_available(self) -> bool:
+        return bool(self.available_providers)
 
 
 def load_agent_integration_status(
@@ -41,15 +49,23 @@ def load_agent_integration_status(
     codex = load_codex_integration_status(codex_home, platform_name=platform_name)
     claude = load_claude_integration_status(claude_home)
     enabled = load_codex_integration_enabled()
-    install_state = _combine_install_states(codex.install_state, claude.install_state)
+    available_providers = available_transform_providers(codex=codex, claude=claude)
+    install_state = "installed" if available_providers else "missing"
+    integration_state = _combine_integration_states(codex=codex, claude=claude)
+    availability_issues = tuple(f"codex:{issue}" for issue in codex.availability_issues) + tuple(
+        f"claude:{issue}" for issue in claude.availability_issues
+    )
     issues = tuple(f"codex:{issue}" for issue in codex.issues) + tuple(
         f"claude:{issue}" for issue in claude.issues
     )
     return AgentIntegrationStatus(
         enabled=enabled,
         install_state=install_state,
+        integration_state=integration_state,
+        available_providers=available_providers,
         codex=codex,
         claude=claude,
+        availability_issues=availability_issues,
         issues=issues,
     )
 
@@ -72,14 +88,16 @@ def set_agent_integration_enabled(enabled: bool) -> None:
 
 
 def agent_integration_status_text(status: AgentIntegrationStatus) -> str:
-    if status.install_state == "installed":
+    if not status.available_providers:
+        return "Install Codex or Claude Code first"
+    provider_label = _available_provider_label(status.available_providers)
+    if status.integration_state == "installed":
         if not status.enabled:
-            return "Off - soft disabled"
-        codex_mode = "notify" if status.codex.mode == "notify" else "stop hook"
-        return f"On - Codex {codex_mode} + Claude stop hook"
-    if status.install_state == "broken":
-        return "Off - repair needed"
-    return "Off - not installed"
+            return f"Off - soft disabled ({provider_label} available)"
+        return f"On - {provider_label} available"
+    if status.integration_state == "broken":
+        return f"{provider_label} available - auto-TTS integration needs repair"
+    return f"{provider_label} available - auto-TTS integration not installed"
 
 
 def agent_integration_toggle_checked(status: AgentIntegrationStatus) -> bool:
@@ -87,31 +105,28 @@ def agent_integration_toggle_checked(status: AgentIntegrationStatus) -> bool:
 
 
 def should_show_agent_install_panel(status: AgentIntegrationStatus) -> bool:
-    return status.install_state != "installed"
+    return not status.any_provider_available
 
 
 def agent_integration_install_title(status: AgentIntegrationStatus) -> str:
-    if status.install_state == "broken":
-        return "We need to repair AgentTools"
-    return "We need to install AgentTools"
+    return "Install Codex or Claude Code first"
 
 
 def agent_integration_install_body(status: AgentIntegrationStatus) -> str:
-    if status.install_state == "broken":
-        return (
-            "The AgentTools integration looks incomplete. Repair it so completed "
-            "Codex and Claude Code replies can be queued as spoken audio in this controller."
-        )
     return (
-        "Install it once to connect Codex and Claude Code to this controller. "
-        "Completed Codex and Claude Code replies are queued as spoken audio automatically."
+        "AgentTools can work with either Codex or Claude Code, but it does not install them "
+        "for you. Install or sign in to any one backend first, then reopen this controller."
     )
 
 
 def agent_integration_install_action_text(status: AgentIntegrationStatus) -> str:
-    if status.install_state == "broken":
+    if not status.any_provider_available:
+        return ""
+    if status.integration_state == "broken":
         return "Repair"
-    return "Install"
+    if status.integration_state == "missing":
+        return "Install"
+    return ""
 
 
 def agent_integration_tooltip(status: AgentIntegrationStatus) -> str:
@@ -119,17 +134,87 @@ def agent_integration_tooltip(status: AgentIntegrationStatus) -> str:
         f"Codex home: {status.codex.codex_home}",
         f"Claude home: {status.claude.claude_home}",
     ]
+    if status.availability_issues:
+        lines.append(f"Availability: {', '.join(status.availability_issues)}")
     if status.issues:
         lines.append(f"Issues: {', '.join(status.issues)}")
     return "\n".join(lines)
 
 
-def _combine_install_states(
-    codex_state: AgentIntegrationInstallState,
-    claude_state: AgentIntegrationInstallState,
+def available_transform_providers(
+    *,
+    codex: CodexIntegrationStatus,
+    claude: ClaudeIntegrationStatus,
+) -> tuple[TransformProvider, ...]:
+    providers: list[TransformProvider] = []
+    if codex.available:
+        providers.append("codex")
+    if claude.available:
+        providers.append("claude-code")
+    return tuple(providers)
+
+
+def resolve_transform_provider_or_fallback(
+    *,
+    requested_provider: TransformProvider,
+    available_providers: tuple[TransformProvider, ...],
+    explicit: bool,
+) -> TransformProvider:
+    if requested_provider in available_providers:
+        return requested_provider
+    if explicit:
+        available_text = ", ".join(available_providers) or "none"
+        raise RuntimeError(
+            f"{requested_provider} is not available. Available providers: {available_text}."
+        )
+    if available_providers:
+        return available_providers[0]
+    raise RuntimeError(
+        "Install or sign in to Codex, or install Claude Code. AgentTools can use either one."
+    )
+
+
+def selected_provider_fallback_note(
+    *,
+    selected_provider: TransformProvider,
+    available_providers: tuple[TransformProvider, ...],
+) -> str | None:
+    if selected_provider in available_providers:
+        return None
+    if not available_providers:
+        return None
+    return (
+        f"{_provider_label(selected_provider)} selected, using "
+        f"{_provider_label(available_providers[0])} because it is not available."
+    )
+
+
+def _combine_integration_states(
+    *,
+    codex: CodexIntegrationStatus,
+    claude: ClaudeIntegrationStatus,
 ) -> AgentIntegrationInstallState:
-    if codex_state == "installed" and claude_state == "installed":
-        return "installed"
-    if "broken" in (codex_state, claude_state):
+    states: list[AgentIntegrationInstallState] = []
+    if codex.available:
+        states.append(codex.install_state)
+    if claude.available:
+        states.append(claude.install_state)
+    if not states:
+        return "missing"
+    if any(state == "broken" for state in states):
         return "broken"
+    if all(state == "installed" for state in states):
+        return "installed"
     return "missing"
+
+
+def _available_provider_label(providers: tuple[TransformProvider, ...]) -> str:
+    if len(providers) == 2:
+        return "Codex and Claude Code"
+    if providers:
+        return _provider_label(providers[0])
+    return "No providers"
+
+
+def _provider_label(provider: TransformProvider) -> str:
+    return "Claude Code" if provider == "claude-code" else "Codex"

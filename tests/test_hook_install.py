@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from agent_tools.codex_integration import load_codex_integration_enabled
 from agent_tools.hook_install import (
+    CLAUDE_STOP_HOOK_COMMAND,
     STOP_HOOK_COMMAND,
     WINDOWS_NOTIFY_COMMAND,
+    build_updated_claude_settings_payload,
     build_updated_hooks_payload,
     ensure_feature_assignment,
     ensure_notify_command,
+    install_claude_integration,
     install_codex_integration,
     install_codex_stop_hook,
 )
@@ -76,7 +80,45 @@ def test_build_updated_hooks_payload_preserves_existing_stop_hooks(tmp_path: Pat
     assert stop_entries[1]["hooks"][0]["command"] == STOP_HOOK_COMMAND
 
 
-def test_install_codex_integration_writes_windows_notify_config(tmp_path: Path) -> None:
+def test_build_updated_claude_settings_payload_preserves_existing_stop_hooks(
+    tmp_path: Path,
+) -> None:
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "bash -lc 'echo existing-claude-hook'",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = build_updated_claude_settings_payload(settings_path)
+    stop_entries = payload["hooks"]["Stop"]
+
+    assert len(stop_entries) == 2
+    assert stop_entries[0]["hooks"][0]["command"] == "bash -lc 'echo existing-claude-hook'"
+    assert stop_entries[1]["hooks"][0]["command"] == CLAUDE_STOP_HOOK_COMMAND
+
+
+def test_install_codex_integration_writes_windows_notify_config(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
     codex_home = tmp_path / ".codex"
 
     result = install_codex_integration(codex_home, platform_name="win32")
@@ -91,7 +133,10 @@ def test_install_codex_integration_writes_windows_notify_config(tmp_path: Path) 
     assert result.hook_script_path is None
 
 
-def test_install_codex_stop_hook_writes_files(tmp_path: Path) -> None:
+def test_install_codex_stop_hook_writes_files(monkeypatch: object, tmp_path: Path) -> None:
+    import agent_tools.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
     codex_home = tmp_path / ".codex"
 
     result = install_codex_stop_hook(codex_home)
@@ -106,3 +151,37 @@ def test_install_codex_stop_hook_writes_files(tmp_path: Path) -> None:
     script_text = result.hook_script_path.read_text(encoding="utf-8")
     assert "stop_tts.log" in script_text
     assert "hook_start" in script_text
+
+
+def test_install_codex_integration_marks_preference_enabled(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
+    codex_home = tmp_path / ".codex"
+
+    install_codex_integration(codex_home, platform_name="win32")
+
+    assert load_codex_integration_enabled() is True
+
+
+def test_install_claude_integration_writes_settings_and_script(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
+    claude_home = tmp_path / ".claude"
+
+    result = install_claude_integration(claude_home)
+
+    assert result.settings_path.exists()
+    assert result.hook_script_path.exists()
+    settings_payload = json.loads(result.settings_path.read_text(encoding="utf-8"))
+    assert settings_payload["hooks"]["Stop"][0]["hooks"][0]["command"] == CLAUDE_STOP_HOOK_COMMAND
+    script_text = result.hook_script_path.read_text(encoding="utf-8")
+    assert "AGENT_TOOLS_CLAUDE_INTEGRATION_TRIGGERED=1" in script_text
+    assert "stop_tts.log" in script_text

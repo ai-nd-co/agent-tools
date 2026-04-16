@@ -6,19 +6,31 @@ from pathlib import Path
 from time import perf_counter
 
 from agent_tools.codex_config import (
+    DEFAULT_CLAUDE_CODE_EFFORT,
+    DEFAULT_CLAUDE_CODE_MODEL,
     DEFAULT_TTSIFY_MODEL,
     DEFAULT_TTSIFY_VOICE,
+    ENV_CLAUDE_CODE_BARE,
+    ENV_CLAUDE_CODE_EFFORT,
+    ENV_CLAUDE_CODE_MODEL,
     ENV_CODEX_MODEL,
     ENV_CODEX_REASONING_EFFORT,
     ENV_KOKORO_DEVICE,
     ENV_KOKORO_LANGUAGE,
     ENV_KOKORO_SPEED,
     ENV_KOKORO_VOICE,
+    normalize_claude_code_model,
+    read_bool_env,
     read_float_env,
     read_preferred_tts_speed,
     read_string_env,
 )
-from agent_tools.transformer import TransformOptions, TransformResult, transform_text
+from agent_tools.transformer import (
+    TransformOptions,
+    TransformResult,
+    resolve_transform_provider,
+    transform_text,
+)
 from agent_tools.tts import TtsResult, synthesize_wav
 
 SUPPORTED_TTSIFY_DEVICES = ("auto", "cpu", "cuda")
@@ -26,6 +38,7 @@ SUPPORTED_TTSIFY_DEVICES = ("auto", "cpu", "cuda")
 
 @dataclass(frozen=True)
 class TtsifyOptions:
+    provider: str | None = None
     model: str | None = None
     reasoning_effort: str | None = None
     fast: bool = False
@@ -36,6 +49,9 @@ class TtsifyOptions:
     codex_home: Path | None = None
     base_url: str | None = None
     originator: str | None = None
+    claude_model: str | None = None
+    claude_effort: str | None = None
+    claude_bare: bool | None = None
     timeout_seconds: float = 120.0
 
 
@@ -65,6 +81,7 @@ class TtsifyMetrics:
 def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
     total_started = perf_counter()
     prompt_text = load_ttsify_prompt()
+    provider = resolve_transform_provider(options.provider)
     voice = options.voice or read_string_env(ENV_KOKORO_VOICE) or DEFAULT_TTSIFY_VOICE
     language = options.language or read_string_env(ENV_KOKORO_LANGUAGE)
     speed = (
@@ -77,14 +94,38 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         raise ValueError(
             f"Unsupported Kokoro device {device!r}. Expected one of {SUPPORTED_TTSIFY_DEVICES}."
         )
+    codex_model = options.model or read_string_env(ENV_CODEX_MODEL) or DEFAULT_TTSIFY_MODEL
+    codex_reasoning = options.reasoning_effort or read_string_env(ENV_CODEX_REASONING_EFFORT)
+    raw_claude_model = (
+        options.claude_model
+        or options.model
+        or read_string_env(ENV_CLAUDE_CODE_MODEL)
+    )
+    claude_model = raw_claude_model or DEFAULT_CLAUDE_CODE_MODEL
+    if provider == "claude-code":
+        claude_model = normalize_claude_code_model(claude_model)
+    claude_effort = options.claude_effort or read_string_env(ENV_CLAUDE_CODE_EFFORT)
+    if claude_effort is None:
+        claude_effort = _map_reasoning_effort_to_claude_effort(options.reasoning_effort)
+    if claude_effort is None:
+        claude_effort = DEFAULT_CLAUDE_CODE_EFFORT
+    claude_bare = (
+        options.claude_bare
+        if options.claude_bare is not None
+        else read_bool_env(ENV_CLAUDE_CODE_BARE) or False
+    )
     transform_options = TransformOptions(
         system_prompt_text=prompt_text,
-        model=options.model or read_string_env(ENV_CODEX_MODEL) or DEFAULT_TTSIFY_MODEL,
-        reasoning_effort=options.reasoning_effort or read_string_env(ENV_CODEX_REASONING_EFFORT),
+        provider=provider,
+        model=codex_model,
+        reasoning_effort=codex_reasoning,
         fast=options.fast,
         codex_home=options.codex_home,
         base_url=options.base_url,
         originator=options.originator,
+        claude_model=claude_model,
+        claude_effort=claude_effort,
+        claude_bare=claude_bare,
         timeout_seconds=options.timeout_seconds,
     )
     transform_started = perf_counter()
@@ -104,8 +145,8 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         transformed_text=transform_result.text,
         transform_result=transform_result,
         tts_result=tts_result,
-        model=transform_options.model or DEFAULT_TTSIFY_MODEL,
-        reasoning_effort=transform_options.reasoning_effort,
+        model=claude_model if provider == "claude-code" else codex_model,
+        reasoning_effort=claude_effort if provider == "claude-code" else codex_reasoning,
         voice=voice,
         language=language,
         speed=speed,
@@ -124,3 +165,15 @@ def load_ttsify_prompt() -> str:
     return resources.files("agent_tools.prompts").joinpath("ttsify.md").read_text(
         encoding="utf-8"
     )
+
+
+def _map_reasoning_effort_to_claude_effort(reasoning_effort: str | None) -> str | None:
+    mapping = {
+        "minimal": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "high",
+        "none": None,
+    }
+    return mapping.get(reasoning_effort)

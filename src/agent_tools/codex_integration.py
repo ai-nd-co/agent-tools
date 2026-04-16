@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+from agent_tools.codex_config import resolve_codex_home
+from agent_tools.runtime import load_preferences, save_preferences
+
+PREFERENCE_CODEX_INTEGRATION_ENABLED = "codex_integration_enabled"
+ENV_CODEX_INTEGRATION_TRIGGERED = "AGENT_TOOLS_CODEX_INTEGRATION_TRIGGERED"
+
+CodexIntegrationMode = Literal["notify", "stop-hook"]
+CodexIntegrationInstallState = Literal["installed", "missing", "broken"]
+
+
+@dataclass(frozen=True)
+class CodexIntegrationStatus:
+    mode: CodexIntegrationMode
+    codex_home: Path
+    config_path: Path
+    enabled: bool
+    install_state: CodexIntegrationInstallState
+    hooks_json_path: Path | None = None
+    hook_script_path: Path | None = None
+    issues: tuple[str, ...] = ()
+
+    @property
+    def effective_enabled(self) -> bool:
+        return self.install_state == "installed" and self.enabled
+
+
+def load_codex_integration_enabled() -> bool:
+    value = load_preferences().get(PREFERENCE_CODEX_INTEGRATION_ENABLED)
+    if isinstance(value, bool):
+        return value
+    return True
+
+
+def set_codex_integration_enabled(enabled: bool) -> None:
+    preferences = load_preferences()
+    preferences[PREFERENCE_CODEX_INTEGRATION_ENABLED] = enabled
+    save_preferences(preferences)
+
+
+def is_codex_integration_triggered() -> bool:
+    return os.environ.get(ENV_CODEX_INTEGRATION_TRIGGERED) == "1"
+
+
+def codex_integration_mode(platform_name: str | None = None) -> CodexIntegrationMode:
+    current_platform = platform_name or sys.platform
+    return "notify" if current_platform == "win32" else "stop-hook"
+
+
+def load_codex_integration_status(
+    codex_home: Path | None = None,
+    *,
+    platform_name: str | None = None,
+) -> CodexIntegrationStatus:
+    home = resolve_codex_home(codex_home)
+    mode = codex_integration_mode(platform_name)
+    enabled = load_codex_integration_enabled()
+    config_path = home / "config.toml"
+
+    if mode == "notify":
+        install_state, issues = _detect_windows_notify_install_state(config_path)
+        return CodexIntegrationStatus(
+            mode=mode,
+            codex_home=home,
+            config_path=config_path,
+            enabled=enabled,
+            install_state=install_state,
+            issues=issues,
+        )
+
+    hooks_json_path = home / "hooks.json"
+    hook_script_path = home / "hooks" / "stop_tts.sh"
+    install_state, issues = _detect_stop_hook_install_state(
+        config_path=config_path,
+        hooks_json_path=hooks_json_path,
+        hook_script_path=hook_script_path,
+    )
+    return CodexIntegrationStatus(
+        mode=mode,
+        codex_home=home,
+        config_path=config_path,
+        enabled=enabled,
+        install_state=install_state,
+        hooks_json_path=hooks_json_path,
+        hook_script_path=hook_script_path,
+        issues=issues,
+    )
+
+
+def codex_integration_status_text(status: CodexIntegrationStatus) -> str:
+    if status.install_state == "installed":
+        if status.enabled:
+            mode_label = "Notify mode" if status.mode == "notify" else "Stop hook mode"
+            return f"On - {mode_label}"
+        return "Off - soft disabled"
+    if status.install_state == "broken":
+        return "Off - repair needed"
+    return "Off - not installed"
+
+
+def codex_integration_toggle_checked(status: CodexIntegrationStatus) -> bool:
+    return status.effective_enabled
+
+
+def _detect_windows_notify_install_state(
+    config_path: Path,
+) -> tuple[CodexIntegrationInstallState, tuple[str, ...]]:
+    if not config_path.exists():
+        return "missing", ()
+
+    config_text = config_path.read_text(encoding="utf-8")
+    try:
+        config = tomllib.loads(config_text)
+    except tomllib.TOMLDecodeError:
+        return "broken", ("config-invalid",)
+
+    if not isinstance(config, dict):
+        return "broken", ("config-invalid",)
+
+    notify_matches = _matches_notify_command(config.get("notify"))
+    features_value = _read_codex_hooks_feature(config)
+    has_agenttools_trace = "codex-notify-dispatch" in config_text
+
+    issues: list[str] = []
+    if notify_matches and features_value is False:
+        return "installed", ()
+    if not notify_matches and not has_agenttools_trace and features_value is None:
+        return "missing", ()
+
+    if not notify_matches and has_agenttools_trace:
+        issues.append("notify-missing")
+    if notify_matches and features_value is not False:
+        issues.append("features-inconsistent")
+    if features_value not in (None, False):
+        issues.append("features-inconsistent")
+    if not issues:
+        issues.append("notify-incomplete")
+    return "broken", tuple(issues)
+
+
+def _detect_stop_hook_install_state(
+    *,
+    config_path: Path,
+    hooks_json_path: Path,
+    hook_script_path: Path,
+) -> tuple[CodexIntegrationInstallState, tuple[str, ...]]:
+    config_exists = config_path.exists()
+    hooks_exists = hooks_json_path.exists()
+    script_exists = hook_script_path.exists()
+
+    config: dict[str, Any] | None = None
+    if config_exists:
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError:
+            return "broken", ("config-invalid",)
+
+    codex_hooks_enabled = _read_codex_hooks_feature(config) if config is not None else None
+
+    hooks_payload: dict[str, Any] | None = None
+    if hooks_exists:
+        try:
+            parsed = json.loads(hooks_json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return "broken", ("hooks-json-invalid",)
+        if not isinstance(parsed, dict):
+            return "broken", ("hooks-json-invalid",)
+        hooks_payload = parsed
+
+    has_stop_entry = _hooks_payload_has_agent_tools_stop_entry(hooks_payload)
+
+    if codex_hooks_enabled is True and has_stop_entry and script_exists:
+        return "installed", ()
+    if not config_exists and not hooks_exists and not script_exists:
+        return "missing", ()
+    if codex_hooks_enabled is None and not has_stop_entry and not script_exists:
+        return "missing", ()
+
+    issues: list[str] = []
+    if codex_hooks_enabled is not True:
+        issues.append("feature-disabled")
+    if not has_stop_entry and (hooks_exists or script_exists or codex_hooks_enabled is True):
+        issues.append("stop-hook-missing")
+    if not script_exists and (hooks_exists or codex_hooks_enabled is True):
+        issues.append("hook-script-missing")
+    if not issues:
+        issues.append("stop-hook-incomplete")
+    return "broken", tuple(issues)
+
+
+def _read_codex_hooks_feature(config: dict[str, Any] | None) -> bool | None:
+    if not isinstance(config, dict):
+        return None
+    features = config.get("features")
+    if not isinstance(features, dict):
+        return None
+    value = features.get("codex_hooks")
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _matches_notify_command(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    command = [str(part) for part in value if isinstance(part, str)]
+    if len(command) != len(value):
+        return False
+    return (
+        len(command) >= 4
+        and command[-1] == "codex-notify-dispatch"
+        and command[-3] == "-m"
+        and command[-2] == "agent_tools"
+    )
+
+
+def _hooks_payload_has_agent_tools_stop_entry(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    stop_entries = hooks.get("Stop")
+    if not isinstance(stop_entries, list):
+        return False
+    for entry in stop_entries:
+        if not isinstance(entry, dict):
+            continue
+        nested_hooks = entry.get("hooks")
+        if not isinstance(nested_hooks, list):
+            continue
+        for hook in nested_hooks:
+            if not isinstance(hook, dict):
+                continue
+            command = hook.get("command")
+            if isinstance(command, str) and "stop_tts.sh" in command:
+                return True
+    return False

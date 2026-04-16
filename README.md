@@ -3,10 +3,11 @@
 Python CLI tools for:
 
 - transforming raw text into TTS-ready narration and synthesizing it in one command
-- transforming piped text through the private Codex ChatGPT-backed backend used by local Codex
+- transforming piped text through either the private Codex backend used by local Codex or an experimental Claude Code CLI wrapper
 - synthesizing the result to WAV with Kokoro-82M
+- auto-TTS of completed Codex and Claude Code replies through installed desktop hooks
 
-This repo is intentionally wired to the local Codex login state in `~/.codex/`.
+This repo is intentionally wired to local Codex and Claude Code installs.
 
 Release policy:
 
@@ -16,9 +17,13 @@ Release policy:
 
 ## Status
 
-This is an **experimental public package** with a **private Codex dependency**.
+This is an **experimental public package** with a **private Codex dependency** and an
+**experimental Claude Code CLI transform path**.
 
 The `transform` command mirrors the current request shape used by the local Codex source tree and depends on ChatGPT-backed auth in `~/.codex/auth.json`.
+
+The Claude Code path uses the official `claude` CLI in headless `-p` mode with a constrained
+single-turn wrapper. It does not rely on any private Claude Code API.
 
 It does **not** use:
 
@@ -36,6 +41,7 @@ That means:
 
 - Python 3.11+
 - local Codex already logged in via ChatGPT
+- local Claude Code CLI installed if you want Claude-backed transforms or Claude auto-TTS integration
 - `espeak-ng` installed for best Kokoro English fallback behavior
 
 ## Install
@@ -95,7 +101,18 @@ AGENT_TOOLS_KOKORO_VOICE=af_heart
 AGENT_TOOLS_KOKORO_LANGUAGE=a
 AGENT_TOOLS_KOKORO_SPEED=1.0
 AGENT_TOOLS_KOKORO_DEVICE=auto
+AGENT_TOOLS_TRANSFORM_PROVIDER=codex
+AGENT_TOOLS_CLAUDE_CODE_MODEL=haiku
+AGENT_TOOLS_CLAUDE_CODE_EFFORT=low
+AGENT_TOOLS_CLAUDE_CODE_BARE=false
 ```
+
+Claude Code transform models are intentionally limited to:
+
+- `haiku`
+- `sonnet`
+
+`opus` is rejected by the CLI and runtime wrapper.
 
 CLI flags override env vars.
 
@@ -105,16 +122,25 @@ Queue for playback on Windows:
 echo "Turn this note into natural spoken narration." | agent-tools ttsify --output-mode play --source agent-a
 ```
 
-### Codex integration
+### Desktop integrations
 
-Install the supported Codex integration for the current platform:
+Install both supported desktop integrations:
+
+```bash
+agent-tools install-integrations
+```
+
+Install only one provider if needed:
 
 ```bash
 agent-tools install-codex-integration
+agent-tools install-claude-integration
 ```
 
 - On native Windows Codex, this installs a `notify` command in `~/.codex/config.toml`.
 - On non-Windows, this keeps the Stop-hook integration path.
+- Claude Code integration installs an AgentTools `Stop` hook into `~/.claude/settings.json`
+  and writes the hook script to `~/.claude/agent-tools/stop_tts.sh`.
 - The compatibility alias `agent-tools install-codex-stop-hook` remains available.
 
 Windows debug logs:
@@ -128,6 +154,14 @@ Python command. No PowerShell or bash wrapper is used.
 This enqueues the generated audio, starts the background controller if needed, and returns
 immediately.
 
+Claude Code hook logs:
+
+- `~/.claude/agent-tools/stop_tts.log`
+- `~/.claude/agent-tools/stop_tts_agent_tools.log`
+
+You can also install, repair, enable, or soft-disable the combined Codex + Claude Code integration
+from the desktop controller UI and tray menu.
+
 ### Transform text
 
 ```bash
@@ -140,10 +174,34 @@ Optional controls:
 ```bash
 echo "Input text" | agent-tools transform \
   --system-prompt-file prompt_examples/rewrite_for_tts.md \
+  --provider codex \
   --model gpt-5 \
   --reasoning-effort medium \
   --fast
 ```
+
+Experimental Claude Code-backed transform:
+
+```bash
+echo "Input text" | agent-tools transform \
+  --system-prompt-file prompt_examples/rewrite_for_tts.md \
+  --provider claude-code \
+  --claude-model haiku \
+  --claude-effort low
+```
+
+What the Claude wrapper does:
+
+- runs `claude -p` in a temporary minimal working directory
+- forces `--max-turns 1`, `--tools ""`, `--no-session-persistence`, and `--output-format json`
+- uses `--system-prompt` with the same rewrite prompt file you pass to `transform`
+- does **not** require or use any unofficial Claude Code API
+
+Important limitation:
+
+- `--claude-bare` is supported, but it is **off by default** because local Claude help shows bare
+  mode only reads `ANTHROPIC_API_KEY` or `apiKeyHelper` auth. If you rely on normal Claude login
+  state, keep `--claude-bare` off.
 
 ### Text to speech
 
@@ -166,6 +224,15 @@ agent-tools ui
 If the controller is already running, this focuses the existing window instead of starting a
 second process.
 
+The controller exposes a shared Codex + Claude Code integration toggle:
+
+- when either provider is missing, the normal playback UI is hidden and the window shows a single
+  install or repair action
+- when both providers are installed, a single switch soft-disables or re-enables AgentTools audio
+  processing without removing Codex or Claude Code hook/config files
+- when both providers are installed, a dropdown chooses the default transform engine used for
+  `ttsify` and desktop auto-TTS: Codex or Claude Code
+
 ### End-to-end pipeline
 
 ```bash
@@ -187,6 +254,8 @@ cat input.txt | agent-tools transform \
 - auto device selection uses a real CUDA probe, not just `torch.cuda.is_available()`.
 - `agent-tools install-cuda` reinstalls the full PyTorch stack (`torch`, `torchvision`, `torchaudio`) into the current Python environment and validates the full Kokoro import chain in a fresh subprocess by default.
 - `transform` refreshes ChatGPT tokens when the Codex backend returns `401`.
+- the experimental Claude transform path uses the official `claude` CLI only; it is intentionally
+  limited to one turn with tools disabled
 - Native Windows Codex uses `notify`; `hooks.json` lifecycle hooks are not used there.
 - semantic-release now owns future Python package version bumps and `py-v*` tags.
 

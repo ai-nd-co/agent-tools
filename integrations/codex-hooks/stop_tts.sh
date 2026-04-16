@@ -99,12 +99,12 @@ if ! command -v agent-tools >/dev/null 2>&1; then
 fi
 
 run_windows_queue() {
-  printf '%s' "${message}" | env AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-mode play >/dev/null 2>&1 &
+  printf '%s' "${message}" | env AGENT_TOOLS_CODEX_INTEGRATION_TRIGGERED=1 AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-mode play >/dev/null 2>&1 &
 }
 
 run_file_then_player() {
   local audio_file="$1"
-  printf '%s' "${message}" | env AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-file "${audio_file}" >/dev/null 2>&1 || return 1
+  printf '%s' "${message}" | env AGENT_TOOLS_CODEX_INTEGRATION_TRIGGERED=1 AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-file "${audio_file}" >/dev/null 2>&1 || return 1
 
   if command -v afplay >/dev/null 2>&1; then
     nohup afplay "${audio_file}" >/dev/null 2>&1 &

@@ -8,6 +8,25 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from queue import Empty, SimpleQueue
 
+from agent_tools.agent_integration import (
+    AgentIntegrationStatus as CodexIntegrationStatus,
+)
+from agent_tools.agent_integration import (
+    agent_integration_status_text as codex_integration_status_text,
+)
+from agent_tools.agent_integration import (
+    agent_integration_toggle_checked as codex_integration_toggle_checked,
+)
+from agent_tools.agent_integration import (
+    install_all_integrations as install_codex_integration,
+)
+from agent_tools.agent_integration import (
+    load_agent_integration_status as load_codex_integration_status,
+)
+from agent_tools.agent_integration import (
+    set_agent_integration_enabled as set_codex_integration_enabled,
+)
+from agent_tools.codex_config import DEFAULT_TRANSFORM_PROVIDER, read_preferred_transform_provider
 from agent_tools.queue_db import (
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -61,6 +80,10 @@ FEED_PREVIEW_LIMIT = 96
 TTS_SPEED_MIN = 0.7
 TTS_SPEED_MAX = 1.3
 TTS_SPEED_STEP = 0.05
+TRANSFORM_PROVIDER_OPTIONS = (
+    ("codex", "Codex"),
+    ("claude-code", "Claude Code"),
+)
 
 
 def interrupted_status_for_switch(status: str) -> str:
@@ -96,6 +119,8 @@ def run_ui(*, hidden: bool) -> int:
         from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
         from PySide6.QtWidgets import (
             QApplication,
+            QCheckBox,
+            QComboBox,
             QFrame,
             QHBoxLayout,
             QLabel,
@@ -311,6 +336,8 @@ def run_ui(*, hidden: bool) -> int:
             self.processing_items: dict[str, ProcessingItem] = {}
             self.processing_sequence = 0
             self.tts_speed = clamp_tts_speed(_load_preferred_tts_speed())
+            self.transform_provider = _load_preferred_transform_provider()
+            self.codex_integration_status = load_codex_integration_status()
 
             self.audio_output = QAudioOutput(QMediaDevices.defaultAudioOutput())
             self.player = QMediaPlayer()
@@ -340,6 +367,7 @@ def run_ui(*, hidden: bool) -> int:
             self.refresh_timer.timeout.connect(self._on_refresh_tick)
             self.refresh_timer.start(1000)
 
+            self._refresh_codex_integration_state()
             self._sync_default_audio_output(force=True)
             self.refresh_views()
             self._maybe_autoplay()
@@ -349,6 +377,46 @@ def run_ui(*, hidden: bool) -> int:
             layout = QVBoxLayout(central)
             layout.setContentsMargins(12, 12, 12, 12)
             layout.setSpacing(10)
+
+            self.install_panel = QFrame()
+            self.install_panel.setObjectName("installPanel")
+            self.install_panel.setStyleSheet(
+                "#installPanel {"
+                "background: rgba(120, 180, 255, 14);"
+                "border: 1px solid rgba(120, 180, 255, 70);"
+                "border-radius: 14px;"
+                "}"
+            )
+            install_layout = QVBoxLayout(self.install_panel)
+            install_layout.setContentsMargins(18, 18, 18, 18)
+            install_layout.setSpacing(10)
+
+            self.install_title_label = QLabel("")
+            self.install_title_label.setWordWrap(True)
+            self.install_title_label.setStyleSheet("font-size: 18px; font-weight: 700;")
+
+            self.install_body_label = QLabel("")
+            self.install_body_label.setWordWrap(True)
+            self.install_body_label.setStyleSheet(
+                "font-size: 13px; color: rgba(255, 255, 255, 180);"
+            )
+
+            self.install_codex_integration_button = QPushButton("")
+            self.install_codex_integration_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.install_codex_integration_button.clicked.connect(self._install_codex_integration)
+
+            install_layout.addWidget(self.install_title_label)
+            install_layout.addWidget(self.install_body_label)
+            install_layout.addWidget(
+                self.install_codex_integration_button,
+                alignment=Qt.AlignmentFlag.AlignLeft,
+            )
+            install_layout.addStretch(1)
+
+            self.content_widget = QWidget()
+            content_layout = QVBoxLayout(self.content_widget)
+            content_layout.setContentsMargins(0, 0, 0, 0)
+            content_layout.setSpacing(10)
 
             self.now_label = QLabel("No audio playing")
             self.now_label.setWordWrap(True)
@@ -398,6 +466,48 @@ def run_ui(*, hidden: bool) -> int:
             controls_row.addWidget(self.faster_button)
             controls_row.addStretch(1)
 
+            integration_row = QHBoxLayout()
+            integration_row.setContentsMargins(0, 0, 0, 0)
+            integration_row.setSpacing(8)
+
+            self.codex_integration_switch = QCheckBox("Enable Codex + Claude Code integration")
+            self.codex_integration_switch.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.codex_integration_switch.setStyleSheet(
+                "QCheckBox {"
+                "spacing: 8px;"
+                "font-size: 12px;"
+                "font-weight: 600;"
+                "}"
+            )
+            self.codex_integration_switch.toggled.connect(self._on_codex_integration_toggled)
+
+            self.codex_integration_status_label = QLabel("")
+            self.codex_integration_status_label.setWordWrap(True)
+            self.codex_integration_status_label.setStyleSheet(
+                "font-size: 11px; color: rgba(255, 255, 255, 150);"
+            )
+
+            integration_row.addWidget(self.codex_integration_switch)
+            integration_row.addWidget(self.codex_integration_status_label, stretch=1)
+
+            provider_row = QHBoxLayout()
+            provider_row.setContentsMargins(0, 0, 0, 0)
+            provider_row.setSpacing(8)
+
+            self.transform_provider_label = QLabel("Transform engine")
+            self.transform_provider_label.setStyleSheet("font-size: 12px; font-weight: 600;")
+
+            self.transform_provider_combo = QComboBox()
+            self.transform_provider_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+            for provider_value, provider_label in TRANSFORM_PROVIDER_OPTIONS:
+                self.transform_provider_combo.addItem(provider_label, provider_value)
+            self.transform_provider_combo.currentIndexChanged.connect(
+                self._on_transform_provider_changed
+            )
+
+            provider_row.addWidget(self.transform_provider_label)
+            provider_row.addWidget(self.transform_provider_combo, stretch=1)
+
             self.feed_list = QListWidget()
             self.feed_list.setSpacing(6)
             self.feed_list.setAlternatingRowColors(False)
@@ -416,13 +526,18 @@ def run_ui(*, hidden: bool) -> int:
             self.current_text.setPlaceholderText("Playback text will appear here.")
             self.current_text.setMinimumHeight(180)
 
-            layout.addWidget(self.now_label)
-            layout.addLayout(slider_row)
-            layout.addLayout(controls_row)
-            layout.addWidget(self.feed_list, stretch=1)
-            layout.addWidget(current_text_title)
-            layout.addWidget(self.current_meta_label)
-            layout.addWidget(self.current_text)
+            content_layout.addWidget(self.now_label)
+            content_layout.addLayout(slider_row)
+            content_layout.addLayout(controls_row)
+            content_layout.addLayout(integration_row)
+            content_layout.addLayout(provider_row)
+            content_layout.addWidget(self.feed_list, stretch=1)
+            content_layout.addWidget(current_text_title)
+            content_layout.addWidget(self.current_meta_label)
+            content_layout.addWidget(self.current_text)
+
+            layout.addWidget(self.install_panel)
+            layout.addWidget(self.content_widget, stretch=1)
 
             self.setCentralWidget(central)
             self.setWindowIcon(self.volume_icon)
@@ -455,6 +570,15 @@ def run_ui(*, hidden: bool) -> int:
             next_action = QAction("Next queued", self)
             next_action.triggered.connect(self.skip_next)
             self.tray_menu.addAction(next_action)
+
+            self.install_codex_integration_action = QAction("Install AgentTools integration", self)
+            self.install_codex_integration_action.triggered.connect(self._install_codex_integration)
+            self.tray_menu.addAction(self.install_codex_integration_action)
+
+            self.codex_integration_action = QAction("AgentTools integration", self)
+            self.codex_integration_action.setCheckable(True)
+            self.codex_integration_action.toggled.connect(self._on_codex_integration_toggled)
+            self.tray_menu.addAction(self.codex_integration_action)
 
             self.tray_menu.addSeparator()
 
@@ -614,6 +738,7 @@ def run_ui(*, hidden: bool) -> int:
             )
 
         def _on_refresh_tick(self) -> None:
+            self._refresh_codex_integration_state()
             self._sync_default_audio_output()
             self.refresh_views()
 
@@ -809,6 +934,85 @@ def run_ui(*, hidden: bool) -> int:
             _save_preferred_tts_speed(self.tts_speed)
             self.playback_rate_value.setText(tts_speed_label(self.tts_speed))
 
+        def _on_transform_provider_changed(self, index: int) -> None:
+            provider = self.transform_provider_combo.itemData(index)
+            if not isinstance(provider, str):
+                return
+            self.transform_provider = provider
+            _save_preferred_transform_provider(provider)
+            self.transform_provider_combo.setToolTip(_transform_provider_tooltip(provider))
+
+        def _install_codex_integration(self) -> None:
+            self.install_codex_integration_button.setEnabled(False)
+            try:
+                install_codex_integration()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self,
+                    "AgentTools integration",
+                    f"Could not install AgentTools integration.\n\n{exc}",
+                )
+            finally:
+                self.install_codex_integration_button.setEnabled(True)
+                self._refresh_codex_integration_state()
+
+        def _on_codex_integration_toggled(self, checked: bool) -> None:
+            try:
+                if checked:
+                    if self.codex_integration_status.install_state == "installed":
+                        set_codex_integration_enabled(True)
+                    else:
+                        install_codex_integration()
+                else:
+                    set_codex_integration_enabled(False)
+            except Exception as exc:
+                self._refresh_codex_integration_state()
+                QMessageBox.warning(
+                    self,
+                    "AgentTools integration",
+                    f"Could not update AgentTools integration.\n\n{exc}",
+                )
+                return
+
+            self._refresh_codex_integration_state()
+
+        def _refresh_codex_integration_state(self) -> None:
+            status = load_codex_integration_status()
+            self.codex_integration_status = status
+            checked = codex_integration_toggle_checked(status)
+            status_text = codex_integration_status_text(status)
+            show_install_panel = should_show_codex_install_panel(status)
+
+            self.install_panel.setVisible(show_install_panel)
+            self.content_widget.setVisible(not show_install_panel)
+            self.install_title_label.setText(codex_integration_install_title(status))
+            self.install_body_label.setText(codex_integration_install_body(status))
+            self.install_codex_integration_button.setText(codex_integration_install_action_text(status))
+
+            _set_checked_without_signals(self.codex_integration_switch, checked)
+            _set_checked_without_signals(self.codex_integration_action, checked)
+            self.transform_provider = _load_preferred_transform_provider()
+            _set_combobox_value_without_signals(
+                self.transform_provider_combo,
+                self.transform_provider,
+            )
+            self.codex_integration_switch.setEnabled(status.install_state == "installed")
+            self.transform_provider_combo.setEnabled(status.install_state == "installed")
+            self.codex_integration_status_label.setText(status_text)
+            tooltip = _codex_integration_tooltip(status)
+            self.codex_integration_switch.setToolTip(tooltip)
+            self.codex_integration_status_label.setToolTip(tooltip)
+            self.codex_integration_action.setToolTip(tooltip)
+            self.install_codex_integration_button.setToolTip(tooltip)
+            self.transform_provider_combo.setToolTip(
+                _transform_provider_tooltip(self.transform_provider)
+            )
+            self.install_codex_integration_action.setText(
+                f"{codex_integration_install_action_text(status)} AgentTools integration"
+            )
+            self.install_codex_integration_action.setVisible(show_install_panel)
+            self.codex_integration_action.setVisible(not show_install_panel)
+
         def skip_next(self) -> None:
             next_item = self._next_queued_item_for_advance()
             if self.current_item_id is not None:
@@ -976,3 +1180,81 @@ def _save_preferred_tts_speed(speed: float) -> None:
     preferences = load_preferences()
     preferences["preferred_tts_speed"] = clamp_tts_speed(speed)
     save_preferences(preferences)
+
+
+def _load_preferred_transform_provider() -> str:
+    provider = read_preferred_transform_provider() or DEFAULT_TRANSFORM_PROVIDER
+    if provider in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
+        return provider
+    return DEFAULT_TRANSFORM_PROVIDER
+
+
+def _save_preferred_transform_provider(provider: str) -> None:
+    if provider not in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
+        raise ValueError(f"Unsupported transform provider {provider!r}.")
+    preferences = load_preferences()
+    preferences["preferred_transform_provider"] = provider
+    save_preferences(preferences)
+
+
+def _set_checked_without_signals(target: object, checked: bool) -> None:
+    if not hasattr(target, "blockSignals") or not hasattr(target, "setChecked"):
+        return
+    was_blocked = target.blockSignals(True)
+    target.setChecked(checked)
+    target.blockSignals(was_blocked)
+
+
+def _set_combobox_value_without_signals(target: object, value: str) -> None:
+    if not hasattr(target, "blockSignals") or not hasattr(target, "findData"):
+        return
+    index = target.findData(value)
+    if index < 0:
+        return
+    was_blocked = target.blockSignals(True)
+    target.setCurrentIndex(index)
+    target.blockSignals(was_blocked)
+
+
+def _codex_integration_tooltip(status: CodexIntegrationStatus) -> str:
+    lines = [
+        f"Codex home: {status.codex.codex_home}",
+        f"Claude home: {status.claude.claude_home}",
+    ]
+    if status.issues:
+        lines.append(f"Issues: {', '.join(status.issues)}")
+    return "\n".join(lines)
+
+
+def should_show_codex_install_panel(status: CodexIntegrationStatus) -> bool:
+    return status.install_state != "installed"
+
+
+def codex_integration_install_title(status: CodexIntegrationStatus) -> str:
+    if status.install_state == "broken":
+        return "We need to repair AgentTools"
+    return "We need to install AgentTools"
+
+
+def codex_integration_install_body(status: CodexIntegrationStatus) -> str:
+    if status.install_state == "broken":
+        return (
+            "The AgentTools integration looks incomplete. Repair it so completed "
+            "Codex and Claude Code replies can be queued as spoken audio in this controller."
+        )
+    return (
+        "Install it once to connect Codex and Claude Code to this controller. "
+        "Completed Codex and Claude Code replies are queued as spoken audio automatically."
+    )
+
+
+def codex_integration_install_action_text(status: CodexIntegrationStatus) -> str:
+    if status.install_state == "broken":
+        return "Repair"
+    return "Install"
+
+
+def _transform_provider_tooltip(provider: str) -> str:
+    if provider == "claude-code":
+        return "Use Claude Code for text transform before TTS."
+    return "Use Codex for text transform before TTS."

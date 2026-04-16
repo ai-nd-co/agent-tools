@@ -16,6 +16,10 @@ DEFAULT_ORIGINATOR = "codex_cli_rs"
 DEFAULT_MODEL = "gpt-5"
 DEFAULT_TTSIFY_MODEL = "gpt-5.4-mini"
 DEFAULT_TTSIFY_VOICE = "af_heart"
+DEFAULT_TRANSFORM_PROVIDER = "codex"
+DEFAULT_CLAUDE_CODE_MODEL = "haiku"
+DEFAULT_CLAUDE_CODE_EFFORT = "low"
+ALLOWED_CLAUDE_CODE_MODELS = ("haiku", "sonnet")
 
 ENV_CODEX_MODEL = "AGENT_TOOLS_CODEX_MODEL"
 ENV_CODEX_REASONING_EFFORT = "AGENT_TOOLS_CODEX_REASONING_EFFORT"
@@ -24,7 +28,12 @@ ENV_KOKORO_LANGUAGE = "AGENT_TOOLS_KOKORO_LANGUAGE"
 ENV_KOKORO_SPEED = "AGENT_TOOLS_KOKORO_SPEED"
 ENV_KOKORO_DEVICE = "AGENT_TOOLS_KOKORO_DEVICE"
 ENV_SOURCE = "AGENT_TOOLS_SOURCE"
+ENV_TRANSFORM_PROVIDER = "AGENT_TOOLS_TRANSFORM_PROVIDER"
+ENV_CLAUDE_CODE_MODEL = "AGENT_TOOLS_CLAUDE_CODE_MODEL"
+ENV_CLAUDE_CODE_EFFORT = "AGENT_TOOLS_CLAUDE_CODE_EFFORT"
+ENV_CLAUDE_CODE_BARE = "AGENT_TOOLS_CLAUDE_CODE_BARE"
 DEFAULT_PREFERRED_TTS_SPEED = 1.0
+PREFERENCE_TRANSFORM_PROVIDER = "preferred_transform_provider"
 
 
 @dataclass(frozen=True)
@@ -109,8 +118,37 @@ def read_float_env(name: str) -> float | None:
         raise ValueError(f"Environment variable {name} must be a float, got {value!r}") from exc
 
 
+def read_bool_env(name: str) -> bool | None:
+    value = read_string_env(name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"Environment variable {name} must be a boolean-like value, got {value!r}"
+    )
+
+
 def read_preferred_tts_speed() -> float | None:
     value = load_preferences().get("preferred_tts_speed")
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def read_preferred_transform_provider() -> str | None:
+    value = load_preferences().get(PREFERENCE_TRANSFORM_PROVIDER)
+    return _coerce_str(value)
+
+
+def normalize_claude_code_model(value: str | None) -> str:
+    normalized = _coerce_str(value) or DEFAULT_CLAUDE_CODE_MODEL
+    lowered = normalized.lower()
+    if lowered in ALLOWED_CLAUDE_CODE_MODELS:
+        return lowered
+    raise ValueError(
+        "Claude Code transform model must be 'haiku' or 'sonnet'; Opus is not allowed."
+    )

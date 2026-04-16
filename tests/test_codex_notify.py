@@ -30,7 +30,11 @@ def test_parse_codex_notify_payload_reads_hyphenated_keys() -> None:
     assert payload.last_assistant_message == "done"
 
 
-def test_dispatch_codex_notify_skips_blank_message(tmp_path: Path) -> None:
+def test_dispatch_codex_notify_skips_blank_message(tmp_path: Path, monkeypatch: object) -> None:
+    import agent_tools.codex_notify as notify_module
+
+    monkeypatch.setattr(notify_module, "load_codex_integration_enabled", lambda: True)
+
     codex_home = tmp_path / ".codex"
     result = dispatch_codex_notify(
         json.dumps(
@@ -108,6 +112,7 @@ def test_dispatch_codex_notify_defaults_to_auto_and_dedupes(
     monkeypatch.setattr(notify_module, "ttsify_text", fake_ttsify_text)
     monkeypatch.setattr(notify_module, "enqueue_for_playback", fake_enqueue_for_playback)
     monkeypatch.setattr(notify_module, "start_processing_notice", fake_start_processing_notice)
+    monkeypatch.setattr(notify_module, "load_codex_integration_enabled", lambda: True)
 
     payload = json.dumps(
         {
@@ -187,6 +192,7 @@ def test_dispatch_codex_notify_respects_device_env(tmp_path: Path, monkeypatch: 
         "start_processing_notice",
         lambda **_kwargs: FakeNotice(),
     )
+    monkeypatch.setattr(notify_module, "load_codex_integration_enabled", lambda: True)
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_DEVICE", "cuda")
 
     result = dispatch_codex_notify(
@@ -205,3 +211,38 @@ def test_dispatch_codex_notify_respects_device_env(tmp_path: Path, monkeypatch: 
 
     assert result.status == "queued"
     assert captured["device"] == "cuda"
+
+
+def test_dispatch_codex_notify_short_circuits_when_disabled(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    import agent_tools.codex_notify as notify_module
+
+    monkeypatch.setattr(notify_module, "load_codex_integration_enabled", lambda: False)
+
+    def fail_ttsify_text(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("ttsify_text should not run when integration is disabled")
+
+    def fail_enqueue_for_playback(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("enqueue_for_playback should not run when integration is disabled")
+
+    monkeypatch.setattr(notify_module, "ttsify_text", fail_ttsify_text)
+    monkeypatch.setattr(notify_module, "enqueue_for_playback", fail_enqueue_for_playback)
+
+    result = dispatch_codex_notify(
+        json.dumps(
+            {
+                "type": "agent-turn-complete",
+                "thread-id": "thread-3",
+                "turn-id": "turn-3",
+                "cwd": "C:\\repo",
+                "input-messages": [],
+                "last-assistant-message": "assistant message",
+            }
+        ),
+        codex_home=tmp_path / ".codex",
+    )
+
+    assert result.status == "disabled"
+    assert "integration_disabled_exit" in result.log_path.read_text(encoding="utf-8")

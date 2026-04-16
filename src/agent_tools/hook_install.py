@@ -10,10 +10,13 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
 
+from agent_tools.claude_config import resolve_claude_home
 from agent_tools.codex_config import resolve_codex_home
+from agent_tools.codex_integration import set_codex_integration_enabled
 
-STOP_HOOK_COMMAND = "bash -lc '$HOME/.codex/hooks/stop_tts.sh'"
+STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.codex/hooks/stop_tts.sh"\''
 WINDOWS_NOTIFY_COMMAND = "codex-notify-dispatch"
+CLAUDE_STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.claude/agent-tools/stop_tts.sh"\''
 STOP_HOOK_ENTRY = {
     "hooks": [
         {
@@ -21,6 +24,15 @@ STOP_HOOK_ENTRY = {
             "command": STOP_HOOK_COMMAND,
             "timeout": 30,
             "statusMessage": "Queueing final assistant message for TTS",
+        }
+    ]
+}
+CLAUDE_STOP_HOOK_ENTRY = {
+    "hooks": [
+        {
+            "type": "command",
+            "command": CLAUDE_STOP_HOOK_COMMAND,
+            "timeout": 30,
         }
     ]
 }
@@ -35,6 +47,20 @@ class InstallCodexIntegrationResult:
     hooks_json_path: Path | None = None
     hook_script_path: Path | None = None
     notify_command: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class InstallClaudeIntegrationResult:
+    claude_home: Path
+    settings_path: Path
+    hook_script_path: Path
+    backups: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class InstallAgentIntegrationsResult:
+    codex: InstallCodexIntegrationResult
+    claude: InstallClaudeIntegrationResult
 
 
 def install_codex_integration(
@@ -67,6 +93,7 @@ def install_windows_notify_integration(
     backup = _write_text_if_changed(config_path, updated_text)
     if backup is not None:
         backups.append(backup)
+    set_codex_integration_enabled(True)
 
     return InstallCodexIntegrationResult(
         mode="notify",
@@ -106,6 +133,7 @@ def install_codex_stop_hook(codex_home: Path | None = None) -> InstallCodexInteg
     if backup is not None:
         backups.append(backup)
     _ensure_executable(hook_script_path)
+    set_codex_integration_enabled(True)
 
     return InstallCodexIntegrationResult(
         mode="stop-hook",
@@ -117,8 +145,60 @@ def install_codex_stop_hook(codex_home: Path | None = None) -> InstallCodexInteg
     )
 
 
+def install_claude_integration(
+    claude_home: Path | None = None,
+) -> InstallClaudeIntegrationResult:
+    home = resolve_claude_home(claude_home)
+    script_dir = home / "agent-tools"
+    script_dir.mkdir(parents=True, exist_ok=True)
+
+    backups: list[Path] = []
+    settings_path = home / "settings.json"
+    hook_script_path = script_dir / "stop_tts.sh"
+
+    updated_payload = build_updated_claude_settings_payload(settings_path)
+    backup = _write_text_if_changed(
+        settings_path,
+        json.dumps(updated_payload, indent=2) + "\n",
+    )
+    if backup is not None:
+        backups.append(backup)
+
+    script_text = load_packaged_claude_hook_script()
+    backup = _write_text_if_changed(hook_script_path, script_text)
+    if backup is not None:
+        backups.append(backup)
+    _ensure_executable(hook_script_path)
+    set_codex_integration_enabled(True)
+
+    return InstallClaudeIntegrationResult(
+        claude_home=home,
+        settings_path=settings_path,
+        hook_script_path=hook_script_path,
+        backups=tuple(backups),
+    )
+
+
+def install_agent_integrations(
+    codex_home: Path | None = None,
+    claude_home: Path | None = None,
+    *,
+    platform_name: str | None = None,
+) -> InstallAgentIntegrationsResult:
+    return InstallAgentIntegrationsResult(
+        codex=install_codex_integration(codex_home, platform_name=platform_name),
+        claude=install_claude_integration(claude_home),
+    )
+
+
 def load_packaged_hook_script() -> str:
     return resources.files("agent_tools.codex_hooks").joinpath("stop_tts.sh").read_text(
+        encoding="utf-8"
+    )
+
+
+def load_packaged_claude_hook_script() -> str:
+    return resources.files("agent_tools.claude_hooks").joinpath("stop_tts.sh").read_text(
         encoding="utf-8"
     )
 
@@ -140,6 +220,27 @@ def build_updated_hooks_payload(hooks_json_path: Path) -> dict[str, Any]:
             break
     if not replaced:
         stop_entries.append(STOP_HOOK_ENTRY)
+
+    return payload
+
+
+def build_updated_claude_settings_payload(settings_path: Path) -> dict[str, Any]:
+    payload = _load_existing_settings_payload(settings_path)
+    hooks = payload.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{settings_path} must contain a JSON object under 'hooks'.")
+    stop_entries = hooks.setdefault("Stop", [])
+    if not isinstance(stop_entries, list):
+        raise ValueError(f"{settings_path} must contain a JSON list under hooks.Stop.")
+
+    replaced = False
+    for index, entry in enumerate(stop_entries):
+        if _is_agent_tools_claude_stop_entry(entry):
+            stop_entries[index] = CLAUDE_STOP_HOOK_ENTRY
+            replaced = True
+            break
+    if not replaced:
+        stop_entries.append(CLAUDE_STOP_HOOK_ENTRY)
 
     return payload
 
@@ -204,13 +305,20 @@ def _load_existing_hooks_payload(hooks_json_path: Path) -> dict[str, Any]:
     if not hooks_json_path.exists():
         return {"hooks": {}}
 
+    return _load_existing_settings_payload(hooks_json_path)
+
+
+def _load_existing_settings_payload(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+
     try:
-        payload = json.loads(hooks_json_path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{hooks_json_path} is not valid JSON.") from exc
+        raise ValueError(f"{path} is not valid JSON.") from exc
 
     if not isinstance(payload, dict):
-        raise ValueError(f"{hooks_json_path} must contain a top-level JSON object.")
+        raise ValueError(f"{path} must contain a top-level JSON object.")
     return payload
 
 
@@ -225,6 +333,23 @@ def _is_agent_tools_stop_entry(entry: object) -> bool:
             continue
         command = hook.get("command")
         if isinstance(command, str) and "stop_tts.sh" in command:
+            return True
+    return False
+
+
+def _is_agent_tools_claude_stop_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    for hook in hooks:
+        if not isinstance(hook, dict):
+            continue
+        command = hook.get("command")
+        if command == CLAUDE_STOP_HOOK_COMMAND:
+            return True
+        if isinstance(command, str) and "agent-tools/stop_tts.sh" in command:
             return True
     return False
 

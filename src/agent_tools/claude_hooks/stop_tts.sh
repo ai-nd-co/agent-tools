@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-hook_root="${HOME}/.codex/hooks"
-state_dir="${hook_root}/state"
+hook_root="${HOME}/.claude/agent-tools"
 audio_tmp_dir="${hook_root}/tmp-audio"
 log_file="${hook_root}/stop_tts.log"
 child_log="${hook_root}/stop_tts_agent_tools.log"
-mkdir -p "${state_dir}" "${audio_tmp_dir}"
+mkdir -p "${audio_tmp_dir}"
 touch "${log_file}" "${child_log}" 2>/dev/null || true
 
 log() {
@@ -16,9 +15,6 @@ log() {
 }
 
 log "hook_start pid=$$ pwd=$(pwd) uname=$(uname -s 2>/dev/null || echo unknown)"
-
-# Best-effort cleanup of old state/audio artifacts.
-find "${state_dir}" -type f -mtime +7 -delete 2>/dev/null || true
 find "${audio_tmp_dir}" -type f -mtime +2 -delete 2>/dev/null || true
 
 payload="$(cat)"
@@ -44,7 +40,6 @@ except Exception:
     raise SystemExit(0)
 
 out = {
-    "turn_id": data.get("turn_id") or "",
     "session_id": data.get("session_id") or "",
     "stop_hook_active": bool(data.get("stop_hook_active")),
     "last_assistant_message": data.get("last_assistant_message") or "",
@@ -82,12 +77,11 @@ else:
 PY
 }
 
-turn_id="$(read_json_field turn_id)"
 session_id="$(read_json_field session_id)"
 stop_hook_active="$(read_json_field stop_hook_active)"
 message="$(read_json_field last_assistant_message)"
 
-log "parsed turn_id=${turn_id:-<empty>} session_id=${session_id:-<empty>} stop_hook_active=${stop_hook_active} message_bytes=${#message}"
+log "parsed session_id=${session_id:-<empty>} stop_hook_active=${stop_hook_active} message_bytes=${#message}"
 
 if [[ "${stop_hook_active}" == "true" ]]; then
   log "stop_hook_active_exit"
@@ -99,19 +93,9 @@ if [[ -z "${message//[[:space:]]/}" ]]; then
   exit 0
 fi
 
-if [[ -n "${turn_id}" ]]; then
-  turn_marker="${state_dir}/${turn_id}.done"
-  if [[ -f "${turn_marker}" ]]; then
-    log "duplicate_turn_exit turn_id=${turn_id}"
-    exit 0
-  fi
-  : > "${turn_marker}"
-  log "created_turn_marker path=${turn_marker}"
-fi
-
-source_label="codex-stop"
+source_label="claude-stop"
 if [[ -n "${session_id}" ]]; then
-  source_label="codex-stop:${session_id}"
+  source_label="claude-stop:${session_id}"
 fi
 
 agent_tools_path="$(command -v agent-tools 2>/dev/null || true)"
@@ -123,7 +107,7 @@ log "agent_tools_path=${agent_tools_path} source_label=${source_label}"
 
 run_windows_queue() {
   (
-    printf '%s' "${message}" | env AGENT_TOOLS_CODEX_INTEGRATION_TRIGGERED=1 AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-mode play
+    printf '%s' "${message}" | env AGENT_TOOLS_CLAUDE_INTEGRATION_TRIGGERED=1 AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-mode play
   ) >>"${child_log}" 2>&1 &
   local child_pid=$!
   log "spawned_windows_queue pid=${child_pid}"
@@ -133,7 +117,7 @@ run_file_then_player() {
   local audio_file="$1"
   log "generating_audio_file=${audio_file}"
   (
-    printf '%s' "${message}" | env AGENT_TOOLS_CODEX_INTEGRATION_TRIGGERED=1 AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-file "${audio_file}"
+    printf '%s' "${message}" | env AGENT_TOOLS_CLAUDE_INTEGRATION_TRIGGERED=1 AGENT_TOOLS_SOURCE="${source_label}" agent-tools ttsify --output-file "${audio_file}"
   ) >>"${child_log}" 2>&1 || return 1
 
   if command -v afplay >/dev/null 2>&1; then
@@ -168,12 +152,12 @@ case "${uname_s}" in
     ;;
   Darwin)
     log "platform_branch=darwin"
-    audio_file="${audio_tmp_dir}/${turn_id:-$(date +%s)}.wav"
+    audio_file="${audio_tmp_dir}/${session_id:-$(date +%s)}.wav"
     run_file_then_player "${audio_file}" || log "darwin_player_failure"
     ;;
   Linux)
     log "platform_branch=linux"
-    audio_file="${audio_tmp_dir}/${turn_id:-$(date +%s)}.wav"
+    audio_file="${audio_tmp_dir}/${session_id:-$(date +%s)}.wav"
     run_file_then_player "${audio_file}" || log "linux_player_failure"
     ;;
   *)

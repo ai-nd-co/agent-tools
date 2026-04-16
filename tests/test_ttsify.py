@@ -192,3 +192,91 @@ def test_transformer_accepts_system_prompt_text(tmp_path: Path, monkeypatch: obj
     )
 
     assert result.text == "done"
+
+
+def test_ttsify_can_select_claude_code_provider(monkeypatch: object) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+
+    def fake_transform_text(_input_text: str, options: TransformOptions) -> TransformResult:
+        captured["provider"] = options.provider
+        captured["claude_model"] = options.claude_model
+        captured["claude_effort"] = options.claude_effort
+        captured["claude_bare"] = options.claude_bare
+        return TransformResult(
+            text="spoken text",
+            response_id=None,
+            usage=None,
+            session_id="session-claude",
+        )
+
+    def fake_synthesize_wav(
+        _text: str,
+        *,
+        voice: str,
+        language: str | None,
+        speed: float,
+        device: str,
+    ) -> TtsResult:
+        return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
+
+    monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
+    monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+
+    result = ttsify_text(
+        "raw text",
+        TtsifyOptions(
+            provider="claude-code",
+            claude_model="haiku",
+            claude_effort="low",
+            claude_bare=True,
+        ),
+    )
+
+    assert captured["provider"] == "claude-code"
+    assert captured["claude_model"] == "haiku"
+    assert captured["claude_effort"] == "low"
+    assert captured["claude_bare"] is True
+    assert result.model == "haiku"
+
+
+def test_ttsify_uses_preferred_provider_when_not_explicit(monkeypatch: object) -> None:
+    import agent_tools.transformer as transformer_module
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+
+    def fake_transform_text(_input_text: str, options: TransformOptions) -> TransformResult:
+        captured["provider"] = options.provider
+        captured["claude_model"] = options.claude_model
+        return TransformResult(
+            text="spoken text",
+            response_id=None,
+            usage=None,
+            session_id="session-claude",
+        )
+
+    def fake_synthesize_wav(
+        _text: str,
+        *,
+        voice: str,
+        language: str | None,
+        speed: float,
+        device: str,
+    ) -> TtsResult:
+        return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
+
+    monkeypatch.setattr(
+        transformer_module,
+        "read_preferred_transform_provider",
+        lambda: "claude-code",
+    )
+    monkeypatch.delenv("AGENT_TOOLS_TRANSFORM_PROVIDER", raising=False)
+    monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
+    monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+
+    ttsify_text("raw text", TtsifyOptions())
+
+    assert captured["provider"] == "claude-code"
+    assert captured["claude_model"] == "haiku"

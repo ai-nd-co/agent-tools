@@ -5,12 +5,18 @@ import json
 import sys
 from pathlib import Path
 
+from agent_tools.claude_integration import is_claude_integration_triggered
 from agent_tools.codex_config import (
+    ALLOWED_CLAUDE_CODE_MODELS,
     ENV_KOKORO_SPEED,
     ENV_SOURCE,
     read_float_env,
     read_preferred_tts_speed,
     read_string_env,
+)
+from agent_tools.codex_integration import (
+    is_codex_integration_triggered,
+    load_codex_integration_enabled,
 )
 from agent_tools.codex_notify import dispatch_codex_notify
 from agent_tools.controller_client import (
@@ -20,7 +26,11 @@ from agent_tools.controller_client import (
 )
 from agent_tools.cuda_install import install_cuda
 from agent_tools.cuda_runtime import SUPPORTED_CUDA_TRACKS, probe_tts_runtime
-from agent_tools.hook_install import install_codex_integration
+from agent_tools.hook_install import (
+    install_agent_integrations,
+    install_claude_integration,
+    install_codex_integration,
+)
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
 from agent_tools.transformer import TransformOptions, transform_text
 from agent_tools.tts import SUPPORTED_LANGUAGES, synthesize_wav
@@ -43,8 +53,12 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ttsify(args)
     if args.command == "ui":
         return _run_ui(args)
+    if args.command == "install-integrations":
+        return _run_install_integrations(args)
     if args.command == "install-codex-integration":
         return _run_install_codex_integration(args)
+    if args.command == "install-claude-integration":
+        return _run_install_claude_integration(args)
     if args.command == "install-codex-stop-hook":
         return _run_install_codex_integration(args)
     if args.command == "install-cuda":
@@ -62,11 +76,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-tools")
     subparsers = parser.add_subparsers(dest="command")
 
-    transform_parser = subparsers.add_parser("transform", help="Transform text through Codex.")
+    transform_parser = subparsers.add_parser(
+        "transform",
+        help="Transform text through Codex or Claude Code.",
+    )
     transform_parser.add_argument("--system-prompt-file", required=True, type=Path)
+    transform_parser.add_argument("--provider", choices=("codex", "claude-code"))
     transform_parser.add_argument("--model")
     transform_parser.add_argument("--reasoning-effort", choices=REASONING_EFFORT_CHOICES)
     transform_parser.add_argument("--fast", action="store_true")
+    transform_parser.add_argument("--claude-model", choices=ALLOWED_CLAUDE_CODE_MODELS)
+    transform_parser.add_argument("--claude-effort", choices=("low", "medium", "high", "max"))
+    transform_parser.add_argument("--claude-bare", action="store_true")
     transform_parser.add_argument("--input-file", type=Path)
     transform_parser.add_argument("--output-file", default="-")
     transform_parser.add_argument("--codex-home", type=Path)
@@ -88,9 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
         "ttsify",
         help="Transform raw text into TTS-friendly text and synthesize it in one step.",
     )
+    ttsify_parser.add_argument("--provider", choices=("codex", "claude-code"))
     ttsify_parser.add_argument("--model")
     ttsify_parser.add_argument("--reasoning-effort", choices=REASONING_EFFORT_CHOICES)
     ttsify_parser.add_argument("--fast", action="store_true")
+    ttsify_parser.add_argument("--claude-model", choices=ALLOWED_CLAUDE_CODE_MODELS)
+    ttsify_parser.add_argument("--claude-effort", choices=("low", "medium", "high", "max"))
+    ttsify_parser.add_argument("--claude-bare", action="store_true")
     ttsify_parser.add_argument("--voice")
     ttsify_parser.add_argument("--language", choices=SUPPORTED_LANGUAGES)
     ttsify_parser.add_argument("--speed", type=float)
@@ -108,11 +133,24 @@ def build_parser() -> argparse.ArgumentParser:
     ui_parser.add_argument("--hidden", action="store_true", help=argparse.SUPPRESS)
     ui_parser.add_argument("--quit", action="store_true", help="Stop the desktop queue controller.")
 
+    install_integrations_parser = subparsers.add_parser(
+        "install-integrations",
+        help="Install the supported Codex and Claude Code audio integrations.",
+    )
+    install_integrations_parser.add_argument("--codex-home", type=Path)
+    install_integrations_parser.add_argument("--claude-home", type=Path)
+
     install_integration_parser = subparsers.add_parser(
         "install-codex-integration",
         help="Install the supported Codex audio integration for the current platform.",
     )
     install_integration_parser.add_argument("--codex-home", type=Path)
+
+    install_claude_parser = subparsers.add_parser(
+        "install-claude-integration",
+        help="Install the Claude Code Stop-hook audio integration.",
+    )
+    install_claude_parser.add_argument("--claude-home", type=Path)
 
     install_hook_parser = subparsers.add_parser(
         "install-codex-stop-hook",
@@ -151,12 +189,16 @@ def _run_transform(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
     options = TransformOptions(
         system_prompt_file=args.system_prompt_file,
+        provider=getattr(args, "provider", None),
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         fast=args.fast,
         codex_home=args.codex_home,
         base_url=args.base_url,
         originator=args.originator,
+        claude_model=getattr(args, "claude_model", None),
+        claude_effort=getattr(args, "claude_effort", None),
+        claude_bare=getattr(args, "claude_bare", False),
         timeout_seconds=args.timeout_seconds,
     )
     result = transform_text(input_text, options)
@@ -203,6 +245,12 @@ def _run_tts(args: argparse.Namespace) -> int:
 
 
 def _run_ttsify(args: argparse.Namespace) -> int:
+    if (
+        is_codex_integration_triggered() or is_claude_integration_triggered()
+    ) and not load_codex_integration_enabled():
+        print("AgentTools integration disabled; skipping audio generation.", file=sys.stderr)
+        return 0
+
     input_text = _read_text_input(args.input_file)
     source_label = args.source or read_string_env(ENV_SOURCE)
     processing_notice = _maybe_start_processing_notice(
@@ -215,6 +263,7 @@ def _run_ttsify(args: argparse.Namespace) -> int:
         result = ttsify_text(
             input_text,
             TtsifyOptions(
+                provider=getattr(args, "provider", None),
                 model=args.model,
                 reasoning_effort=args.reasoning_effort,
                 fast=args.fast,
@@ -225,6 +274,9 @@ def _run_ttsify(args: argparse.Namespace) -> int:
                 codex_home=args.codex_home,
                 base_url=args.base_url,
                 originator=args.originator,
+                claude_model=getattr(args, "claude_model", None),
+                claude_effort=getattr(args, "claude_effort", None),
+                claude_bare=getattr(args, "claude_bare", False),
                 timeout_seconds=args.timeout_seconds,
             ),
         )
@@ -276,6 +328,32 @@ def _run_install_codex_integration(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_install_claude_integration(args: argparse.Namespace) -> int:
+    result = install_claude_integration(args.claude_home)
+    print("Installed Claude Code integration.")
+    print(f"  settings: {result.settings_path}")
+    print(f"  script: {result.hook_script_path}")
+    print(f"  hook log: {result.claude_home / 'agent-tools' / 'stop_tts.log'}")
+    print(f"  child log: {result.claude_home / 'agent-tools' / 'stop_tts_agent_tools.log'}")
+    if result.backups:
+        print("  backups:")
+        for backup in result.backups:
+            print(f"    - {backup}")
+    return 0
+
+
+def _run_install_integrations(args: argparse.Namespace) -> int:
+    result = install_agent_integrations(
+        codex_home=args.codex_home,
+        claude_home=args.claude_home,
+    )
+    print("Installed AgentTools integrations.")
+    print(f"  codex config: {result.codex.config_path}")
+    print(f"  claude settings: {result.claude.settings_path}")
+    print(f"  claude script: {result.claude.hook_script_path}")
+    return 0
+
+
 def _run_install_cuda(args: argparse.Namespace) -> int:
     result = install_cuda(
         cuda_track=args.cuda_track,
@@ -319,7 +397,13 @@ def _run_install_cuda(args: argparse.Namespace) -> int:
 
 def _run_codex_notify_dispatch(args: argparse.Namespace) -> int:
     result = dispatch_codex_notify(args.payload_json, codex_home=args.codex_home)
-    success_statuses = {"queued", "duplicate", "ignored-event", "ignored-blank-message"}
+    success_statuses = {
+        "queued",
+        "duplicate",
+        "ignored-event",
+        "ignored-blank-message",
+        "disabled",
+    }
     return 0 if result.status in success_statuses else 1
 
 

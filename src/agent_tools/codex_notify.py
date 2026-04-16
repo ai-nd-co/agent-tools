@@ -9,6 +9,7 @@ from pathlib import Path
 from time import perf_counter
 
 from agent_tools.codex_config import ENV_KOKORO_DEVICE, read_string_env, resolve_codex_home
+from agent_tools.codex_integration import load_codex_integration_enabled
 from agent_tools.controller_client import start_processing_notice
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
 from agent_tools.ttsify import TtsifyOptions, ttsify_text
@@ -48,6 +49,14 @@ def dispatch_codex_notify(
     _cleanup_old_markers(marker_dir)
 
     _log(log_path, f"dispatch_start payload_bytes={len(payload_json)}")
+    if not load_codex_integration_enabled():
+        _log(log_path, "integration_disabled_exit")
+        return CodexNotifyDispatchResult(
+            status="disabled",
+            codex_home=home,
+            log_path=log_path,
+            child_log_path=child_log_path,
+        )
     try:
         payload = parse_codex_notify_payload(payload_json)
     except Exception as exc:

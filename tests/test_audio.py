@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import sys
 import types
 import wave
 from io import BytesIO
@@ -89,8 +90,6 @@ def test_synthesize_wav_reports_actionable_kokoro_import_error(
 
 
 def test_play_wav_blocking_uses_winsound_backend(monkeypatch: object) -> None:
-    import agent_tools.audio as audio_module
-
     captured: dict[str, object] = {}
 
     class FakeWinSound:

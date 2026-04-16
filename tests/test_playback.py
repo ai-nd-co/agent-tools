@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import builtins
 
-import pytest
-
 from agent_tools.playback import detect_playback_capabilities, plan_playback
 
 

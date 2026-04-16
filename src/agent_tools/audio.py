@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import wave
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
@@ -77,7 +78,8 @@ def play_wav_blocking(
 def _play_wav_with_winsound(wav_data: bytes) -> None:
     import winsound
 
-    winsound.PlaySound(wav_data, winsound.SND_MEMORY)
+    winsound_api = cast(Any, winsound)
+    winsound_api.PlaySound(wav_data, winsound_api.SND_MEMORY)
 
 
 def _play_audio_file_blocking(audio_path: Path, *, backend: str) -> None:

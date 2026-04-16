@@ -50,7 +50,9 @@ def load_agent_integration_status(
     claude = load_claude_integration_status(claude_home)
     enabled = load_codex_integration_enabled()
     available_providers = available_transform_providers(codex=codex, claude=claude)
-    install_state = "installed" if available_providers else "missing"
+    install_state: AgentIntegrationInstallState = (
+        "installed" if available_providers else "missing"
+    )
     integration_state = _combine_integration_states(codex=codex, claude=claude)
     availability_issues = tuple(f"codex:{issue}" for issue in codex.availability_issues) + tuple(
         f"claude:{issue}" for issue in claude.availability_issues

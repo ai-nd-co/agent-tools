@@ -101,5 +101,9 @@ module = ["torch", "torch.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["transformers", "transformers.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
 module = ["torchaudio", "torchaudio.*", "torchvision", "torchvision.*"]
 ignore_missing_imports = true

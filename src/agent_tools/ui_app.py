@@ -7,9 +7,14 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from queue import Empty, SimpleQueue
+from typing import Any, cast
 
 from agent_tools.agent_integration import (
     AgentIntegrationStatus as CodexIntegrationStatus,
+)
+from agent_tools.agent_integration import (
+    TransformProvider,
+    selected_provider_fallback_note,
 )
 from agent_tools.agent_integration import (
     agent_integration_status_text as codex_integration_status_text,
@@ -22,9 +27,6 @@ from agent_tools.agent_integration import (
 )
 from agent_tools.agent_integration import (
     load_agent_integration_status as load_codex_integration_status,
-)
-from agent_tools.agent_integration import (
-    selected_provider_fallback_note,
 )
 from agent_tools.agent_integration import (
     set_agent_integration_enabled as set_codex_integration_enabled,
@@ -88,7 +90,7 @@ FEED_PREVIEW_LIMIT = 96
 TTS_SPEED_MIN = 0.7
 TTS_SPEED_MAX = 1.3
 TTS_SPEED_STEP = 0.05
-TRANSFORM_PROVIDER_OPTIONS = (
+TRANSFORM_PROVIDER_OPTIONS: tuple[tuple[TransformProvider, str], ...] = (
     ("codex", "Codex"),
     ("claude-code", "Claude Code"),
 )
@@ -944,11 +946,14 @@ def run_ui(*, hidden: bool) -> int:
 
         def _on_transform_provider_changed(self, index: int) -> None:
             provider = self.transform_provider_combo.itemData(index)
-            if not isinstance(provider, str):
+            if provider not in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
                 return
-            self.transform_provider = provider
-            _save_preferred_transform_provider(provider)
-            self.transform_provider_combo.setToolTip(_transform_provider_tooltip(provider))
+            selected_provider = cast(TransformProvider, provider)
+            self.transform_provider = selected_provider
+            _save_preferred_transform_provider(selected_provider)
+            self.transform_provider_combo.setToolTip(
+                _transform_provider_tooltip(selected_provider)
+            )
 
         def _install_codex_integration(self) -> None:
             self.install_codex_integration_button.setEnabled(False)
@@ -1204,14 +1209,14 @@ def _save_preferred_tts_speed(speed: float) -> None:
     save_preferences(preferences)
 
 
-def _load_preferred_transform_provider() -> str:
+def _load_preferred_transform_provider() -> TransformProvider:
     provider = read_preferred_transform_provider() or DEFAULT_TRANSFORM_PROVIDER
     if provider in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
         return provider
-    return DEFAULT_TRANSFORM_PROVIDER
+    return cast(TransformProvider, DEFAULT_TRANSFORM_PROVIDER)
 
 
-def _save_preferred_transform_provider(provider: str) -> None:
+def _save_preferred_transform_provider(provider: TransformProvider) -> None:
     if provider not in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
         raise ValueError(f"Unsupported transform provider {provider!r}.")
     preferences = load_preferences()
@@ -1227,7 +1232,7 @@ def _set_checked_without_signals(target: object, checked: bool) -> None:
     target.blockSignals(was_blocked)
 
 
-def _set_combobox_value_without_signals(target: object, value: str) -> None:
+def _set_combobox_value_without_signals(target: Any, value: TransformProvider) -> None:
     if not hasattr(target, "blockSignals") or not hasattr(target, "findData"):
         return
     index = target.findData(value)
@@ -1239,20 +1244,20 @@ def _set_combobox_value_without_signals(target: object, value: str) -> None:
 
 
 def _refresh_transform_provider_options(
-    target: object,
+    target: Any,
     *,
-    available_providers: tuple[str, ...],
+    available_providers: tuple[TransformProvider, ...],
 ) -> None:
     if not hasattr(target, "count") or not hasattr(target, "itemData"):
         return
     for index in range(target.count()):
         provider = target.itemData(index)
-        if not isinstance(provider, str):
+        if provider not in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
             continue
         target.setItemText(
             index,
             _transform_provider_option_label(
-                provider=provider,
+                provider=cast(TransformProvider, provider),
                 available=provider in available_providers,
             ),
         )
@@ -1295,13 +1300,13 @@ def codex_integration_install_action_text(status: CodexIntegrationStatus) -> str
     return ""
 
 
-def _transform_provider_tooltip(provider: str) -> str:
+def _transform_provider_tooltip(provider: TransformProvider) -> str:
     if provider == "claude-code":
         return "Use Claude Code for text transform before TTS."
     return "Use Codex for text transform before TTS."
 
 
-def _transform_provider_option_label(*, provider: str, available: bool) -> str:
+def _transform_provider_option_label(*, provider: TransformProvider, available: bool) -> str:
     label = "Claude Code" if provider == "claude-code" else "Codex"
     if available:
         return label

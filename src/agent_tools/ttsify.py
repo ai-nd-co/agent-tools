@@ -31,6 +31,7 @@ from agent_tools.codex_config import (
 )
 from agent_tools.transformer import (
     TransformOptions,
+    TransformProvider,
     TransformResult,
     resolve_transform_provider,
     transform_text,
@@ -42,7 +43,7 @@ SUPPORTED_TTSIFY_DEVICES = ("auto", "cpu", "cuda")
 
 @dataclass(frozen=True)
 class TtsifyOptions:
-    provider: str | None = None
+    provider: TransformProvider | None = None
     model: str | None = None
     reasoning_effort: str | None = None
     fast: bool = False
@@ -180,6 +181,8 @@ def load_ttsify_prompt() -> str:
 
 
 def _map_reasoning_effort_to_claude_effort(reasoning_effort: str | None) -> str | None:
+    if reasoning_effort is None:
+        return None
     mapping = {
         "minimal": "low",
         "low": "low",

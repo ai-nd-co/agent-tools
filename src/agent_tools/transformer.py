@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from agent_tools.agent_integration import (
     load_agent_integration_status,
@@ -101,7 +101,7 @@ def resolve_transform_provider(value: TransformProvider | None) -> TransformProv
     )
     if provider not in {"codex", "claude-code"}:
         raise ValueError(f"Unsupported transform provider {provider!r}.")
-    return provider
+    return cast(TransformProvider, provider)
 
 
 def _resolve_reasoning_effort(value: str | None, defaults: CodexDefaults) -> str | None:
@@ -122,7 +122,7 @@ def _resolve_claude_effort(options: TransformOptions) -> str | None:
     if options.claude_effort is not None:
         return options.claude_effort
     reasoning = options.reasoning_effort
-    if reasoning in (None, "none"):
+    if reasoning is None or reasoning == "none":
         return DEFAULT_CLAUDE_CODE_EFFORT
     mapped = {
         "minimal": "low",

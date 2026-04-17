@@ -1,3 +1,9 @@
+## [0.5.2](https://github.com/ai-nd-co/agent-tools/compare/py-v0.5.1...py-v0.5.2) (2026-04-17)
+
+### Bug Fixes
+
+* stop skipped queue items from resuming later ([e353035](https://github.com/ai-nd-co/agent-tools/commit/e353035eb2f6fa2d3e5852c694f1ec9655bf461e))
+
 ## [0.5.1](https://github.com/ai-nd-co/agent-tools/compare/py-v0.5.0...py-v0.5.1) (2026-04-17)
 
 ### Bug Fixes

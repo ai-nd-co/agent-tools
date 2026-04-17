@@ -96,8 +96,10 @@ TRANSFORM_PROVIDER_OPTIONS: tuple[tuple[TransformProvider, str], ...] = (
 )
 
 
-def interrupted_status_for_switch(status: str) -> str:
-    return STATUS_QUEUED if status == STATUS_QUEUED else status
+def interrupted_status_for_switch(status: str, *, origin: str | None = None) -> str:
+    if origin == "queue" and status in {STATUS_QUEUED, STATUS_PLAYING, STATUS_PAUSED}:
+        return STATUS_STOPPED
+    return status
 
 
 def processing_stage_label(stage: str | None) -> str:
@@ -892,7 +894,10 @@ def run_ui(*, hidden: bool) -> int:
         def _start_item(self, item: QueueItem, *, origin: str) -> None:
             self.current_item_id = item.item_id
             self.current_play_origin = origin
-            self.current_resume_status = interrupted_status_for_switch(item.status)
+            self.current_resume_status = interrupted_status_for_switch(
+                item.status,
+                origin=origin,
+            )
             self.current_duration_ms = item.duration_ms
             update_status(self.conn, item.item_id, STATUS_PLAYING)
             self.timeline_slider.setRange(0, max(0, item.duration_ms))

@@ -5,7 +5,14 @@ from pathlib import Path
 from agent_tools.agent_integration import AgentIntegrationStatus
 from agent_tools.claude_integration import ClaudeIntegrationStatus
 from agent_tools.codex_integration import CodexIntegrationStatus
-from agent_tools.queue_db import STATUS_COMPLETED, STATUS_QUEUED, STATUS_STOPPED, QueueItem
+from agent_tools.queue_db import (
+    STATUS_COMPLETED,
+    STATUS_PAUSED,
+    STATUS_PLAYING,
+    STATUS_QUEUED,
+    STATUS_STOPPED,
+    QueueItem,
+)
 from agent_tools.ui_app import (
     ProcessingItem,
     _load_preferred_transform_provider,
@@ -72,12 +79,14 @@ def _make_agent_status(
 
 
 def test_interrupted_status_for_switch_preserves_history_statuses() -> None:
-    assert interrupted_status_for_switch(STATUS_COMPLETED) == STATUS_COMPLETED
-    assert interrupted_status_for_switch(STATUS_STOPPED) == STATUS_STOPPED
+    assert interrupted_status_for_switch(STATUS_COMPLETED, origin="history") == STATUS_COMPLETED
+    assert interrupted_status_for_switch(STATUS_STOPPED, origin="history") == STATUS_STOPPED
 
 
-def test_interrupted_status_for_switch_requeues_queued_items() -> None:
-    assert interrupted_status_for_switch(STATUS_QUEUED) == STATUS_QUEUED
+def test_interrupted_status_for_switch_stops_active_queue_items() -> None:
+    assert interrupted_status_for_switch(STATUS_QUEUED, origin="queue") == STATUS_STOPPED
+    assert interrupted_status_for_switch(STATUS_PLAYING, origin="queue") == STATUS_STOPPED
+    assert interrupted_status_for_switch(STATUS_PAUSED, origin="queue") == STATUS_STOPPED
 
 
 def test_processing_stage_label_falls_back_to_default() -> None:

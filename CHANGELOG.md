@@ -1,3 +1,9 @@
+## [0.7.1](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.0...py-v0.7.1) (2026-04-17)
+
+### Bug Fixes
+
+* default ttsify reasoning to medium ([1adc679](https://github.com/ai-nd-co/agent-tools/commit/1adc67919fe020fa286a546c90c485e881b1116f))
+
 ## [0.7.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.6.0...py-v0.7.0) (2026-04-17)
 
 ### Features

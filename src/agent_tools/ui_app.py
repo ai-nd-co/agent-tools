@@ -128,6 +128,20 @@ def should_focus_for_playback_start(*, is_visible: bool, is_active_window: bool)
     return not (is_visible and is_active_window)
 
 
+def controller_bind_failure_message(exc: OSError, *, host: str, port: int) -> str:
+    if isinstance(exc, PermissionError) or getattr(exc, "winerror", None) == 10013:
+        return (
+            f"AgentTools UI controller cannot bind to {host}:{port}. "
+            "Windows denied access to that port. This usually means the port is "
+            "reserved/excluded by the OS or blocked by another local policy. "
+            "Set AGENT_TOOLS_CONTROLLER_PORT to a different port and retry."
+        )
+    return (
+        "AgentTools UI controller is already running or another process is using "
+        f"{host}:{port}."
+    )
+
+
 def run_ui(*, hidden: bool) -> int:
     try:
         from PySide6.QtCore import QSize, Qt, QTimer, QUrl
@@ -192,7 +206,9 @@ def run_ui(*, hidden: bool) -> int:
     try:
         server = CommandServer((CONTROLLER_HOST, CONTROLLER_PORT), Handler)
     except OSError as exc:
-        raise RuntimeError("AgentTools UI controller is already running.") from exc
+        raise RuntimeError(
+            controller_bind_failure_message(exc, host=CONTROLLER_HOST, port=CONTROLLER_PORT)
+        ) from exc
 
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -1229,7 +1245,7 @@ def _save_preferred_tts_speed(speed: float) -> None:
 def _load_preferred_transform_provider() -> TransformProvider:
     provider = read_preferred_transform_provider() or DEFAULT_TRANSFORM_PROVIDER
     if provider in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
-        return provider
+        return cast(TransformProvider, provider)
     return cast(TransformProvider, DEFAULT_TRANSFORM_PROVIDER)
 
 

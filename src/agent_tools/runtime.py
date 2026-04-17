@@ -3,11 +3,29 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 APP_DIR_NAME = "AgentTools"
-CONTROLLER_HOST = "127.0.0.1"
-CONTROLLER_PORT = 51173
+DEFAULT_CONTROLLER_HOST = "127.0.0.1"
+# Stay below Windows' default dynamic/excluded port ranges (typically 49152+).
+DEFAULT_CONTROLLER_PORT = 38173
+
+
+def _controller_port_from_env(environ: Mapping[str, str] | None = None) -> int:
+    env = os.environ if environ is None else environ
+    raw_value = env.get("AGENT_TOOLS_CONTROLLER_PORT")
+    if raw_value is None or raw_value == "":
+        return DEFAULT_CONTROLLER_PORT
+    try:
+        port = int(raw_value)
+    except ValueError:
+        return DEFAULT_CONTROLLER_PORT
+    return port if 1 <= port <= 65535 else DEFAULT_CONTROLLER_PORT
+
+
+CONTROLLER_HOST = os.environ.get("AGENT_TOOLS_CONTROLLER_HOST", DEFAULT_CONTROLLER_HOST)
+CONTROLLER_PORT = _controller_port_from_env()
 
 
 def app_root() -> Path:

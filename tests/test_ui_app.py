@@ -23,6 +23,7 @@ from agent_tools.ui_app import (
     codex_integration_install_title,
     codex_integration_status_text,
     codex_integration_toggle_checked,
+    controller_bind_failure_message,
     interrupted_status_for_switch,
     merged_feed_entries,
     processing_stage_label,
@@ -163,6 +164,30 @@ def test_clamp_tts_speed_respects_bounds() -> None:
 def test_tts_speed_label_formats_two_decimals() -> None:
     assert tts_speed_label(1.0) == "TTS 1.00x"
     assert tts_speed_label(1.25) == "TTS 1.25x"
+
+
+def test_controller_bind_failure_message_explains_permission_denied() -> None:
+    message = controller_bind_failure_message(
+        PermissionError(13, "Permission denied"),
+        host="127.0.0.1",
+        port=32173,
+    )
+
+    assert "127.0.0.1:32173" in message
+    assert "AGENT_TOOLS_CONTROLLER_PORT" in message
+
+
+def test_controller_bind_failure_message_handles_port_conflicts() -> None:
+    message = controller_bind_failure_message(
+        OSError(98, "Address already in use"),
+        host="127.0.0.1",
+        port=32173,
+    )
+
+    assert message == (
+        "AgentTools UI controller is already running or another process is using "
+        "127.0.0.1:32173."
+    )
 
 
 def test_should_focus_for_playback_start_when_hidden() -> None:

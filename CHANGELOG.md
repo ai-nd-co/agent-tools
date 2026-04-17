@@ -1,3 +1,9 @@
+## [0.5.1](https://github.com/ai-nd-co/agent-tools/compare/py-v0.5.0...py-v0.5.1) (2026-04-17)
+
+### Bug Fixes
+
+* force utf-8 for hook payload parsing ([3ba0501](https://github.com/ai-nd-co/agent-tools/commit/3ba05010a98a8dd868fe409fb510a2772a4673c0))
+
 ## [0.5.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.4.0...py-v0.5.0) (2026-04-16)
 
 ### Features

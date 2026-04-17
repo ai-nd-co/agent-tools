@@ -62,6 +62,7 @@ def test_dispatch_codex_notify_defaults_to_auto_and_dedupes(
 
     captured: dict[str, object] = {}
     notice_events: list[tuple[str, str]] = []
+    perf_events: list[tuple[str, dict[str, object]]] = []
 
     def fake_ttsify_text(input_text: str, options: object) -> TtsifyResult:
         captured["input_text"] = input_text
@@ -113,6 +114,11 @@ def test_dispatch_codex_notify_defaults_to_auto_and_dedupes(
     monkeypatch.setattr(notify_module, "enqueue_for_playback", fake_enqueue_for_playback)
     monkeypatch.setattr(notify_module, "start_processing_notice", fake_start_processing_notice)
     monkeypatch.setattr(notify_module, "load_codex_integration_enabled", lambda: True)
+    monkeypatch.setattr(
+        notify_module,
+        "append_perf_event",
+        lambda event, **fields: perf_events.append((event, fields)),
+    )
 
     payload = json.dumps(
         {
@@ -146,6 +152,10 @@ def test_dispatch_codex_notify_defaults_to_auto_and_dedupes(
     assert "tts_pipeline_init_ms=" in log_text
     assert "device_fallback_reason=torch cuda unavailable" in log_text
     assert "dominant_stage=" in log_text
+    assert perf_events and perf_events[0][0] == "codex_notify_completed"
+    assert perf_events[0][1]["turn_id"] == "turn-1"
+    assert perf_events[0][1]["queue_id"] == 42
+    assert perf_events[0][1]["requested_device"] == "auto"
 
 
 def test_dispatch_codex_notify_respects_device_env(tmp_path: Path, monkeypatch: object) -> None:

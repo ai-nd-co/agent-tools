@@ -11,6 +11,7 @@ from time import perf_counter
 from agent_tools.codex_config import ENV_KOKORO_DEVICE, read_string_env, resolve_codex_home
 from agent_tools.codex_integration import load_codex_integration_enabled
 from agent_tools.controller_client import start_processing_notice
+from agent_tools.perf_log import append_perf_event
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
 from agent_tools.ttsify import TtsifyOptions, ttsify_text
 
@@ -109,6 +110,7 @@ def dispatch_codex_notify(
         )
 
     desired_device = read_string_env(ENV_KOKORO_DEVICE) or "auto"
+    trace_id = payload.turn_id or f"codex-notify-{int(dispatch_started * 1000)}"
     source_label = f"codex-notify:{payload.thread_id}" if payload.thread_id else "codex-notify"
     processing_notice = start_processing_notice(
         source_label=source_label,
@@ -201,6 +203,33 @@ def dispatch_codex_notify(
             f"enqueue_ms={_fmt_ms(enqueue_ms)} dominant_stage={dominant_stage} "
             f"device_fallback_reason={_render_log_value(ttsify_result.device_fallback_reason)}"
         ),
+    )
+    append_perf_event(
+        "codex_notify_completed",
+        trace_id=trace_id,
+        command="codex-notify-dispatch",
+        turn_id=payload.turn_id,
+        thread_id=payload.thread_id,
+        source_label=source_label,
+        queue_id=queue_item.queue_id,
+        requested_device=desired_device,
+        resolved_device=ttsify_result.resolved_device,
+        device_fallback_reason=ttsify_result.device_fallback_reason,
+        total_ms=total_dispatch_ms,
+        transform_ms=transform_ms,
+        tts_wall_ms=tts_wall_ms,
+        tts_internal_ms=tts_internal_ms,
+        tts_device_probe_ms=ttsify_result.tts_result.metrics.device_probe_ms,
+        tts_import_ms=tts_import_ms,
+        tts_pipeline_init_ms=tts_pipeline_init_ms,
+        tts_generation_ms=tts_generation_ms,
+        tts_postprocess_ms=tts_postprocess_ms,
+        enqueue_ms=enqueue_ms,
+        dominant_stage=dominant_stage,
+        input_chars=len(message),
+        transformed_chars=len(ttsify_result.transformed_text),
+        model=ttsify_result.model,
+        reasoning_effort=ttsify_result.reasoning_effort,
     )
     processing_notice.finish()
     return CodexNotifyDispatchResult(

@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 
 from agent_tools.claude_integration import is_claude_integration_triggered
 from agent_tools.codex_config import (
@@ -31,14 +34,30 @@ from agent_tools.hook_install import (
     install_claude_integration,
     install_codex_integration,
 )
+from agent_tools.perf_log import append_perf_event
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
-from agent_tools.transformer import TransformOptions, transform_text
+from agent_tools.transformer import (
+    TransformOptions,
+    resolve_effective_transform_provider,
+    transform_text,
+)
 from agent_tools.tts import SUPPORTED_LANGUAGES, synthesize_wav
 from agent_tools.ttsify import SUPPORTED_TTSIFY_DEVICES, TtsifyOptions, ttsify_text
 from agent_tools.ui_app import run_ui
 
 REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh", "none")
 OUTPUT_MODE_CHOICES = ("write", "play")
+
+
+@dataclass(frozen=True)
+class AudioOutputMetrics:
+    output_mode: str
+    bytes_written: int
+    total_ms: float
+    file_write_ms: float = 0.0
+    enqueue_ms: float = 0.0
+    queue_id: int | None = None
+    output_target: str | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -187,6 +206,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _run_transform(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
+    trace_id = str(uuid.uuid4())
     options = TransformOptions(
         system_prompt_file=args.system_prompt_file,
         provider=getattr(args, "provider", None),
@@ -201,13 +221,35 @@ def _run_transform(args: argparse.Namespace) -> int:
         claude_bare=getattr(args, "claude_bare", False),
         timeout_seconds=args.timeout_seconds,
     )
+    started = perf_counter()
     result = transform_text(input_text, options)
+    transform_ms = (perf_counter() - started) * 1000.0
     _write_text_output(args.output_file, result.text)
+    append_perf_event(
+        "transform_completed",
+        trace_id=trace_id,
+        command="transform",
+        provider=resolve_effective_transform_provider(
+            getattr(args, "provider", None),
+            codex_home=args.codex_home,
+        ),
+        requested_provider=getattr(args, "provider", None),
+        requested_model=args.model,
+        requested_reasoning_effort=args.reasoning_effort,
+        claude_model=getattr(args, "claude_model", None),
+        claude_effort=getattr(args, "claude_effort", None),
+        input_chars=len(input_text),
+        output_chars=len(result.text),
+        transform_ms=transform_ms,
+        response_id=result.response_id,
+        session_id=result.session_id,
+    )
     return 0
 
 
 def _run_tts(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
+    trace_id = str(uuid.uuid4())
     speed = args.speed if args.speed is not None else read_float_env(ENV_KOKORO_SPEED)
     if speed is None:
         speed = read_preferred_tts_speed() or 1.0
@@ -226,7 +268,7 @@ def _run_tts(args: argparse.Namespace) -> int:
             speed=speed,
             device=args.device,
         )
-        _handle_audio_output(
+        output_metrics = _handle_audio_output(
             output_mode=args.output_mode,
             output_file=args.output_file,
             data=result.wav,
@@ -238,6 +280,33 @@ def _run_tts(args: argparse.Namespace) -> int:
             speed=speed,
             model=None,
             reasoning_effort=None,
+        )
+        append_perf_event(
+            "tts_completed",
+            trace_id=trace_id,
+            command="tts",
+            source_label=source_label,
+            voice=args.voice,
+            language=args.language,
+            speed=speed,
+            requested_device=args.device,
+            resolved_device=result.resolved_device,
+            device_fallback_reason=result.device_fallback_reason,
+            text_chars=len(input_text),
+            chunks=result.chunks,
+            tts_total_ms=result.metrics.total_ms,
+            tts_device_probe_ms=result.metrics.device_probe_ms,
+            tts_import_ms=result.metrics.import_ms,
+            tts_pipeline_init_ms=result.metrics.pipeline_init_ms,
+            tts_generation_ms=result.metrics.generation_ms,
+            tts_postprocess_ms=result.metrics.postprocess_ms,
+            output_mode=output_metrics.output_mode,
+            output_target=output_metrics.output_target,
+            output_total_ms=output_metrics.total_ms,
+            output_file_write_ms=output_metrics.file_write_ms,
+            output_enqueue_ms=output_metrics.enqueue_ms,
+            queue_id=output_metrics.queue_id,
+            bytes_written=output_metrics.bytes_written,
         )
     finally:
         processing_notice.finish()
@@ -252,6 +321,7 @@ def _run_ttsify(args: argparse.Namespace) -> int:
         return 0
 
     input_text = _read_text_input(args.input_file)
+    trace_id = str(uuid.uuid4())
     source_label = args.source or read_string_env(ENV_SOURCE)
     processing_notice = _maybe_start_processing_notice(
         output_mode=args.output_mode,
@@ -280,7 +350,7 @@ def _run_ttsify(args: argparse.Namespace) -> int:
                 timeout_seconds=args.timeout_seconds,
             ),
         )
-        _handle_audio_output(
+        output_metrics = _handle_audio_output(
             output_mode=args.output_mode,
             output_file=args.output_file,
             data=result.tts_result.wav,
@@ -292,6 +362,44 @@ def _run_ttsify(args: argparse.Namespace) -> int:
             speed=result.speed,
             model=result.model,
             reasoning_effort=result.reasoning_effort,
+        )
+        append_perf_event(
+            "ttsify_completed",
+            trace_id=trace_id,
+            command="ttsify",
+            provider=resolve_effective_transform_provider(
+                getattr(args, "provider", None),
+                codex_home=args.codex_home,
+            ),
+            requested_provider=getattr(args, "provider", None),
+            model=result.model,
+            reasoning_effort=result.reasoning_effort,
+            source_label=source_label,
+            input_chars=len(input_text),
+            transformed_chars=len(result.transformed_text),
+            voice=result.voice,
+            language=result.language,
+            speed=result.speed,
+            requested_device=result.device,
+            resolved_device=result.resolved_device,
+            device_fallback_reason=result.device_fallback_reason,
+            total_ms=result.metrics.total_ms,
+            transform_ms=result.metrics.transform_ms,
+            tts_ms=result.metrics.tts_ms,
+            tts_device_probe_ms=result.tts_result.metrics.device_probe_ms,
+            tts_import_ms=result.tts_result.metrics.import_ms,
+            tts_pipeline_init_ms=result.tts_result.metrics.pipeline_init_ms,
+            tts_generation_ms=result.tts_result.metrics.generation_ms,
+            tts_postprocess_ms=result.tts_result.metrics.postprocess_ms,
+            output_mode=output_metrics.output_mode,
+            output_target=output_metrics.output_target,
+            output_total_ms=output_metrics.total_ms,
+            output_file_write_ms=output_metrics.file_write_ms,
+            output_enqueue_ms=output_metrics.enqueue_ms,
+            queue_id=output_metrics.queue_id,
+            bytes_written=output_metrics.bytes_written,
+            response_id=result.transform_result.response_id,
+            session_id=result.transform_result.session_id,
         )
     finally:
         processing_notice.finish()
@@ -476,18 +584,30 @@ def _handle_audio_output(
     speed: float,
     model: str | None,
     reasoning_effort: str | None,
-) -> None:
+) -> AudioOutputMetrics:
+    file_write_ms = 0.0
     if output_mode == "write":
+        started = perf_counter()
         _write_binary_output(output_file, data)
-        return
+        file_write_ms = (perf_counter() - started) * 1000.0
+        return AudioOutputMetrics(
+            output_mode=output_mode,
+            bytes_written=len(data),
+            total_ms=file_write_ms,
+            file_write_ms=file_write_ms,
+            output_target="stdout" if output_file == "-" else output_file,
+        )
 
     if sys.platform != "win32":
         raise RuntimeError("Playback mode is currently supported only on Windows.")
 
     if output_file != "-":
+        file_write_started = perf_counter()
         Path(output_file).write_bytes(data)
+        file_write_ms = (perf_counter() - file_write_started) * 1000.0
 
-    enqueue_for_playback(
+    enqueue_started = perf_counter()
+    queue_item = enqueue_for_playback(
         QueuePlaybackRequest(
             raw_text=raw_text,
             tts_text=tts_text,
@@ -499,6 +619,16 @@ def _handle_audio_output(
             model=model,
             reasoning_effort=reasoning_effort,
         )
+    )
+    enqueue_ms = (perf_counter() - enqueue_started) * 1000.0
+    return AudioOutputMetrics(
+        output_mode=output_mode,
+        bytes_written=len(data),
+        total_ms=file_write_ms + enqueue_ms,
+        file_write_ms=file_write_ms,
+        enqueue_ms=enqueue_ms,
+        queue_id=queue_item.queue_id,
+        output_target="queue" if output_file == "-" else output_file,
     )
 
 

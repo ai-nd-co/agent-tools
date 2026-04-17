@@ -159,6 +159,14 @@ Claude Code hook logs:
 - `~/.claude/agent-tools/stop_tts.log`
 - `~/.claude/agent-tools/stop_tts_agent_tools.log`
 
+Shared performance log:
+
+- Windows: `%LOCALAPPDATA%/AgentTools/state/performance.jsonl`
+- Linux/macOS: `~/.local/share/agent-tools/state/performance.jsonl`
+
+Each JSONL row records one completed command or dispatch with stage timings such as
+`transform_ms`, `tts_generation_ms`, `tts_postprocess_ms`, `enqueue_ms`, and `total_ms`.
+
 You can also manage AgentTools auto-TTS integration from the desktop controller UI and tray menu.
 AgentTools only needs **one** backend to be available:
 

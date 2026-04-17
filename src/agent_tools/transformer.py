@@ -48,14 +48,9 @@ class TransformOptions:
 
 
 def transform_text(input_text: str, options: TransformOptions) -> TransformResult:
-    requested_provider = resolve_transform_provider(options.provider)
-    integration_status = load_agent_integration_status(
+    provider = resolve_effective_transform_provider(
+        options.provider,
         codex_home=options.codex_home,
-    )
-    provider = resolve_transform_provider_or_fallback(
-        requested_provider=requested_provider,
-        available_providers=integration_status.available_providers,
-        explicit=options.provider is not None,
     )
     if provider == "claude-code":
         system_prompt = _read_system_prompt(options)
@@ -89,6 +84,22 @@ def transform_text(input_text: str, options: TransformOptions) -> TransformResul
         model=effective_model,
         reasoning_effort=effective_reasoning,
         fast=options.fast,
+    )
+
+
+def resolve_effective_transform_provider(
+    value: TransformProvider | None,
+    *,
+    codex_home: Path | None = None,
+) -> TransformProvider:
+    requested_provider = resolve_transform_provider(value)
+    integration_status = load_agent_integration_status(
+        codex_home=codex_home,
+    )
+    return resolve_transform_provider_or_fallback(
+        requested_provider=requested_provider,
+        available_providers=integration_status.available_providers,
+        explicit=value is not None,
     )
 
 

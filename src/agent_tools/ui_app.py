@@ -124,6 +124,10 @@ def tts_speed_label(speed: float) -> str:
     return f"TTS {speed:.2f}x"
 
 
+def should_focus_for_playback_start(*, is_visible: bool, is_active_window: bool) -> bool:
+    return not (is_visible and is_active_window)
+
+
 def run_ui(*, hidden: bool) -> int:
     try:
         from PySide6.QtCore import QSize, Qt, QTimer, QUrl
@@ -629,7 +633,10 @@ def run_ui(*, hidden: bool) -> int:
             QApplication.quit()
 
         def show_and_focus(self) -> None:
-            self.show()
+            if self.isMinimized():
+                self.showNormal()
+            else:
+                self.show()
             self.raise_()
             self.activateWindow()
 
@@ -1098,6 +1105,11 @@ def run_ui(*, hidden: bool) -> int:
                 return
             if state == QMediaPlayer.PlaybackState.PlayingState:
                 update_status(self.conn, self.current_item_id, STATUS_PLAYING)
+                if should_focus_for_playback_start(
+                    is_visible=self.isVisible(),
+                    is_active_window=self.isActiveWindow(),
+                ):
+                    self.show_and_focus()
             elif state == QMediaPlayer.PlaybackState.PausedState:
                 update_status(self.conn, self.current_item_id, STATUS_PAUSED)
             self.refresh_views()

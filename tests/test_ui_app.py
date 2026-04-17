@@ -27,6 +27,7 @@ from agent_tools.ui_app import (
     merged_feed_entries,
     processing_stage_label,
     restored_scroll_value,
+    should_focus_for_playback_start,
     should_show_codex_install_panel,
     tts_speed_label,
 )
@@ -162,6 +163,18 @@ def test_clamp_tts_speed_respects_bounds() -> None:
 def test_tts_speed_label_formats_two_decimals() -> None:
     assert tts_speed_label(1.0) == "TTS 1.00x"
     assert tts_speed_label(1.25) == "TTS 1.25x"
+
+
+def test_should_focus_for_playback_start_when_hidden() -> None:
+    assert should_focus_for_playback_start(is_visible=False, is_active_window=False) is True
+
+
+def test_should_focus_for_playback_start_when_visible_but_not_active() -> None:
+    assert should_focus_for_playback_start(is_visible=True, is_active_window=False) is True
+
+
+def test_should_focus_for_playback_start_when_already_active() -> None:
+    assert should_focus_for_playback_start(is_visible=True, is_active_window=True) is False
 
 
 def test_transform_provider_preference_round_trip(monkeypatch: object, tmp_path: Path) -> None:

@@ -149,6 +149,8 @@ def test_install_codex_stop_hook_writes_files(monkeypatch: object, tmp_path: Pat
     hooks_payload = json.loads(result.hooks_json_path.read_text(encoding="utf-8"))
     assert hooks_payload["hooks"]["Stop"][0]["hooks"][0]["command"] == STOP_HOOK_COMMAND
     script_text = result.hook_script_path.read_text(encoding="utf-8")
+    assert "PYTHONIOENCODING=utf-8" in script_text
+    assert "python -X utf8 -" in script_text
     assert "stop_tts.log" in script_text
     assert "hook_start" in script_text
 
@@ -183,5 +185,7 @@ def test_install_claude_integration_writes_settings_and_script(
     settings_payload = json.loads(result.settings_path.read_text(encoding="utf-8"))
     assert settings_payload["hooks"]["Stop"][0]["hooks"][0]["command"] == CLAUDE_STOP_HOOK_COMMAND
     script_text = result.hook_script_path.read_text(encoding="utf-8")
+    assert "PYTHONIOENCODING=utf-8" in script_text
+    assert "python -X utf8 -" in script_text
     assert "AGENT_TOOLS_CLAUDE_INTEGRATION_TRIGGERED=1" in script_text
     assert "stop_tts.log" in script_text

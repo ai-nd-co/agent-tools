@@ -28,7 +28,7 @@ if [[ -z "${payload}" ]]; then
   exit 0
 fi
 
-parsed_json="$({ PAYLOAD_JSON="${payload}" python - <<'PY'
+parsed_json="$({ PAYLOAD_JSON="${payload}" PYTHONIOENCODING=utf-8 python -X utf8 - <<'PY'
 import json
 import os
 
@@ -60,7 +60,7 @@ fi
 
 read_json_field() {
   local field="$1"
-  PAYLOAD_JSON="${parsed_json}" python - "$field" <<'PY'
+  PAYLOAD_JSON="${parsed_json}" PYTHONIOENCODING=utf-8 python -X utf8 - "$field" <<'PY'
 import json
 import os
 import sys

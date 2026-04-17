@@ -1,3 +1,9 @@
+## [0.7.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.6.0...py-v0.7.0) (2026-04-17)
+
+### Features
+
+* log stage timings for transform and tts ([9c1306f](https://github.com/ai-nd-co/agent-tools/commit/9c1306f5da3f567cb6e050703674ba1e1529be2c))
+
 ## [0.6.0](https://github.com/ai-nd-co/agent-tools/compare/py-v0.5.2...py-v0.6.0) (2026-04-17)
 
 ### Features

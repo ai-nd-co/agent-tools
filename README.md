@@ -90,6 +90,7 @@ into Kokoro TTS.
 Default `ttsify` settings:
 
 - model: `gpt-5.4-mini`
+- reasoning effort: `medium`
 - voice: `af_heart`
 
 Configurable via env vars:

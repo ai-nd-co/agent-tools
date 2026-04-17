@@ -13,6 +13,7 @@ from agent_tools.codex_config import (
     DEFAULT_CLAUDE_CODE_EFFORT,
     DEFAULT_CLAUDE_CODE_MODEL,
     DEFAULT_TTSIFY_MODEL,
+    DEFAULT_TTSIFY_REASONING_EFFORT,
     DEFAULT_TTSIFY_VOICE,
     ENV_CLAUDE_CODE_BARE,
     ENV_CLAUDE_CODE_EFFORT,
@@ -108,7 +109,11 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
             f"Unsupported Kokoro device {device!r}. Expected one of {SUPPORTED_TTSIFY_DEVICES}."
         )
     codex_model = options.model or read_string_env(ENV_CODEX_MODEL) or DEFAULT_TTSIFY_MODEL
-    codex_reasoning = options.reasoning_effort or read_string_env(ENV_CODEX_REASONING_EFFORT)
+    codex_reasoning = (
+        options.reasoning_effort
+        or read_string_env(ENV_CODEX_REASONING_EFFORT)
+        or DEFAULT_TTSIFY_REASONING_EFFORT
+    )
     raw_claude_model = (
         options.claude_model
         or options.model

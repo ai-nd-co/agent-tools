@@ -169,6 +169,43 @@ def test_ttsify_cli_values_override_env(monkeypatch: object) -> None:
     assert captured["device"] == "cuda"
 
 
+def test_ttsify_defaults_to_medium_reasoning_without_env(monkeypatch: object) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+
+    def fake_transform_text(_input_text: str, options: TransformOptions) -> TransformResult:
+        captured["reasoning_effort"] = options.reasoning_effort
+        return TransformResult(
+            text="spoken text",
+            response_id="resp_1",
+            usage=None,
+            session_id="session-1",
+        )
+
+    monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
+    monkeypatch.setattr(
+        ttsify_module,
+        "synthesize_wav",
+        lambda *_args, **_kwargs: TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1),
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_transform_provider",
+        lambda value: value or "codex",
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "load_agent_integration_status",
+        lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
+    )
+    monkeypatch.delenv("AGENT_TOOLS_CODEX_REASONING_EFFORT", raising=False)
+
+    ttsify_text("raw text", TtsifyOptions())
+
+    assert captured["reasoning_effort"] == "medium"
+
+
 def test_ttsify_rejects_invalid_env_device(monkeypatch: object) -> None:
     import agent_tools.ttsify as ttsify_module
 

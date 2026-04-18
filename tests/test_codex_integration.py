@@ -45,12 +45,15 @@ def test_load_codex_integration_status_detects_windows_notify_install(
     import agent_tools.runtime as runtime_module
 
     monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "C:/Scripts/agent-tools.exe" if name == "agent-tools" else None,
+    )
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
     (codex_home / "config.toml").write_text(
         (
-            'notify = ["C:/Python312/python.exe", "-m", "agent_tools", '
-            '"codex-notify-dispatch"]\n\n'
+            'notify = ["agent-tools", "codex-notify-dispatch"]\n\n'
             "[features]\n"
             "codex_hooks = false\n"
         ),
@@ -83,6 +86,67 @@ def test_load_codex_integration_status_detects_windows_broken_partial_install(
 
     assert status.install_state == "broken"
     assert "features-inconsistent" in status.issues
+
+
+def test_load_codex_integration_status_detects_missing_agent_tools_launcher(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        (
+            'notify = ["agent-tools", "codex-notify-dispatch"]\n\n'
+            "[features]\n"
+            "codex_hooks = false\n"
+        ),
+        encoding="utf-8",
+    )
+
+    status = load_codex_integration_status(codex_home, platform_name="win32")
+
+    assert status.install_state == "broken"
+    assert "notify-launcher-missing" in status.issues
+
+
+def test_load_codex_integration_status_detects_windows_notify_python_mismatch(
+    monkeypatch: object,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.codex_integration as codex_integration_module
+    import agent_tools.runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    configured_python = tmp_path / "OtherPython" / "python.exe"
+    current_python = tmp_path / "Python312" / "python.exe"
+    configured_python.parent.mkdir(parents=True, exist_ok=True)
+    current_python.parent.mkdir(parents=True, exist_ok=True)
+    configured_python.write_text("", encoding="utf-8")
+    current_python.write_text("", encoding="utf-8")
+    config_text = (
+        f'notify = ["{configured_python.as_posix()}", "-m", '
+        '"agent_tools", "codex-notify-dispatch"]\n\n'
+        "[features]\n"
+        "codex_hooks = false\n"
+    )
+    (codex_home / "config.toml").write_text(config_text, encoding="utf-8")
+    monkeypatch.setattr(
+        codex_integration_module.sys,
+        "executable",
+        str(current_python.resolve()),
+    )
+
+    status = load_codex_integration_status(codex_home, platform_name="win32")
+
+    assert status.install_state == "broken"
+    assert "notify-python-mismatch" in status.issues
+    assert status.notify_command is not None
 
 
 def test_load_codex_integration_status_detects_stop_hook_install(

@@ -16,7 +16,8 @@ from agent_tools.codex_integration import set_codex_integration_enabled
 
 STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.codex/hooks/stop_tts.sh"\''
 WINDOWS_NOTIFY_COMMAND = "codex-notify-dispatch"
-CLAUDE_STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.claude/agent-tools/stop_tts.sh"\''
+WINDOWS_NOTIFY_LAUNCHER = "agent-tools"
+CLAUDE_STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.claude/agent-tools/stop_tts.sh"\'' 
 STOP_HOOK_ENTRY = {
     "hooks": [
         {
@@ -80,9 +81,7 @@ def install_windows_notify_integration(
     home = resolve_codex_home(codex_home)
     config_path = home / "config.toml"
     notify_command = (
-        str(Path(sys.executable).resolve()),
-        "-m",
-        "agent_tools",
+        WINDOWS_NOTIFY_LAUNCHER,
         WINDOWS_NOTIFY_COMMAND,
     )
 

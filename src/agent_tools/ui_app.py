@@ -1025,11 +1025,13 @@ def run_ui(*, hidden: bool) -> int:
             show_install_panel = should_show_codex_install_panel(status)
 
             self.install_panel.setVisible(show_install_panel)
-            self.content_widget.setVisible(not show_install_panel)
+            self.content_widget.setVisible(status.any_provider_available)
             self.install_title_label.setText(codex_integration_install_title(status))
             self.install_body_label.setText(codex_integration_install_body(status))
             self.install_codex_integration_button.setText(codex_integration_install_action_text(status))
-            self.install_codex_integration_button.setVisible(False)
+            self.install_codex_integration_button.setVisible(
+                bool(codex_integration_install_action_text(status))
+            )
 
             _set_checked_without_signals(self.codex_integration_switch, checked)
             _set_checked_without_signals(self.codex_integration_action, checked)
@@ -1042,7 +1044,7 @@ def run_ui(*, hidden: bool) -> int:
                 self.transform_provider_combo,
                 self.transform_provider,
             )
-            self.codex_integration_switch.setEnabled(status.integration_state == "installed")
+            self.codex_integration_switch.setEnabled(status.any_provider_available)
             self.transform_provider_combo.setEnabled(status.any_provider_available)
             fallback_note = selected_provider_fallback_note(
                 selected_provider=self.transform_provider,
@@ -1066,7 +1068,7 @@ def run_ui(*, hidden: bool) -> int:
                 status.any_provider_available and status.integration_state != "installed"
             )
             self.codex_integration_action.setVisible(status.any_provider_available)
-            self.codex_integration_action.setEnabled(status.integration_state == "installed")
+            self.codex_integration_action.setEnabled(status.any_provider_available)
 
         def skip_next(self) -> None:
             next_item = self._next_queued_item_for_advance()
@@ -1245,7 +1247,7 @@ def _save_preferred_tts_speed(speed: float) -> None:
 def _load_preferred_transform_provider() -> TransformProvider:
     provider = read_preferred_transform_provider() or DEFAULT_TRANSFORM_PROVIDER
     if provider in {value for value, _label in TRANSFORM_PROVIDER_OPTIONS}:
-        return cast(TransformProvider, provider)
+        return provider
     return cast(TransformProvider, DEFAULT_TRANSFORM_PROVIDER)
 
 
@@ -1300,7 +1302,10 @@ def _codex_integration_tooltip(status: CodexIntegrationStatus) -> str:
     lines = [
         f"Codex home: {status.codex.codex_home}",
         f"Claude home: {status.claude.claude_home}",
+        f"Current Python: {sys.executable}",
     ]
+    if status.codex.notify_command:
+        lines.append(f"Codex notify: {' '.join(status.codex.notify_command)}")
     if status.availability_issues:
         lines.append(f"Availability: {', '.join(status.availability_issues)}")
     if status.issues:
@@ -1309,14 +1314,32 @@ def _codex_integration_tooltip(status: CodexIntegrationStatus) -> str:
 
 
 def should_show_codex_install_panel(status: CodexIntegrationStatus) -> bool:
-    return not status.any_provider_available
+    return (not status.any_provider_available) or status.integration_state != "installed"
 
 
 def codex_integration_install_title(status: CodexIntegrationStatus) -> str:
+    if not status.any_provider_available:
+        return "Install Codex or Claude Code first"
+    if status.integration_state == "broken":
+        return "Repair AgentTools integration"
+    if status.integration_state == "missing":
+        return "Install AgentTools integration"
     return "Install Codex or Claude Code first"
 
 
 def codex_integration_install_body(status: CodexIntegrationStatus) -> str:
+    if status.integration_state == "broken" and status.any_provider_available:
+        return (
+            "A backend is available, but the AgentTools auto-TTS integration is broken. "
+            "This often means the Codex notify command points at a different Python install "
+            "or the managed hook/config files are incomplete. Repair it to restore auto-TTS."
+        )
+    if status.integration_state == "missing" and status.any_provider_available:
+        return (
+            "A backend is available, but the AgentTools auto-TTS integration is not installed "
+            "yet. Install it so Codex or Claude Code replies can be transformed and queued "
+            "for speech automatically."
+        )
     return (
         "AgentTools can work with either Codex or Claude Code, but it does not install them "
         "for you. Install or sign in to any one backend first, then reopen this controller."

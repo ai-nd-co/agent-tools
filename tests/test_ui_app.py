@@ -290,11 +290,11 @@ def test_codex_install_panel_helpers_for_broken_state() -> None:
         issues=("claude:settings-json-invalid",),
     )
 
-    assert should_show_codex_install_panel(status) is False
-    assert codex_integration_install_title(status) == "Install Codex or Claude Code first"
+    assert should_show_codex_install_panel(status) is True
+    assert codex_integration_install_title(status) == "Repair AgentTools integration"
     assert codex_integration_install_action_text(status) == "Repair"
     assert (
-        "AgentTools can work with either Codex or Claude Code"
+        "auto-TTS integration is broken"
         in codex_integration_install_body(status)
     )
 
@@ -303,3 +303,20 @@ def test_codex_install_panel_hidden_when_installed() -> None:
     status = _make_agent_status(enabled=True, install_state="installed")
 
     assert should_show_codex_install_panel(status) is False
+
+
+def test_codex_install_panel_helpers_for_available_missing_integration() -> None:
+    status = _make_agent_status(
+        enabled=False,
+        install_state="installed",
+        integration_state="missing",
+        codex_install_state="missing",
+    )
+
+    assert should_show_codex_install_panel(status) is True
+    assert codex_integration_install_title(status) == "Install AgentTools integration"
+    assert codex_integration_install_action_text(status) == "Install"
+    assert (
+        "auto-TTS integration is not installed yet"
+        in codex_integration_install_body(status)
+    )

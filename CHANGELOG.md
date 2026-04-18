@@ -1,3 +1,10 @@
+## [0.7.2](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.1...py-v0.7.2) (2026-04-18)
+
+### Bug Fixes
+
+* make codex notify integration portable ([c9f8aa3](https://github.com/ai-nd-co/agent-tools/commit/c9f8aa3c1de882c58e2da2919ccd5ecfcfb18477))
+* **ui:** avoid blocked controller port on windows ([a594a1c](https://github.com/ai-nd-co/agent-tools/commit/a594a1cf003c1dd8b9c37028dadb88b7d30a06a9))
+
 ## [0.7.1](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.0...py-v0.7.1) (2026-04-17)
 
 ### Bug Fixes

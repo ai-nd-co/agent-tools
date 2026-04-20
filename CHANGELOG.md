@@ -1,3 +1,9 @@
+## [0.7.3](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.2...py-v0.7.3) (2026-04-20)
+
+### Bug Fixes
+
+* **ui:** keep integration toggle available when installed ([b22334b](https://github.com/ai-nd-co/agent-tools/commit/b22334bce68239d2c04bea7f08f0b142f43c84b5))
+
 ## [0.7.2](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.1...py-v0.7.2) (2026-04-18)
 
 ### Bug Fixes

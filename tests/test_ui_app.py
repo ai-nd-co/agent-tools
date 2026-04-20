@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_tools.agent_integration import AgentIntegrationStatus
+from agent_tools.agent_integration import AgentIntegrationStatus, agent_integration_toggle_enabled
 from agent_tools.claude_integration import ClaudeIntegrationStatus
 from agent_tools.codex_integration import CodexIntegrationStatus
 from agent_tools.queue_db import (
@@ -262,6 +262,27 @@ def test_codex_integration_status_text_for_missing_or_broken() -> None:
     assert codex_integration_toggle_checked(missing) is False
 
 
+def test_codex_integration_status_text_for_installed_but_unconfirmed_backend() -> None:
+    status = _make_agent_status(
+        enabled=True,
+        install_state="installed",
+        integration_state="installed",
+        codex_available=False,
+        claude_available=False,
+        codex_install_state="installed",
+        claude_install_state="installed",
+        availability_issues=("codex:auth-unavailable",),
+    )
+
+    assert (
+        codex_integration_status_text(status)
+        == "On - backend availability could not be confirmed"
+    )
+    assert codex_integration_toggle_checked(status) is True
+    assert agent_integration_toggle_enabled(status) is True
+    assert should_show_codex_install_panel(status) is False
+
+
 def test_codex_install_panel_helpers_for_missing_state() -> None:
     status = _make_agent_status(
         enabled=False,
@@ -303,6 +324,20 @@ def test_codex_install_panel_hidden_when_installed() -> None:
     status = _make_agent_status(enabled=True, install_state="installed")
 
     assert should_show_codex_install_panel(status) is False
+
+
+def test_codex_toggle_disabled_when_missing_and_no_providers() -> None:
+    status = _make_agent_status(
+        enabled=False,
+        install_state="missing",
+        integration_state="missing",
+        codex_available=False,
+        claude_available=False,
+        codex_install_state="missing",
+        claude_install_state="missing",
+    )
+
+    assert agent_integration_toggle_enabled(status) is False
 
 
 def test_codex_install_panel_helpers_for_available_missing_integration() -> None:

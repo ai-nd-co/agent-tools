@@ -10,9 +10,7 @@ from queue import Empty, SimpleQueue
 from typing import Any, cast
 
 from agent_tools.agent_integration import (
-    AgentIntegrationStatus as CodexIntegrationStatus,
-)
-from agent_tools.agent_integration import (
+    AgentIntegrationStatus,
     TransformProvider,
     selected_provider_fallback_note,
 )
@@ -21,6 +19,9 @@ from agent_tools.agent_integration import (
 )
 from agent_tools.agent_integration import (
     agent_integration_toggle_checked as codex_integration_toggle_checked,
+)
+from agent_tools.agent_integration import (
+    agent_integration_toggle_enabled as codex_integration_toggle_enabled,
 )
 from agent_tools.agent_integration import (
     install_all_integrations as install_codex_integration,
@@ -1025,7 +1026,7 @@ def run_ui(*, hidden: bool) -> int:
             show_install_panel = should_show_codex_install_panel(status)
 
             self.install_panel.setVisible(show_install_panel)
-            self.content_widget.setVisible(status.any_provider_available)
+            self.content_widget.setVisible(status.controller_controls_available)
             self.install_title_label.setText(codex_integration_install_title(status))
             self.install_body_label.setText(codex_integration_install_body(status))
             self.install_codex_integration_button.setText(codex_integration_install_action_text(status))
@@ -1044,7 +1045,7 @@ def run_ui(*, hidden: bool) -> int:
                 self.transform_provider_combo,
                 self.transform_provider,
             )
-            self.codex_integration_switch.setEnabled(status.any_provider_available)
+            self.codex_integration_switch.setEnabled(codex_integration_toggle_enabled(status))
             self.transform_provider_combo.setEnabled(status.any_provider_available)
             fallback_note = selected_provider_fallback_note(
                 selected_provider=self.transform_provider,
@@ -1067,8 +1068,8 @@ def run_ui(*, hidden: bool) -> int:
             self.install_codex_integration_action.setVisible(
                 status.any_provider_available and status.integration_state != "installed"
             )
-            self.codex_integration_action.setVisible(status.any_provider_available)
-            self.codex_integration_action.setEnabled(status.any_provider_available)
+            self.codex_integration_action.setVisible(status.controller_controls_available)
+            self.codex_integration_action.setEnabled(codex_integration_toggle_enabled(status))
 
         def skip_next(self) -> None:
             next_item = self._next_queued_item_for_advance()
@@ -1298,7 +1299,7 @@ def _refresh_transform_provider_options(
         )
 
 
-def _codex_integration_tooltip(status: CodexIntegrationStatus) -> str:
+def _codex_integration_tooltip(status: AgentIntegrationStatus) -> str:
     lines = [
         f"Codex home: {status.codex.codex_home}",
         f"Claude home: {status.claude.claude_home}",
@@ -1313,11 +1314,11 @@ def _codex_integration_tooltip(status: CodexIntegrationStatus) -> str:
     return "\n".join(lines)
 
 
-def should_show_codex_install_panel(status: CodexIntegrationStatus) -> bool:
-    return (not status.any_provider_available) or status.integration_state != "installed"
+def should_show_codex_install_panel(status: AgentIntegrationStatus) -> bool:
+    return status.integration_state != "installed"
 
 
-def codex_integration_install_title(status: CodexIntegrationStatus) -> str:
+def codex_integration_install_title(status: AgentIntegrationStatus) -> str:
     if not status.any_provider_available:
         return "Install Codex or Claude Code first"
     if status.integration_state == "broken":
@@ -1327,7 +1328,7 @@ def codex_integration_install_title(status: CodexIntegrationStatus) -> str:
     return "Install Codex or Claude Code first"
 
 
-def codex_integration_install_body(status: CodexIntegrationStatus) -> str:
+def codex_integration_install_body(status: AgentIntegrationStatus) -> str:
     if status.integration_state == "broken" and status.any_provider_available:
         return (
             "A backend is available, but the AgentTools auto-TTS integration is broken. "
@@ -1346,7 +1347,7 @@ def codex_integration_install_body(status: CodexIntegrationStatus) -> str:
     )
 
 
-def codex_integration_install_action_text(status: CodexIntegrationStatus) -> str:
+def codex_integration_install_action_text(status: AgentIntegrationStatus) -> str:
     if not status.any_provider_available:
         return ""
     if status.integration_state == "broken":

@@ -39,6 +39,10 @@ class AgentIntegrationStatus:
     def any_provider_available(self) -> bool:
         return bool(self.available_providers)
 
+    @property
+    def controller_controls_available(self) -> bool:
+        return self.integration_state == "installed" or self.any_provider_available
+
 
 def load_agent_integration_status(
     codex_home: Path | None = None,
@@ -90,6 +94,10 @@ def set_agent_integration_enabled(enabled: bool) -> None:
 
 
 def agent_integration_status_text(status: AgentIntegrationStatus) -> str:
+    if not status.available_providers and status.integration_state == "installed":
+        if not status.enabled:
+            return "Off - soft disabled (backend availability could not be confirmed)"
+        return "On - backend availability could not be confirmed"
     if not status.available_providers:
         return "Install Codex or Claude Code first"
     provider_label = _available_provider_label(status.available_providers)
@@ -107,7 +115,11 @@ def agent_integration_toggle_checked(status: AgentIntegrationStatus) -> bool:
 
 
 def should_show_agent_install_panel(status: AgentIntegrationStatus) -> bool:
-    return not status.any_provider_available
+    return status.integration_state != "installed"
+
+
+def agent_integration_toggle_enabled(status: AgentIntegrationStatus) -> bool:
+    return status.controller_controls_available
 
 
 def agent_integration_install_title(status: AgentIntegrationStatus) -> str:

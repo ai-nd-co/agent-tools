@@ -123,6 +123,49 @@ Queue for playback on Windows:
 echo "Turn this note into natural spoken narration." | agent-tools ttsify --output-mode play --source agent-a
 ```
 
+### Worklog analysis
+
+Analyze local Codex rollout logs and Claude Code project logs:
+
+```bash
+agent-tools worklog
+```
+
+Filter by local Asia/Tashkent dates and export JSON if needed:
+
+```bash
+agent-tools worklog \
+  --since 2026-04-01 \
+  --until 2026-04-30 \
+  --format json \
+  --output worklog-april.json
+```
+
+Default accounting rules:
+
+- each real human prompt contributes a full **10 minute** active block
+- prompts you typed still count even if they start with JSON, XML, HTML, or code
+- overlapping blocks are merged by interval union
+- when a block crosses midnight or a week boundary, it is split at that boundary
+- weeks are grouped as **Monday-Sunday** in **Asia/Tashkent**
+- repo attribution chooses one **primary repo** per merged interval
+- ambiguous intervals are preserved under `multi/unknown`
+
+Current log sources:
+
+- Codex: `~/.codex/sessions/**/*.jsonl`
+- Claude Code: `~/.claude/projects/**/*.jsonl`
+
+Repo attribution uses the strongest available evidence in this order:
+
+- changed file paths
+- explicit file or directory paths in tool calls, prompts, or commands
+- tool workdir/cwd
+- session cwd
+
+Claude subagent logs are not counted as additional human time.
+Automatic Claude tool-result wrapper rows are not counted as human prompts.
+
 ### Desktop integrations
 
 Install both supported desktop integrations:

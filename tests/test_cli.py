@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from agent_tools.codex_private_api import TransformResult
 from agent_tools.tts import TtsMetrics, TtsResult
 from agent_tools.ttsify import TtsifyMetrics, TtsifyResult
+from agent_tools.worklog import RepoHours, WeeklyHours, WorklogReport
 
 
 def test_run_ttsify_short_circuits_for_disabled_codex_integration(
@@ -263,3 +265,98 @@ def test_cli_rejects_opus_for_claude_model() -> None:
                 "opus",
             ]
         )
+
+
+def test_run_worklog_json_writes_output(monkeypatch: object, tmp_path: Path) -> None:
+    import agent_tools.cli as cli_module
+
+    output_path = tmp_path / "worklog.json"
+    report = WorklogReport(
+        time_zone="Asia/Tashkent",
+        generated_at=datetime(2026, 4, 23, 0, 0, tzinfo=UTC),
+        since=None,
+        until=None,
+        total_hours=1.5,
+        turn_count=2,
+        merged_interval_count=1,
+        weeks=(),
+        repos=(),
+        intervals=(),
+        turns=(),
+        warnings=(),
+    )
+    monkeypatch.setattr(cli_module, "generate_worklog_report", lambda **_kwargs: report)
+
+    result = cli_module._run_worklog(
+        argparse.Namespace(
+            since=None,
+            until=None,
+            codex_home=None,
+            claude_home=None,
+            format="json",
+            output=str(output_path),
+        )
+    )
+
+    assert result == 0
+    payload = output_path.read_text(encoding="utf-8")
+    assert '"total_hours": 1.5' in payload
+
+
+def test_run_worklog_rejects_inverted_date_range() -> None:
+    import agent_tools.cli as cli_module
+
+    with pytest.raises(SystemExit):
+        cli_module._run_worklog(
+            argparse.Namespace(
+                since=date(2026, 4, 24),
+                until=date(2026, 4, 23),
+                codex_home=None,
+                claude_home=None,
+                format="table",
+                output="-",
+            )
+        )
+
+
+def test_run_worklog_table_is_repo_focused(monkeypatch: object, tmp_path: Path) -> None:
+    import agent_tools.cli as cli_module
+
+    output_path = tmp_path / "worklog.txt"
+    report = WorklogReport(
+        time_zone="Asia/Tashkent",
+        generated_at=datetime(2026, 4, 23, 0, 0, tzinfo=UTC),
+        since=date(2026, 4, 13),
+        until=date(2026, 4, 19),
+        total_hours=3.0,
+        turn_count=6,
+        merged_interval_count=2,
+        weeks=(WeeklyHours(date(2026, 4, 13), date(2026, 4, 19), 10800.0),),
+        repos=(
+            RepoHours("ai-nd-co/pdd-test", "pdd-test", 7200.0, 1, 4),
+            RepoHours("ai-nd-co/agent-tools", "agent-tools", 3600.0, 1, 2),
+        ),
+        intervals=(),
+        turns=(),
+        warnings=(),
+    )
+    monkeypatch.setattr(cli_module, "generate_worklog_report", lambda **_kwargs: report)
+
+    result = cli_module._run_worklog(
+        argparse.Namespace(
+            since=date(2026, 4, 13),
+            until=date(2026, 4, 19),
+            codex_home=None,
+            claude_home=None,
+            format="table",
+            output=str(output_path),
+        )
+    )
+
+    assert result == 0
+    payload = output_path.read_text(encoding="utf-8")
+    assert "Worklog" in payload
+    assert "Week: 2026-04-13 to 2026-04-19 | Hours: 3.00" in payload
+    assert "Repo" in payload and "Hours" in payload and "Share" in payload
+    assert "pdd-test" in payload
+    assert "66.7%" in payload

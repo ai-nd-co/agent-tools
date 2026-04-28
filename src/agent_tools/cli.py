@@ -5,6 +5,7 @@ import json
 import sys
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from time import perf_counter
 
@@ -44,6 +45,7 @@ from agent_tools.transformer import (
 from agent_tools.tts import SUPPORTED_LANGUAGES, synthesize_wav
 from agent_tools.ttsify import SUPPORTED_TTSIFY_DEVICES, TtsifyOptions, ttsify_text
 from agent_tools.ui_app import run_ui
+from agent_tools.worklog import generate_worklog_report, render_worklog_table
 
 REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh", "none")
 OUTPUT_MODE_CHOICES = ("write", "play")
@@ -86,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_codex_notify_dispatch(args)
     if args.command == "cuda-self-check":
         return _run_cuda_self_check(args)
+    if args.command == "worklog":
+        return _run_worklog(args)
 
     parser.print_help()
     return 1
@@ -200,6 +204,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     cuda_self_check_parser.add_argument("--json", action="store_true")
+
+    worklog_parser = subparsers.add_parser(
+        "worklog",
+        help="Analyze local Codex and Claude Code logs into weekly work totals.",
+    )
+    worklog_parser.add_argument("--since", type=_parse_iso_date)
+    worklog_parser.add_argument("--until", type=_parse_iso_date)
+    worklog_parser.add_argument("--codex-home", type=Path)
+    worklog_parser.add_argument("--claude-home", type=Path)
+    worklog_parser.add_argument("--format", choices=("table", "json"), default="table")
+    worklog_parser.add_argument("--output", default="-")
 
     return parser
 
@@ -550,6 +565,25 @@ def _run_cuda_self_check(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _run_worklog(args: argparse.Namespace) -> int:
+    if args.since is not None and args.until is not None and args.since > args.until:
+        raise SystemExit("--since must be on or before --until")
+    report = generate_worklog_report(
+        since=args.since,
+        until=args.until,
+        codex_home=args.codex_home,
+        claude_home=args.claude_home,
+    )
+    if args.format == "json":
+        output_text = json.dumps(report.to_jsonable(), indent=2, sort_keys=True)
+    else:
+        output_text = render_worklog_table(report)
+    if not output_text.endswith("\n"):
+        output_text += "\n"
+    _write_text_output(args.output, output_text)
+    return 0
+
+
 def _read_text_input(input_file: Path | None) -> str:
     if input_file is not None:
         return input_file.read_text(encoding="utf-8")
@@ -569,6 +603,13 @@ def _write_binary_output(output_file: str, data: bytes) -> None:
         sys.stdout.buffer.flush()
         return
     Path(output_file).write_bytes(data)
+
+
+def _parse_iso_date(value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid ISO date: {value}") from exc
 
 
 def _handle_audio_output(

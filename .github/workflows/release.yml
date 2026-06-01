@@ -115,7 +115,7 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          verify_metadata: false
+          verify-metadata: false
 
   publish-skipped:
     needs: [context, build]

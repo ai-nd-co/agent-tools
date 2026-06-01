@@ -14,6 +14,7 @@ from agent_tools.codex_integration import (
 from agent_tools.hook_install import (
     InstallAgentIntegrationsResult,
     install_agent_integrations,
+    uninstall_agent_integrations,
 )
 
 AgentIntegrationInstallState = Literal["installed", "missing", "broken"]
@@ -89,21 +90,30 @@ def install_all_integrations(
     )
 
 
+def uninstall_all_integrations(
+    codex_home: Path | None = None,
+    claude_home: Path | None = None,
+    *,
+    platform_name: str | None = None,
+) -> InstallAgentIntegrationsResult:
+    return uninstall_agent_integrations(
+        codex_home=codex_home,
+        claude_home=claude_home,
+        platform_name=platform_name,
+    )
+
+
 def set_agent_integration_enabled(enabled: bool) -> None:
     set_codex_integration_enabled(enabled)
 
 
 def agent_integration_status_text(status: AgentIntegrationStatus) -> str:
     if not status.available_providers and status.integration_state == "installed":
-        if not status.enabled:
-            return "Off - soft disabled (backend availability could not be confirmed)"
         return "On - backend availability could not be confirmed"
     if not status.available_providers:
         return "Install Codex or Claude Code first"
     provider_label = _available_provider_label(status.available_providers)
     if status.integration_state == "installed":
-        if not status.enabled:
-            return f"Off - soft disabled ({provider_label} available)"
         return f"On - {provider_label} available"
     if status.integration_state == "broken":
         return f"{provider_label} available - auto-TTS integration needs repair"
@@ -111,7 +121,7 @@ def agent_integration_status_text(status: AgentIntegrationStatus) -> str:
 
 
 def agent_integration_toggle_checked(status: AgentIntegrationStatus) -> bool:
-    return status.effective_enabled
+    return status.integration_state == "installed"
 
 
 def should_show_agent_install_panel(status: AgentIntegrationStatus) -> bool:

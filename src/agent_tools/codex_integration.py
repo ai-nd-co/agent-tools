@@ -199,6 +199,10 @@ def _validate_notify_executable(notify_command: tuple[str, ...]) -> tuple[str, .
         if shutil.which(executable) is None:
             issues.append("notify-executable-missing")
         return tuple(issues)
+    if not _is_path_like_command(executable):
+        if shutil.which(executable) is None:
+            issues.append("notify-executable-missing")
+        return tuple(issues)
 
     executable_path = Path(executable).expanduser()
     if not executable_path.exists():
@@ -290,6 +294,13 @@ def _matches_notify_command(value: object) -> bool:
         return False
     if len(command) == 2:
         return _is_agent_tools_launcher(command[0]) and command[1] == WINDOWS_NOTIFY_COMMAND
+    if len(command) == 4 and (
+        Path(command[0]).name.lower() in {"cmd", "cmd.exe"}
+        and command[1].lower() == "/d"
+        and command[2].lower() == "/c"
+        and Path(command[3]).name.lower() == "agent-tools-notify.cmd"
+    ):
+        return True
     return (
         len(command) >= 4
         and command[-1] == "codex-notify-dispatch"

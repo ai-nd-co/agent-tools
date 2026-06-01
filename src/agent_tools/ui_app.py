@@ -27,6 +27,9 @@ from agent_tools.agent_integration import (
     install_all_integrations as install_codex_integration,
 )
 from agent_tools.agent_integration import (
+    uninstall_all_integrations as uninstall_codex_integration,
+)
+from agent_tools.agent_integration import (
     load_agent_integration_status as load_codex_integration_status,
 )
 from agent_tools.agent_integration import (
@@ -1001,12 +1004,9 @@ def run_ui(*, hidden: bool) -> int:
         def _on_codex_integration_toggled(self, checked: bool) -> None:
             try:
                 if checked:
-                    if self.codex_integration_status.install_state == "installed":
-                        set_codex_integration_enabled(True)
-                    else:
-                        install_codex_integration()
+                    install_codex_integration()
                 else:
-                    set_codex_integration_enabled(False)
+                    uninstall_codex_integration()
             except Exception as exc:
                 self._refresh_codex_integration_state()
                 QMessageBox.warning(

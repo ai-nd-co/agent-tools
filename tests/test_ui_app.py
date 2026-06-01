@@ -221,7 +221,7 @@ def test_codex_integration_status_text_for_enabled_notify() -> None:
     assert codex_integration_toggle_checked(status) is True
 
 
-def test_codex_integration_status_text_for_soft_disabled() -> None:
+def test_codex_integration_status_text_for_installed_ignores_soft_disable() -> None:
     status = _make_agent_status(
         enabled=False,
         install_state="installed",
@@ -229,10 +229,8 @@ def test_codex_integration_status_text_for_soft_disabled() -> None:
         codex_mode="stop-hook",
     )
 
-    assert codex_integration_status_text(
-        status
-    ) == "Off - soft disabled (Codex and Claude Code available)"
-    assert codex_integration_toggle_checked(status) is False
+    assert codex_integration_status_text(status) == "On - Codex and Claude Code available"
+    assert codex_integration_toggle_checked(status) is True
 
 
 def test_codex_integration_status_text_for_missing_or_broken() -> None:

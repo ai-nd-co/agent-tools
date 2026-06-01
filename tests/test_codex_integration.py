@@ -47,13 +47,16 @@ def test_load_codex_integration_status_detects_windows_notify_install(
     monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
     monkeypatch.setattr(
         "shutil.which",
-        lambda name: "C:/Scripts/agent-tools.exe" if name == "agent-tools" else None,
+        lambda name: "C:/Windows/System32/cmd.exe" if name in {"cmd", "cmd.exe"} else None,
     )
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
+    wrapper_path = codex_home / "scripts" / "agent-tools-notify.cmd"
+    wrapper_path.parent.mkdir(parents=True)
+    wrapper_path.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
     (codex_home / "config.toml").write_text(
         (
-            'notify = ["agent-tools", "codex-notify-dispatch"]\n\n'
+            f'notify = ["cmd.exe", "/d", "/c", "{wrapper_path.as_posix()}"]\n\n'
             "[features]\n"
             "codex_hooks = false\n"
         ),
@@ -95,12 +98,18 @@ def test_load_codex_integration_status_detects_missing_agent_tools_launcher(
     import agent_tools.runtime as runtime_module
 
     monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
-    monkeypatch.setattr("shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "C:/Windows/System32/cmd.exe" if name in {"cmd", "cmd.exe"} else None,
+    )
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
+    wrapper_path = codex_home / "scripts" / "agent-tools-notify.cmd"
+    wrapper_path.parent.mkdir(parents=True)
+    wrapper_path.write_text("@echo off\nexit /b 0\n", encoding="utf-8")
     (codex_home / "config.toml").write_text(
         (
-            'notify = ["agent-tools", "codex-notify-dispatch"]\n\n'
+            f'notify = ["cmd.exe", "/d", "/c", "{wrapper_path.as_posix()}"]\n\n'
             "[features]\n"
             "codex_hooks = false\n"
         ),
@@ -109,8 +118,7 @@ def test_load_codex_integration_status_detects_missing_agent_tools_launcher(
 
     status = load_codex_integration_status(codex_home, platform_name="win32")
 
-    assert status.install_state == "broken"
-    assert "notify-launcher-missing" in status.issues
+    assert status.install_state == "installed"
 
 
 def test_load_codex_integration_status_detects_windows_notify_python_mismatch(

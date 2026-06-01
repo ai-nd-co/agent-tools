@@ -17,6 +17,7 @@ from agent_tools.codex_integration import set_codex_integration_enabled
 STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.codex/hooks/stop_tts.sh"\''
 WINDOWS_NOTIFY_COMMAND = "codex-notify-dispatch"
 WINDOWS_NOTIFY_LAUNCHER = "agent-tools"
+WINDOWS_NOTIFY_WRAPPER_NAME = "agent-tools-notify.cmd"
 CLAUDE_STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.claude/agent-tools/stop_tts.sh"\'' 
 STOP_HOOK_ENTRY = {
     "hooks": [
@@ -80,16 +81,17 @@ def install_windows_notify_integration(
 ) -> InstallCodexIntegrationResult:
     home = resolve_codex_home(codex_home)
     config_path = home / "config.toml"
-    notify_command = (
-        WINDOWS_NOTIFY_LAUNCHER,
-        WINDOWS_NOTIFY_COMMAND,
-    )
+    wrapper_path = home / "scripts" / WINDOWS_NOTIFY_WRAPPER_NAME
+    notify_command = build_windows_notify_command(wrapper_path)
 
     backups: list[Path] = []
     config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     updated_text = ensure_notify_command(config_text, notify_command)
     updated_text = ensure_feature_assignment(updated_text, "codex_hooks", "false")
     backup = _write_text_if_changed(config_path, updated_text)
+    if backup is not None:
+        backups.append(backup)
+    backup = _write_text_if_changed(wrapper_path, build_windows_notify_wrapper_script())
     if backup is not None:
         backups.append(backup)
     set_codex_integration_enabled(True)
@@ -100,6 +102,30 @@ def install_windows_notify_integration(
         config_path=config_path,
         backups=tuple(backups),
         notify_command=notify_command,
+    )
+
+
+def build_windows_notify_command(wrapper_path: Path) -> tuple[str, ...]:
+    return (
+        "cmd.exe",
+        "/d",
+        "/c",
+        wrapper_path.as_posix(),
+    )
+
+
+def build_windows_notify_wrapper_script() -> str:
+    return "\n".join(
+        [
+            "@echo off",
+            "setlocal",
+            'if "%~1"=="" exit /b 0',
+            'py -m agent_tools codex-notify-dispatch "%~1" && exit /b 0',
+            'python -m agent_tools codex-notify-dispatch "%~1" && exit /b 0',
+            'if exist "%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat" call "%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat" exec python -m agent_tools codex-notify-dispatch "%~1" && exit /b 0',
+            "exit /b 1",
+            "",
+        ]
     )
 
 
@@ -190,6 +216,142 @@ def install_agent_integrations(
     )
 
 
+def uninstall_codex_integration(
+    codex_home: Path | None = None,
+    *,
+    platform_name: str | None = None,
+) -> InstallCodexIntegrationResult:
+    current_platform = platform_name or sys.platform
+    if current_platform == "win32":
+        return uninstall_windows_notify_integration(codex_home)
+    return uninstall_codex_stop_hook(codex_home)
+
+
+def uninstall_windows_notify_integration(
+    codex_home: Path | None = None,
+) -> InstallCodexIntegrationResult:
+    home = resolve_codex_home(codex_home)
+    config_path = home / "config.toml"
+    wrapper_path = home / "scripts" / WINDOWS_NOTIFY_WRAPPER_NAME
+
+    backups: list[Path] = []
+    config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    updated_text = remove_notify_command(config_text)
+    updated_text = remove_feature_assignment(updated_text, "codex_hooks")
+    backup = _write_text_if_changed(config_path, updated_text)
+    if backup is not None:
+        backups.append(backup)
+    if wrapper_path.exists():
+        backup = _write_text_if_changed(wrapper_path, "")
+        if backup is not None:
+            backups.append(backup)
+        wrapper_path.unlink(missing_ok=True)
+    set_codex_integration_enabled(False)
+
+    return InstallCodexIntegrationResult(
+        mode="notify",
+        codex_home=home,
+        config_path=config_path,
+        backups=tuple(backups),
+        notify_command=None,
+    )
+
+
+def uninstall_codex_stop_hook(
+    codex_home: Path | None = None,
+) -> InstallCodexIntegrationResult:
+    home = resolve_codex_home(codex_home)
+    config_path = home / "config.toml"
+    hooks_json_path = home / "hooks.json"
+    hook_script_path = home / "hooks" / "stop_tts.sh"
+
+    backups: list[Path] = []
+    config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    updated_text = remove_feature_assignment(config_text, "codex_hooks")
+    backup = _write_text_if_changed(config_path, updated_text)
+    if backup is not None:
+        backups.append(backup)
+
+    if hooks_json_path.exists():
+        payload = _load_existing_hooks_payload(hooks_json_path)
+        hooks = payload.get("hooks")
+        if isinstance(hooks, dict):
+            stop_entries = hooks.get("Stop")
+            if isinstance(stop_entries, list):
+                hooks["Stop"] = [entry for entry in stop_entries if not _is_agent_tools_stop_entry(entry)]
+        backup = _write_text_if_changed(
+            hooks_json_path,
+            json.dumps(payload, indent=2) + "\n",
+        )
+        if backup is not None:
+            backups.append(backup)
+
+    if hook_script_path.exists():
+        backup = _write_text_if_changed(hook_script_path, "")
+        if backup is not None:
+            backups.append(backup)
+        hook_script_path.unlink(missing_ok=True)
+    set_codex_integration_enabled(False)
+
+    return InstallCodexIntegrationResult(
+        mode="stop-hook",
+        codex_home=home,
+        config_path=config_path,
+        backups=tuple(backups),
+        hooks_json_path=hooks_json_path,
+        hook_script_path=hook_script_path,
+    )
+
+
+def uninstall_claude_integration(
+    claude_home: Path | None = None,
+) -> InstallClaudeIntegrationResult:
+    home = resolve_claude_home(claude_home)
+    settings_path = home / "settings.json"
+    hook_script_path = home / "agent-tools" / "stop_tts.sh"
+
+    backups: list[Path] = []
+    if settings_path.exists():
+        payload = _load_existing_settings_payload(settings_path)
+        hooks = payload.get("hooks")
+        if isinstance(hooks, dict):
+            stop_entries = hooks.get("Stop")
+            if isinstance(stop_entries, list):
+                hooks["Stop"] = [entry for entry in stop_entries if not _is_agent_tools_claude_stop_entry(entry)]
+        backup = _write_text_if_changed(
+            settings_path,
+            json.dumps(payload, indent=2) + "\n",
+        )
+        if backup is not None:
+            backups.append(backup)
+
+    if hook_script_path.exists():
+        backup = _write_text_if_changed(hook_script_path, "")
+        if backup is not None:
+            backups.append(backup)
+        hook_script_path.unlink(missing_ok=True)
+    set_codex_integration_enabled(False)
+
+    return InstallClaudeIntegrationResult(
+        claude_home=home,
+        settings_path=settings_path,
+        hook_script_path=hook_script_path,
+        backups=tuple(backups),
+    )
+
+
+def uninstall_agent_integrations(
+    codex_home: Path | None = None,
+    claude_home: Path | None = None,
+    *,
+    platform_name: str | None = None,
+) -> InstallAgentIntegrationsResult:
+    return InstallAgentIntegrationsResult(
+        codex=uninstall_codex_integration(codex_home, platform_name=platform_name),
+        claude=uninstall_claude_integration(claude_home),
+    )
+
+
 def load_packaged_hook_script() -> str:
     return resources.files("agent_tools.codex_hooks").joinpath("stop_tts.sh").read_text(
         encoding="utf-8"
@@ -259,6 +421,11 @@ def ensure_notify_command(config_text: str, notify_command: tuple[str, ...]) -> 
     return "\n".join(lines).rstrip() + "\n"
 
 
+def remove_notify_command(config_text: str) -> str:
+    lines = [line for line in config_text.splitlines() if not re.match(r"^\s*notify\s*=", line)]
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
+
+
 def ensure_feature_assignment(config_text: str, key: str, rendered_value: str) -> str:
     lines = config_text.splitlines()
     features_index = _find_section_header(lines, "features")
@@ -276,6 +443,26 @@ def ensure_feature_assignment(config_text: str, key: str, rendered_value: str) -
 
     lines.insert(section_end, assignment)
     return "\n".join(lines) + "\n"
+
+
+def remove_feature_assignment(config_text: str, key: str) -> str:
+    lines = config_text.splitlines()
+    features_index = _find_section_header(lines, "features")
+    if features_index is None:
+        return config_text
+
+    section_end = _find_next_section_index(lines, features_index + 1)
+    kept_section_lines = [
+        line
+        for line in lines[features_index + 1 : section_end]
+        if not re.match(rf"^\s*{re.escape(key)}\s*=", line)
+    ]
+
+    if any(line.strip() for line in kept_section_lines):
+        lines = lines[: features_index + 1] + kept_section_lines + lines[section_end:]
+    else:
+        lines = lines[:features_index] + lines[section_end:]
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
 
 
 def _find_section_header(lines: list[str], section_name: str) -> int | None:
@@ -332,6 +519,23 @@ def _is_agent_tools_stop_entry(entry: object) -> bool:
             continue
         command = hook.get("command")
         if isinstance(command, str) and "stop_tts.sh" in command:
+            return True
+    return False
+
+
+def _is_agent_tools_claude_stop_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    for hook in hooks:
+        if not isinstance(hook, dict):
+            continue
+        command = hook.get("command")
+        if isinstance(command, str) and "agent-tools/stop_tts.sh" in command:
+            return True
+        if command == CLAUDE_STOP_HOOK_COMMAND:
             return True
     return False
 

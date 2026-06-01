@@ -8,7 +8,9 @@ from agent_tools.hook_install import (
     CLAUDE_STOP_HOOK_COMMAND,
     STOP_HOOK_COMMAND,
     WINDOWS_NOTIFY_COMMAND,
-    WINDOWS_NOTIFY_LAUNCHER,
+    WINDOWS_NOTIFY_WRAPPER_NAME,
+    build_windows_notify_command,
+    build_windows_notify_wrapper_script,
     build_updated_claude_settings_payload,
     build_updated_hooks_payload,
     ensure_feature_assignment,
@@ -126,12 +128,19 @@ def test_install_codex_integration_writes_windows_notify_config(
 
     assert result.mode == "notify"
     assert result.config_path.exists()
-    assert result.notify_command == (WINDOWS_NOTIFY_LAUNCHER, WINDOWS_NOTIFY_COMMAND)
+    assert result.notify_command == build_windows_notify_command(
+        codex_home / "scripts" / WINDOWS_NOTIFY_WRAPPER_NAME
+    )
     config_text = result.config_path.read_text(encoding="utf-8")
-    assert 'notify = ["agent-tools", "codex-notify-dispatch"]' in config_text
+    assert 'notify = ["cmd.exe", "/d", "/c", "' in config_text
     assert "codex_hooks = false" in config_text
     assert result.hooks_json_path is None
     assert result.hook_script_path is None
+    wrapper_path = codex_home / "scripts" / WINDOWS_NOTIFY_WRAPPER_NAME
+    assert wrapper_path.exists()
+    assert wrapper_path.read_text(encoding="utf-8").splitlines() == (
+        build_windows_notify_wrapper_script().splitlines()
+    )
 
 
 def test_install_codex_stop_hook_writes_files(monkeypatch: object, tmp_path: Path) -> None:

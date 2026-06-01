@@ -552,23 +552,6 @@ def _is_agent_tools_claude_stop_entry(entry: object) -> bool:
     return False
 
 
-def _is_agent_tools_claude_stop_entry(entry: object) -> bool:
-    if not isinstance(entry, dict):
-        return False
-    hooks = entry.get("hooks")
-    if not isinstance(hooks, list):
-        return False
-    for hook in hooks:
-        if not isinstance(hook, dict):
-            continue
-        command = hook.get("command")
-        if command == CLAUDE_STOP_HOOK_COMMAND:
-            return True
-        if isinstance(command, str) and "agent-tools/stop_tts.sh" in command:
-            return True
-    return False
-
-
 def _write_text_if_changed(path: Path, new_text: str) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():

@@ -12,6 +12,22 @@ The CLI command remains:
 agent-tools
 ```
 
+## Current known-good state
+
+As of **June 1, 2026**, the current released version is:
+
+- package version: `0.7.6`
+- release tag: `py-v0.7.6`
+
+The release chain has been verified end-to-end:
+
+1. push to `main`
+2. `semantic-release.yml` computes the next version and creates `py-v*`
+3. `release.yml` is dispatched for that tag
+4. PyPI publish succeeds
+
+This is the current baseline to compare future release issues against.
+
 ## Before first release
 
 1. Confirm the GitHub repo is public: `ai-nd-co/agent-tools`
@@ -52,6 +68,12 @@ Normal flow:
 6. it dispatches `release.yml` against that new tag
 7. `release.yml` builds and publishes to PyPI
 
+Current proven-good example:
+
+- `93df0f2` => `chore(release): 0.7.6 [skip ci]`
+- tag => `py-v0.7.6`
+- `release.yml` publish => success
+
 Versioning rules:
 
 - `feat:` => minor
@@ -84,6 +106,23 @@ This dispatch step is required for fully automated PyPI publishing from semantic
 To keep trusted publishing in `release.yml`, the semantic-release workflow explicitly dispatches
 that workflow against the new `py-v*` tag after creating it.
 
+## Current PyPI workflow caveat
+
+The publish workflow currently disables metadata verification in the PyPI action:
+
+```yaml
+with:
+  verify-metadata: false
+```
+
+Reason:
+
+- current wheels built by the active Hatchling backend emit `Metadata-Version: 2.5`
+- the current `pypa/gh-action-pypi-publish` verification path rejects that metadata as invalid
+- disabling verification was required to let trusted publishing succeed for `0.7.6`
+
+If this is revisited later, re-test the release path before re-enabling metadata verification.
+
 ## Verification
 
 After publish:
@@ -91,6 +130,14 @@ After publish:
 ```bash
 pip install ai-nd-co-agent-tools
 agent-tools --help
+```
+
+Confirm the release actually happened:
+
+```bash
+git tag --list 'py-v*' --sort=-v:refname | head
+gh run list --workflow semantic-release.yml --limit 5
+gh run list --workflow release.yml --limit 5
 ```
 
 Also smoke-test the two commands:
@@ -106,3 +153,5 @@ echo "hello" | agent-tools tts --output-file hello.wav
 - `transform` depends on local Codex ChatGPT login and `~/.codex/auth.json`
 - the backend path is intentionally private/experimental and may break with Codex changes
 - semantic-release owns version bumps and `py-v*` tags; manual workflow runs build only unless explicitly told to publish
+- if semantic-release succeeds but `release.yml` fails, fix `release.yml` and manually re-run it
+  against `main` or the current `py-v*` tag instead of creating ad-hoc tags by hand

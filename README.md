@@ -139,6 +139,11 @@ agent-tools install-claude-integration
 ```
 
 - On native Windows Codex, this installs a `notify` command in `~/.codex/config.toml`.
+- The Windows installer now points `notify` at a stable wrapper script:
+  `~/.codex/scripts/agent-tools-notify.cmd`
+- That wrapper is machine-local and is allowed to discover the correct local Python
+  installation at runtime (`py`, `python`, then `pyenv` as a last fallback), so the
+  synced Codex config does not need to hard-code a Python version path.
 - On non-Windows, this keeps the Stop-hook integration path.
 - Claude Code integration installs an AgentTools `Stop` hook into `~/.claude/settings.json`
   and writes the hook script to `~/.claude/agent-tools/stop_tts.sh`.
@@ -148,9 +153,11 @@ Windows debug logs:
 
 - `~/.codex/notify_tts.log`
 - `~/.codex/notify_tts_agent_tools.log`
+- `~/.codex/scripts/agent-tools-notify.cmd`
 
 On Windows, Codex passes the notify payload as the final JSON argv argument to the installed
-Python command. No PowerShell or bash wrapper is used.
+notify command. AgentTools installs a wrapper `.cmd` file so the notify target stays stable even
+when Python lives in different places on different machines.
 
 This enqueues the generated audio, starts the background controller if needed, and returns
 immediately.
@@ -244,12 +251,24 @@ The controller behavior is:
 - when neither Codex nor Claude Code is available, the normal playback UI is hidden and the window
   shows an info-only message telling you to install or sign in to any one backend first
 - when either backend is available, the normal playback UI stays usable
-- a single switch soft-disables or re-enables AgentTools auto-TTS processing when the relevant
-  AgentTools hook/integration is installed
+- the single "Enable Codex + Claude Code integration" checkbox is the install state for the
+  integration:
+  - checked = install/fix the relevant Codex + Claude integration artifacts
+  - unchecked = remove/uninstall those artifacts
+- there is no separate user-facing "soft disable" state for the checkbox flow; if users want the
+  integration off, unchecking the box removes the installed integration artifacts
 - a dropdown chooses the default transform engine used for `ttsify` and desktop auto-TTS:
   Codex or Claude Code
 - if the saved/default provider is unavailable but another backend is available, AgentTools falls
   back automatically unless you explicitly force a provider on the CLI
+
+Current known-good Windows state after checking the box:
+
+- `~/.codex/config.toml` contains a `notify = ["cmd.exe", "/d", "/c", "...agent-tools-notify.cmd"]`
+  entry
+- `~/.codex/scripts/agent-tools-notify.cmd` exists
+- Codex TUI no longer needs a machine-specific Python path in synced config
+- unchecking the box removes the wrapper and removes the `notify` config entry
 
 ### End-to-end pipeline
 
@@ -307,3 +326,10 @@ python scripts/benchmark_tts_cpu.py
 - Missing `espeak-ng`: install it for better English fallback behavior
 - Slow first run: expected; Kokoro downloads voices/models and initializes the pipeline
 - After changing Python versions for the interpreter that runs `agent-tools`, rerun `agent-tools install-cuda` in that same interpreter to repair the PyTorch stack for Kokoro
+- If Windows Codex logs `after_agent hook failed` with `program not found`, rerun the checkbox
+  install flow or run `agent-tools install-codex-integration` again. The expected repaired config
+  should point to `cmd.exe /d /c ~/.codex/scripts/agent-tools-notify.cmd`, not directly to a
+  version-specific Python path.
+- If a synced `~/.codex/config.toml` still contains an older `notify = ["agent-tools", ...]` or a
+  hard-coded Python path from a previous machine, reinstall the Codex integration on the current
+  machine so the wrapper path is rewritten locally.

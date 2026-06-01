@@ -80,7 +80,10 @@ def install_windows_notify_integration(
 ) -> InstallCodexIntegrationResult:
     home = resolve_codex_home(codex_home)
     config_path = home / "config.toml"
-    notify_command = build_windows_notify_command()
+    notify_command = (
+        WINDOWS_NOTIFY_LAUNCHER,
+        WINDOWS_NOTIFY_COMMAND,
+    )
 
     backups: list[Path] = []
     config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -97,16 +100,6 @@ def install_windows_notify_integration(
         config_path=config_path,
         backups=tuple(backups),
         notify_command=notify_command,
-    )
-
-
-def build_windows_notify_command() -> tuple[str, ...]:
-    python_executable = Path(sys.executable).resolve().as_posix()
-    return (
-        python_executable,
-        "-m",
-        "agent_tools",
-        WINDOWS_NOTIFY_COMMAND,
     )
 
 

@@ -8,7 +8,7 @@ from agent_tools.hook_install import (
     CLAUDE_STOP_HOOK_COMMAND,
     STOP_HOOK_COMMAND,
     WINDOWS_NOTIFY_COMMAND,
-    build_windows_notify_command,
+    WINDOWS_NOTIFY_LAUNCHER,
     build_updated_claude_settings_payload,
     build_updated_hooks_payload,
     ensure_feature_assignment,
@@ -117,27 +117,18 @@ def test_install_codex_integration_writes_windows_notify_config(
     monkeypatch: object,
     tmp_path: Path,
 ) -> None:
-    import agent_tools.hook_install as hook_install_module
     import agent_tools.runtime as runtime_module
 
     monkeypatch.setattr(runtime_module, "app_root", lambda: tmp_path / "app")
-    monkeypatch.setattr(
-        hook_install_module.sys,
-        "executable",
-        r"C:\Python311\python.exe",
-    )
     codex_home = tmp_path / ".codex"
 
     result = install_codex_integration(codex_home, platform_name="win32")
 
     assert result.mode == "notify"
     assert result.config_path.exists()
-    assert result.notify_command == build_windows_notify_command()
+    assert result.notify_command == (WINDOWS_NOTIFY_LAUNCHER, WINDOWS_NOTIFY_COMMAND)
     config_text = result.config_path.read_text(encoding="utf-8")
-    assert (
-        'notify = ["C:/Python311/python.exe", "-m", "agent_tools", '
-        '"codex-notify-dispatch"]' in config_text
-    )
+    assert 'notify = ["agent-tools", "codex-notify-dispatch"]' in config_text
     assert "codex_hooks = false" in config_text
     assert result.hooks_json_path is None
     assert result.hook_script_path is None

@@ -1,3 +1,9 @@
+## [0.7.6](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.5...py-v0.7.6) (2026-06-01)
+
+### Bug Fixes
+
+* **release:** use kebab-case verify-metadata input ([a6ea876](https://github.com/ai-nd-co/agent-tools/commit/a6ea876f37b9d37ae09facbf9d6847a1ca5435a9))
+
 ## [0.7.5](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.4...py-v0.7.5) (2026-06-01)
 
 ### Bug Fixes

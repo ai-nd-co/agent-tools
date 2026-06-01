@@ -1,3 +1,11 @@
+## [0.7.4](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.3...py-v0.7.4) (2026-06-01)
+
+### Bug Fixes
+
+* **ci:** remove duplicate hook helper ([5c00c9d](https://github.com/ai-nd-co/agent-tools/commit/5c00c9d2d990f3bb51c4c9c326397f515ccfcdfc))
+* **ci:** satisfy release lint checks ([8674030](https://github.com/ai-nd-co/agent-tools/commit/8674030b41129955f3fcc0c116c231fa30f2cd32))
+* **integration:** make checkbox install and uninstall integrations ([0552210](https://github.com/ai-nd-co/agent-tools/commit/0552210bbc929cab1fc24ff1f40847ea952a8ac6))
+
 ## [0.7.3](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.2...py-v0.7.3) (2026-04-20)
 
 ### Bug Fixes

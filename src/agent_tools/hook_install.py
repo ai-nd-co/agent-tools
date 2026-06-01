@@ -17,7 +17,6 @@ from agent_tools.codex_integration import set_codex_integration_enabled
 STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.codex/hooks/stop_tts.sh"\''
 WINDOWS_NOTIFY_COMMAND = "codex-notify-dispatch"
 WINDOWS_NOTIFY_LAUNCHER = "agent-tools"
-WINDOWS_NOTIFY_WRAPPER_NAME = "agent-tools-notify.cmd"
 CLAUDE_STOP_HOOK_COMMAND = 'bash -lc \'"$HOME/.claude/agent-tools/stop_tts.sh"\'' 
 STOP_HOOK_ENTRY = {
     "hooks": [
@@ -81,17 +80,13 @@ def install_windows_notify_integration(
 ) -> InstallCodexIntegrationResult:
     home = resolve_codex_home(codex_home)
     config_path = home / "config.toml"
-    wrapper_path = home / "scripts" / WINDOWS_NOTIFY_WRAPPER_NAME
-    notify_command = build_windows_notify_command(wrapper_path)
+    notify_command = build_windows_notify_command()
 
     backups: list[Path] = []
     config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     updated_text = ensure_notify_command(config_text, notify_command)
     updated_text = ensure_feature_assignment(updated_text, "codex_hooks", "false")
     backup = _write_text_if_changed(config_path, updated_text)
-    if backup is not None:
-        backups.append(backup)
-    backup = _write_text_if_changed(wrapper_path, build_windows_notify_wrapper_script())
     if backup is not None:
         backups.append(backup)
     set_codex_integration_enabled(True)
@@ -105,27 +100,13 @@ def install_windows_notify_integration(
     )
 
 
-def build_windows_notify_command(wrapper_path: Path) -> tuple[str, ...]:
+def build_windows_notify_command() -> tuple[str, ...]:
+    python_executable = Path(sys.executable).resolve().as_posix()
     return (
-        "cmd.exe",
-        "/d",
-        "/c",
-        wrapper_path.as_posix(),
-    )
-
-
-def build_windows_notify_wrapper_script() -> str:
-    return "\n".join(
-        [
-            "@echo off",
-            "setlocal",
-            "if \"%~1\"==\"\" exit /b 0",
-            "py -m agent_tools codex-notify-dispatch \"%~1\" && exit /b 0",
-            "python -m agent_tools codex-notify-dispatch \"%~1\" && exit /b 0",
-            "if exist \"%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat\" call \"%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat\" exec python -m agent_tools codex-notify-dispatch \"%~1\" && exit /b 0",
-            "exit /b 1",
-            "",
-        ]
+        python_executable,
+        "-m",
+        "agent_tools",
+        WINDOWS_NOTIFY_COMMAND,
     )
 
 

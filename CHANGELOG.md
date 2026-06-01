@@ -1,3 +1,9 @@
+## [0.7.5](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.4...py-v0.7.5) (2026-06-01)
+
+### Bug Fixes
+
+* **release:** disable metadata verification for pypi publish ([b14c93d](https://github.com/ai-nd-co/agent-tools/commit/b14c93d296a3899219998068b40aaa5c78c985bd))
+
 ## [0.7.4](https://github.com/ai-nd-co/agent-tools/compare/py-v0.7.3...py-v0.7.4) (2026-06-01)
 
 ### Bug Fixes

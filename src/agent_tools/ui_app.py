@@ -27,13 +27,10 @@ from agent_tools.agent_integration import (
     install_all_integrations as install_codex_integration,
 )
 from agent_tools.agent_integration import (
-    uninstall_all_integrations as uninstall_codex_integration,
-)
-from agent_tools.agent_integration import (
     load_agent_integration_status as load_codex_integration_status,
 )
 from agent_tools.agent_integration import (
-    set_agent_integration_enabled as set_codex_integration_enabled,
+    uninstall_all_integrations as uninstall_codex_integration,
 )
 from agent_tools.codex_config import DEFAULT_TRANSFORM_PROVIDER, read_preferred_transform_provider
 from agent_tools.queue_db import (

@@ -122,7 +122,11 @@ def build_windows_notify_wrapper_script() -> str:
             'if "%~1"=="" exit /b 0',
             'py -m agent_tools codex-notify-dispatch "%~1" && exit /b 0',
             'python -m agent_tools codex-notify-dispatch "%~1" && exit /b 0',
-            'if exist "%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat" call "%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat" exec python -m agent_tools codex-notify-dispatch "%~1" && exit /b 0',
+            (
+                'if exist "%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat" '
+                'call "%USERPROFILE%\\.pyenv\\pyenv-win\\bin\\pyenv.bat" exec '
+                'python -m agent_tools codex-notify-dispatch "%~1" && exit /b 0'
+            ),
             "exit /b 1",
             "",
         ]
@@ -278,7 +282,11 @@ def uninstall_codex_stop_hook(
         if isinstance(hooks, dict):
             stop_entries = hooks.get("Stop")
             if isinstance(stop_entries, list):
-                hooks["Stop"] = [entry for entry in stop_entries if not _is_agent_tools_stop_entry(entry)]
+                hooks["Stop"] = [
+                    entry
+                    for entry in stop_entries
+                    if not _is_agent_tools_stop_entry(entry)
+                ]
         backup = _write_text_if_changed(
             hooks_json_path,
             json.dumps(payload, indent=2) + "\n",
@@ -317,7 +325,11 @@ def uninstall_claude_integration(
         if isinstance(hooks, dict):
             stop_entries = hooks.get("Stop")
             if isinstance(stop_entries, list):
-                hooks["Stop"] = [entry for entry in stop_entries if not _is_agent_tools_claude_stop_entry(entry)]
+                hooks["Stop"] = [
+                    entry
+                    for entry in stop_entries
+                    if not _is_agent_tools_claude_stop_entry(entry)
+                ]
         backup = _write_text_if_changed(
             settings_path,
             json.dumps(payload, indent=2) + "\n",

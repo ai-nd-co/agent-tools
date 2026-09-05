@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from agent_tools.computer import providers
+from agent_tools.computer.actions import action_capabilities
 from agent_tools.computer.models import ComputerError, available_section
 from agent_tools.computer.providers import ProviderSpec
 
@@ -136,6 +137,7 @@ def test_readiness_reports_dynamic_winapp_capability(monkeypatch) -> None:
             }
 
     monkeypatch.setattr(providers, "WinAppAdapter", FakeWinAppAdapter)
+    monkeypatch.setattr(providers.command_registry, "ocr_supported", lambda: True)
 
     section = providers._readiness_provider(FakeBackend())
 
@@ -144,24 +146,139 @@ def test_readiness_reports_dynamic_winapp_capability(monkeypatch) -> None:
     assert section["actions_available"] is True
     assert section["desktop_usable"] is True
     assert section["action_blocked_reason"] is None
-    assert section["physical_input"] is False
+    assert section["physical_input"] is True
+    assert section["physical_input_state"] == {
+        "supported": True,
+        "enabled": True,
+        "target_eligible": True,
+        "authorized": False,
+        "authorization": "per_action_explicit_allow_physical_with_fresh_capture",
+        "policy": "explicit_capture_bound_last_resort",
+    }
     assert section["backends"]["uia_winapp"]["version"] == "0.6.0"
     assert section["capabilities"] == [
         "info",
         "windows",
         "focused",
         "screenshot",
-        "capabilities",
+        "ocr",
         "inspect",
         "read",
         "scroll-areas",
+        "capabilities",
+        "focus",
+        "restore",
+        "minimize",
+        "maximize",
+        "resize",
         "invoke",
         "set-value",
         "scroll",
-        "focus",
-        "resize",
+        "move-pointer",
+        "click",
+        "type",
+        "key",
+        "shortcut",
+        "wheel",
         "notify",
     ]
+
+
+def test_readiness_and_capabilities_inventories_share_one_registry(monkeypatch) -> None:
+    """Consistency regression (validation 2026-09-06 backlog item 2).
+
+    info readiness, capabilities, and the mutation block must derive from one
+    command registry: no omitted physical/OCR/state commands and no disagreeing
+    physical_input answer.
+    """
+    from agent_tools.computer import command_registry, uia_winapp
+
+    class FakeWinAppAdapter:
+        def __init__(self, _backend) -> None:
+            pass
+
+        def probe(self):
+            return {"available": True, "status": "ready", "version": "0.6.0"}
+
+    monkeypatch.setattr(providers, "WinAppAdapter", FakeWinAppAdapter)
+    monkeypatch.setattr(providers.command_registry, "ocr_supported", lambda: True)
+
+    readiness = providers._readiness_provider(FakeBackend())
+    caps = uia_winapp.capabilities(
+        adapter=type("Adapter", (), {"probe": lambda self: {"available": True}})()
+    )
+
+    registry_names = command_registry.all_command_names()
+    assert len(registry_names) == 24
+    assert len(set(registry_names)) == 24
+
+    # capabilities must not omit the six physical commands or anything else
+    assert caps["commands"] == registry_names
+    for command in ("move-pointer", "click", "type", "key", "shortcut", "wheel"):
+        assert command in caps["commands"]
+    assert caps["command_kinds"]["physical_input"] == [
+        "move-pointer",
+        "click",
+        "type",
+        "key",
+        "shortcut",
+        "wheel",
+    ]
+
+    # readiness lists the registry commands that pass their gates right now
+    assert readiness["capabilities"] == registry_names
+    assert set(readiness["capabilities"]) <= set(caps["commands"])
+
+    # physical_input must agree between info readiness and capabilities
+    mutations = action_capabilities()
+    assert mutations["commands"] == command_registry.mutation_command_names()
+    assert readiness["physical_input"] == bool(mutations["physical_input"])
+    assert readiness["physical_input"] is True
+
+
+def test_readiness_gates_registry_commands_on_backend_availability(monkeypatch) -> None:
+    from agent_tools.computer import command_registry
+
+    monkeypatch.setattr(providers.command_registry, "ocr_supported", lambda: False)
+
+    class UnavailableWinApp:
+        def __init__(self, _backend) -> None:
+            pass
+
+        def probe(self):
+            return {"available": False, "error_code": "uia_winapp_unavailable"}
+
+    monkeypatch.setattr(providers, "WinAppAdapter", UnavailableWinApp)
+    monkeypatch.setattr(
+        providers,
+        "action_capabilities",
+        lambda: {
+            "available": False,
+            "disabled": True,
+            "mutex": "Local\\fixture",
+            "busy_behavior": "reject_without_queue",
+            "physical_input": True,
+            "physical_input_policy": "explicit_capture_bound_last_resort",
+        },
+    )
+
+    section = providers._readiness_provider(FakeBackend())
+
+    assert section["capabilities"] == [
+        "info",
+        "windows",
+        "focused",
+        "screenshot",
+        "capabilities",
+    ]
+    assert section["physical_input_state"]["supported"] is True
+    assert section["physical_input_state"]["enabled"] is False
+    assert section["physical_input_state"]["target_eligible"] is False
+    assert command_registry.available_command_names(
+        uia_winapp_available=False,
+        mutations_available=False,
+        ocr_available=False,
+    ) == ["info", "windows", "focused", "screenshot", "capabilities"]
 
 
 def test_readiness_fails_closed_for_foreground_lock_ui(monkeypatch) -> None:

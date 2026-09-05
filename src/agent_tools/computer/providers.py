@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_tools import __version__
+from agent_tools.computer import command_registry
 from agent_tools.computer.actions import action_capabilities
 from agent_tools.computer.models import (
     MAX_PROCESS_NAME_CHARS,
@@ -731,12 +732,11 @@ def _readiness_provider(backend: Win32Backend) -> dict[str, Any]:
         action_blocked_reason = "computer_actions_disabled"
     else:
         action_blocked_reason = None
-    capabilities = ["info", "windows", "focused", "screenshot", "capabilities"]
-    if uia_probe.get("available"):
-        capabilities.extend(
-            ["inspect", "read", "scroll-areas", "invoke", "set-value", "scroll"]
-        )
-    capabilities.extend(["focus", "resize", "notify"])
+    capabilities = command_registry.available_command_names(
+        uia_winapp_available=bool(uia_probe.get("available")),
+        mutations_available=bool(mutations["available"]),
+        ocr_available=command_registry.ocr_supported(),
+    )
     return available_section(
         agent_tools_version=__version__,
         read_only=False,
@@ -748,7 +748,15 @@ def _readiness_provider(backend: Win32Backend) -> dict[str, Any]:
         lock_state=identity.get("lock_state"),
         lock_ui_foreground=identity.get("lock_ui_foreground"),
         action_busy_behavior=mutations["busy_behavior"],
-        physical_input=False,
+        physical_input=bool(mutations["physical_input"]),
+        physical_input_state={
+            "supported": bool(mutations["physical_input"]),
+            "enabled": not bool(mutations["disabled"]),
+            "target_eligible": actions_available,
+            "authorized": False,
+            "authorization": "per_action_explicit_allow_physical_with_fresh_capture",
+            "policy": mutations["physical_input_policy"],
+        },
         capabilities=capabilities,
         backends={
             "win32": backend.probe(),

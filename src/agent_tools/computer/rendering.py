@@ -18,6 +18,10 @@ def render_json_error(command: str, error: ComputerError) -> str:
 def render_human_error(error: ComputerError) -> str:
     lines = [f"Error [{error.code}]: {_terminal_text(error.message)}"]
     details = error.details
+    if isinstance(details.get("retryable"), bool):
+        lines.append(f"Retryable: {'yes' if details['retryable'] else 'no'}")
+    if details.get("next_action"):
+        lines.append(f"Next: {_terminal_text(details['next_action'])}")
     if details.get("operation_id"):
         lines.append(
             "Action: "

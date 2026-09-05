@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from agent_tools.computer import command_registry
 from agent_tools.computer.capture_records import _atomic_private_write
 from agent_tools.computer.consequence import (
     ConsequenceObserver,
@@ -1811,23 +1812,7 @@ def action_capabilities() -> dict[str, Any]:
         "disable_sources": _disable_sources(),
         "mutex": MUTEX_NAME,
         "busy_behavior": "reject_without_queue",
-        "commands": [
-            "focus",
-            "restore",
-            "minimize",
-            "maximize",
-            "resize",
-            "invoke",
-            "set-value",
-            "scroll",
-            "move-pointer",
-            "click",
-            "type",
-            "key",
-            "shortcut",
-            "wheel",
-            "notify",
-        ],
+        "commands": command_registry.mutation_command_names(),
         "physical_input": True,
         "physical_input_policy": "explicit_capture_bound_last_resort",
         "physical_capture_max_age_seconds": PHYSICAL_CAPTURE_MAX_AGE_SECONDS,

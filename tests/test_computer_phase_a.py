@@ -1049,7 +1049,7 @@ def test_phase_a_cli_exposes_state_strict_title_and_reference_targets() -> None:
     assert invoked.element is None
     assert invoked.element_ref == "eref_" + "a" * 32
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(ComputerError) as conflict:
         parser.parse_args(
             [
                 "computer",
@@ -1062,3 +1062,5 @@ def test_phase_a_cli_exposes_state_strict_title_and_reference_targets() -> None:
                 "eref_" + "a" * 32,
             ]
         )
+    assert conflict.value.code == "conflicting_arguments"
+    assert conflict.value.details["retryable"] is False

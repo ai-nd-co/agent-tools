@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from agent_tools.computer.actions import (
     MAX_VALUE_CHARS,
@@ -23,6 +25,7 @@ from agent_tools.computer.actions import (
     set_window_state,
     stage_physical_text,
 )
+from agent_tools.computer.command_registry import COMMAND_REGISTRY
 from agent_tools.computer.models import ComputerError
 from agent_tools.computer.ocr import (
     DEFAULT_MAX_OCR_CHARS,
@@ -81,7 +84,11 @@ def add_computer_parser(subparsers: Any) -> None:
             "with `| jq ...`."
         ),
     )
-    commands = computer_parser.add_subparsers(dest="computer_command", required=True)
+    commands = computer_parser.add_subparsers(
+        dest="computer_command",
+        required=True,
+        parser_class=_ComputerArgumentParser,
+    )
 
     info_parser = commands.add_parser(
         "info",
@@ -498,21 +505,331 @@ def run_computer(args: argparse.Namespace) -> int:
     return 0
 
 
-def is_computer_json_request(argv: list[str]) -> bool:
-    return bool(argv and argv[0] == "computer" and "--json" in argv)
+def _envelope_command(argv: list[str]) -> str:
+    """Only echo the argv command token when it names a registered command.
+
+    Copying ``argv[1]`` unchecked leaks arbitrary caller tokens into the
+    serialized ``command`` field; unregistered tokens render as ``unknown``.
+    """
+    if len(argv) > 1 and argv[1] in COMMAND_REGISTRY:
+        return argv[1]
+    return "unknown"
 
 
-def render_computer_argument_error(argv: list[str]) -> int:
-    command = "unknown"
-    if len(argv) > 1 and not argv[1].startswith("-"):
-        command = argv[1]
-    error = ComputerError(
+def render_computer_argument_error(
+    argv: list[str],
+    *,
+    parser_message: str | None = None,
+    parser: argparse.ArgumentParser | None = None,
+) -> int:
+    if parser_message is not None:
+        error = _classified_argument_error(parser_message, parser)
+    else:
+        error = ComputerError(
+            "invalid_arguments",
+            "The computer command arguments are invalid.",
+            exit_code=2,
+        )
+    if "--json" in argv:
+        sys.stdout.write(render_json_error(_envelope_command(argv), error))
+    else:
+        sys.stderr.write(render_human_error(error))
+    return error.exit_code
+
+
+def render_computer_parse_error(argv: list[str], error: ComputerError) -> int:
+    """Render a structured ComputerError raised while parsing computer arguments."""
+    if "--json" in argv:
+        sys.stdout.write(render_json_error(_envelope_command(argv), error))
+    else:
+        sys.stderr.write(render_human_error(error))
+    return error.exit_code
+
+
+class _ComputerArgumentParser(argparse.ArgumentParser):
+    """Computer subcommand parser that fails with structured, sanitized errors.
+
+    argparse's own error text can embed caller argument values; this override
+    classifies the failure and rewrites it so only flag names, ranges, and
+    parser-defined choices ever reach the caller. The parser instance is passed
+    to the classifier so argument identities, choices, and expected types are
+    validated against the actions the parser actually registered instead of
+    against the (caller-influenced) message text.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        raise _classified_argument_error(message, self)
+
+
+_UNRECOGNIZED_PATTERN = re.compile(r"^unrecognized arguments: (.*)$")
+_REQUIRED_PATTERN = re.compile(r"^the following arguments are required: (.*)$")
+_ONE_OF_REQUIRED_PATTERN = re.compile(r"^one of the arguments (.*) is required$")
+_CONFLICT_PATTERN = re.compile(
+    r"^argument (--[^\s:]+): not allowed with argument (.*)$"
+)
+_INVALID_CHOICE_PATTERN = re.compile(
+    r"^argument (?P<argument>[^\s:]+): invalid choice: "
+    r".*\((?:choose from|choose) (?P<choices>.*)\)$"
+)
+_ARGUMENT_PREFIX_PATTERN = re.compile(r"^argument (--[^\s:]+): (.*)$")
+_INVALID_VALUE_PATTERN = re.compile(r"^invalid (\w+) value")
+
+_OPTION_NAME_PATTERN = re.compile(r"^--[a-z][a-z0-9-]*$")
+_MAX_OPTION_NAME_CHARS = 48
+_MAX_REPORTED_CHOICES = 32
+
+
+_ARGPARSE_ERROR_LINE_PATTERN = re.compile(r": error: (.+)$")
+
+
+def extract_argparse_error(stderr_text: str) -> str | None:
+    """Recover the final argparse error message from suppressed usage output."""
+    for line in reversed(stderr_text.splitlines()):
+        match = _ARGPARSE_ERROR_LINE_PATTERN.search(line.strip())
+        if match is not None:
+            return match.group(1)
+    return None
+
+
+def _flag_names(fragment: str) -> list[str]:
+    """Extract bounded, value-free option names from an argparse message fragment.
+
+    Attached values are stripped (``--token=SECRET`` reports ``--token``) and
+    tokens that do not match the long lowercase option shape this CLI registers
+    — including dash-prefixed values such as ``-SECRET`` and argparse list
+    punctuation — are dropped instead of being echoed as flag names.
+    """
+    flags: list[str] = []
+    for token in fragment.split():
+        name = token.split("=", 1)[0].rstrip(",")
+        if len(name) <= _MAX_OPTION_NAME_CHARS and _OPTION_NAME_PATTERN.match(name) is not None:
+            flags.append(name)
+    return flags
+
+
+def _collect_actions(parser: argparse.ArgumentParser) -> list[argparse.Action]:
+    """Collect actions from a parser and its nested subparsers (cycle-safe)."""
+    actions: list[argparse.Action] = []
+    stack: list[argparse.ArgumentParser] = [parser]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        actions.extend(current._actions)
+        for action in current._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                nested = action.choices
+                if isinstance(nested, dict):
+                    stack.extend(nested.values())
+    return actions
+
+
+def _find_registered_action(
+    parser: argparse.ArgumentParser | None, argument: str
+) -> argparse.Action | None:
+    if parser is None:
+        return None
+    for action in _collect_actions(parser):
+        if argument in action.option_strings:
+            return action
+        if not action.option_strings and action.dest == argument:
+            return action
+    return None
+
+
+def _registered_choices(
+    parser: argparse.ArgumentParser | None, argument: str, reported: list[str]
+) -> list[str] | None:
+    """Choices from the parser's own action, only when they match the report.
+
+    Caller-recovered text is untrusted: the allowed-choices list is emitted only
+    if it is exactly the choices an action of this parser actually registered.
+    """
+    action = _find_registered_action(parser, argument)
+    if action is None or action.choices is None:
+        return None
+    registered = [str(choice) for choice in action.choices]
+    if registered == reported:
+        return registered
+    return None
+
+
+def _validated_flags(
+    parser: argparse.ArgumentParser | None, flags: list[str]
+) -> list[str]:
+    """Drop flag names that no action of this parser registered."""
+    if parser is None:
+        return flags
+    return [flag for flag in flags if _find_registered_action(parser, flag) is not None]
+
+
+def _reported_choices(text: str) -> list[str]:
+    return [token.strip().strip("'\"") for token in text.split(",")]
+
+
+def _classified_argument_error(
+    message: str,
+    parser: argparse.ArgumentParser | None = None,
+) -> ComputerError:
+    unrecognized = _UNRECOGNIZED_PATTERN.match(message)
+    if unrecognized is not None:
+        flags = _flag_names(unrecognized.group(1))[:8]
+        if flags:
+            flag_text = ", ".join(flags)
+            return ComputerError(
+                "unknown_argument",
+                f"Unknown computer argument(s): {flag_text}.",
+                exit_code=2,
+                details={
+                    "unknown_arguments": flags,
+                    "retryable": False,
+                    "next_action": (
+                        "Check `agent-tools computer <command> --help`; there is no built-in "
+                        "grep, so filter output with shell pipes instead."
+                    ),
+                },
+            )
+    required = _REQUIRED_PATTERN.match(message)
+    if required is not None:
+        flags = _validated_flags(parser, _flag_names(required.group(1))[:8])
+        return _missing_required_error(flags)
+    one_of = _ONE_OF_REQUIRED_PATTERN.match(message)
+    if one_of is not None:
+        flags = _validated_flags(parser, _flag_names(one_of.group(1))[:8])
+        return _missing_required_error(flags)
+    invalid_choice = _INVALID_CHOICE_PATTERN.match(message)
+    if invalid_choice is not None:
+        argument_name = invalid_choice.group("argument")
+        choices = _registered_choices(
+            parser,
+            argument_name,
+            _reported_choices(invalid_choice.group("choices")),
+        )
+        if choices is not None:
+            return ComputerError(
+                "invalid_argument_choice",
+                "The argument value is not one of the allowed choices.",
+                exit_code=2,
+                details={
+                    "argument": argument_name,
+                    "choices": choices[:_MAX_REPORTED_CHOICES],
+                    "retryable": False,
+                    "next_action": (
+                        "Use one of the allowed choices shown in "
+                        "`agent-tools computer <command> --help`."
+                    ),
+                },
+            )
+    conflict = _CONFLICT_PATTERN.match(message)
+    if conflict is not None:
+        flags = _validated_flags(
+            parser, [conflict.group(1), *_flag_names(conflict.group(2))]
+        )[:8]
+        if flags:
+            flag_text = ", ".join(flags)
+            return ComputerError(
+                "conflicting_arguments",
+                f"Conflicting computer argument(s): {flag_text}.",
+                exit_code=2,
+                details={
+                    "arguments": flags,
+                    "retryable": False,
+                    "next_action": "Provide only one of the conflicting arguments; see --help.",
+                },
+            )
+    prefixed = _ARGUMENT_PREFIX_PATTERN.match(message)
+    if prefixed is not None:
+        flag = prefixed.group(1)
+        action = _find_registered_action(parser, flag)
+        if parser is None or action is not None:
+            value_match = _INVALID_VALUE_PATTERN.match(prefixed.group(2))
+            expected = value_match.group(1) if value_match is not None else None
+            if expected is not None and (
+                action is None or getattr(action.type, "__name__", None) != expected
+            ):
+                # The claimed type only reaches the caller when it matches the
+                # type the registered action actually uses.
+                expected = None
+            return ComputerError(
+                "invalid_argument_value",
+                f"Argument {flag} has an invalid value.",
+                exit_code=2,
+                details={
+                    "argument": flag,
+                    **({"expected_type": expected} if expected is not None else {}),
+                    "retryable": False,
+                    "next_action": f"Pass {flag} as a valid value; see --help for the format.",
+                },
+            )
+    return ComputerError(
         "invalid_arguments",
         "The computer command arguments are invalid.",
         exit_code=2,
+        details={
+            "retryable": False,
+            "next_action": "Check `agent-tools computer <command> --help`.",
+        },
     )
-    sys.stdout.write(render_json_error(command, error))
-    return error.exit_code
+
+
+def _missing_required_error(flags: list[str]) -> ComputerError:
+    if not flags:
+        return ComputerError(
+            "invalid_arguments",
+            "The computer command arguments are invalid.",
+            exit_code=2,
+            details={
+                "retryable": False,
+                "next_action": "Check `agent-tools computer --help`.",
+            },
+        )
+    flag_text = ", ".join(flags)
+    return ComputerError(
+        "missing_required_argument",
+        f"Missing required argument(s): {flag_text}.",
+        exit_code=2,
+        details={
+            "required_arguments": flags,
+            "retryable": False,
+            "next_action": (
+                "Provide the required argument(s); see "
+                "`agent-tools computer <command> --help`."
+            ),
+        },
+    )
+
+
+def _argument_range_error(label: str, minimum: int | float, maximum: int | float) -> ComputerError:
+    flag = f"--{label}"
+    return ComputerError(
+        "argument_out_of_range",
+        f"Argument {flag} must be between {minimum} and {maximum}.",
+        exit_code=2,
+        details={
+            "argument": flag,
+            "minimum": minimum,
+            "maximum": maximum,
+            "retryable": False,
+            "next_action": f"Set {flag} between {minimum} and {maximum}.",
+        },
+    )
+
+
+def _argument_value_error(label: str, expected: str) -> ComputerError:
+    flag = f"--{label}"
+    return ComputerError(
+        "invalid_argument_value",
+        f"Argument {flag} must be {expected}.",
+        exit_code=2,
+        details={
+            "argument": flag,
+            "expected_type": expected,
+            "retryable": False,
+            "next_action": f"Pass {flag} as {expected}.",
+        },
+    )
 
 
 def _run_command(command: str, args: argparse.Namespace) -> dict[str, Any]:
@@ -751,31 +1068,27 @@ def _run_command(command: str, args: argparse.Namespace) -> dict[str, Any]:
     raise ComputerError("unknown_command", f"Unknown computer command: {command}", exit_code=2)
 
 
-def _bounded_integer(label: str, minimum: int, maximum: int):
+def _bounded_integer(label: str, minimum: int, maximum: int) -> Callable[[str], int]:
     def parse(value: str) -> int:
         try:
             parsed = int(value)
         except ValueError as exc:
-            raise argparse.ArgumentTypeError(f"{label} must be an integer") from exc
+            raise _argument_value_error(label, "an integer") from exc
         if parsed < minimum or parsed > maximum:
-            raise argparse.ArgumentTypeError(
-                f"{label} must be between {minimum} and {maximum}"
-            )
+            raise _argument_range_error(label, minimum, maximum)
         return parsed
 
     return parse
 
 
-def _bounded_float(label: str, minimum: float, maximum: float):
+def _bounded_float(label: str, minimum: float, maximum: float) -> Callable[[str], float]:
     def parse(value: str) -> float:
         try:
             parsed = float(value)
         except ValueError as exc:
-            raise argparse.ArgumentTypeError(f"{label} must be a number") from exc
+            raise _argument_value_error(label, "a number") from exc
         if not math.isfinite(parsed) or parsed < minimum or parsed > maximum:
-            raise argparse.ArgumentTypeError(
-                f"{label} must be between {minimum:g} and {maximum:g}"
-            )
+            raise _argument_range_error(label, minimum, maximum)
         return parsed
 
     return parse

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from agent_tools.computer import command_registry
 from agent_tools.computer.capture_records import (
     _atomic_private_write,
     _capture_store_lock,
@@ -639,9 +640,11 @@ class WinAppAdapter:
         interactive: bool,
         max_elements: int,
     ) -> tuple[WinAppBinding, dict[str, Any]]:
+        # The bounded hierarchy is always collected unfiltered: the provider-side
+        # --interactive filter returns rows without exact ancestry, which makes
+        # every element unreferenceable. Interactive filtering is applied locally
+        # on the returned bounded rows instead (see _filter_winapp_inspection).
         arguments = ["ui", "inspect", "--depth", str(depth), "--hide-offscreen"]
-        if interactive:
-            arguments.append("--interactive")
         binding, payload = self._target_json(identity, arguments)
         window = _single_window(payload, identity)
         roots = window.get("elements")
@@ -650,7 +653,6 @@ class WinAppAdapter:
         flattened, traversal_truncated = _flatten_elements(
             roots,
             max_elements=max_elements,
-            provider_filtered_hierarchy=interactive,
         )
         flattened.sort(
             key=lambda item: (
@@ -667,10 +669,13 @@ class WinAppAdapter:
             "interactive": interactive,
             "count": len(returned),
             "truncated": truncated,
-            "provider_filter_applied": interactive,
+            "provider_filter_applied": False,
             "provider_bound": {
                 "max_elements": max_elements,
-                "interactive_filter_forwarded": interactive,
+                "interactive_filter_forwarded": False,
+                "interactive_filter_applied": (
+                    "agenttools_local_after_bounded_traversal" if interactive else None
+                ),
                 "upstream_native_max_supported": False,
                 "enforced_before_agenttools_response_serialization": True,
                 "external_output_guard": "byte_cap_and_process_termination",
@@ -1563,9 +1568,8 @@ class WinAppAdapter:
     ) -> dict[str, Any] | None:
         automation_id = properties.get("AutomationId")
         if not isinstance(automation_id, str) or not automation_id or len(automation_id) > 160:
-            raise ComputerError(
-                "uia_identity_unavailable",
-                "The element's exact UI Automation identity could not be verified.",
+            raise _uia_identity_unavailable_error(
+                "The element's exact UI Automation identity could not be verified."
             )
         try:
             request: dict[str, Any] = {
@@ -1708,9 +1712,8 @@ class WinAppAdapter:
         automation_id = properties.get("automation_id")
         runtime_id = properties.get("runtime_id")
         if not isinstance(automation_id, str) or not isinstance(runtime_id, str):
-            raise ComputerError(
-                "uia_identity_unavailable",
-                "The element's exact UI Automation identity is unavailable.",
+            raise _uia_identity_unavailable_error(
+                "The element's exact UI Automation identity is unavailable."
             )
         return self._native_uia_command(
             identity,
@@ -1800,9 +1803,8 @@ class WinAppAdapter:
         automation_id = properties.get("automation_id")
         runtime_id = properties.get("runtime_id")
         if not isinstance(automation_id, str) or not isinstance(runtime_id, str):
-            raise ComputerError(
-                "uia_identity_unavailable",
-                "The element's exact UI Automation identity is unavailable.",
+            raise _uia_identity_unavailable_error(
+                "The element's exact UI Automation identity is unavailable."
             )
         payload = self._native_uia_command(
             identity,
@@ -2117,9 +2119,8 @@ class WinAppAdapter:
             )
         runtime_id = str(final.get("runtime_id") or "")
         if not runtime_id:
-            raise ComputerError(
-                "uia_identity_unavailable",
-                "The element's final UI Automation identity is unavailable.",
+            raise _uia_identity_unavailable_error(
+                "The element's final UI Automation identity is unavailable."
             )
         if method == "uia.RangeValuePattern":
             range_bits = final.get("range_value_bits")
@@ -2412,26 +2413,8 @@ def capabilities(*, adapter: WinAppAdapter | None = None) -> dict[str, Any]:
     return {
         "read_only": False,
         "actions_exposed": True,
-        "commands": [
-            "info",
-            "windows",
-            "focused",
-            "screenshot",
-            "ocr",
-            "inspect",
-            "read",
-            "scroll-areas",
-            "focus",
-            "restore",
-            "minimize",
-            "maximize",
-            "resize",
-            "invoke",
-            "set-value",
-            "scroll",
-            "notify",
-            "capabilities",
-        ],
+        "commands": command_registry.all_command_names(),
+        "command_kinds": command_registry.command_names_by_kind(),
         "uia_winapp": probe,
         "pin": {
             "version": WINAPP_VERSION,
@@ -4675,9 +4658,8 @@ def _scroll_provider_identity(
         or bounds.width <= 0
         or bounds.height <= 0
     ):
-        raise ComputerError(
-            "uia_identity_unavailable",
-            "The provider scroll element has incomplete exact identity metadata.",
+        raise _uia_identity_unavailable_error(
+            "The provider scroll element has incomplete exact identity metadata."
         )
     return {
         "controlType": control_type,
@@ -4940,10 +4922,40 @@ def _map_backend_error(stderr: bytes) -> ComputerError:
     if "ambiguous" in code or "multiple" in message or "more than one" in message:
         return ComputerError("ambiguous_element", "The UI Automation selector is ambiguous.")
     if "not_found" in code or "not found" in message:
-        return ComputerError("element_not_found", "The UI Automation element was not found.")
+        return _element_not_found_error()
     if "changed" in message or "stale" in code:
         return ComputerError("stale_element", "The UI Automation element changed; inspect again.")
     return ComputerError("uia_backend_error", "The UI Automation backend rejected the request.")
+
+
+def _uia_identity_unavailable_error(message: str) -> ComputerError:
+    return ComputerError(
+        "uia_identity_unavailable",
+        message,
+        details={
+            "retryable": True,
+            "next_action": (
+                "Inspect the window again (unfiltered first; increase depth only if "
+                "inconclusive) and use the fresh inspect-provided slug. If exact identity "
+                "still cannot be verified, treat the element as unreadable instead of "
+                "retrying blindly."
+            ),
+        },
+    )
+
+
+def _element_not_found_error() -> ComputerError:
+    return ComputerError(
+        "element_not_found",
+        "The UI Automation element was not found.",
+        details={
+            "retryable": True,
+            "next_action": (
+                "Inspect the window again and pass a current inspect-provided slug; "
+                "element references expire 15 seconds after inspection."
+            ),
+        },
+    )
 
 
 def _invalid_response() -> ComputerError:

@@ -575,7 +575,9 @@ def test_cli_ocr_has_no_image_path_or_internal_grep_escape(capsys) -> None:
             == 2
         )
         payload = json.loads(capsys.readouterr().out)
-        assert payload["error"]["code"] == "invalid_arguments"
+        assert payload["error"]["code"] == "unknown_argument"
+        assert payload["error"]["details"]["unknown_arguments"] == [option]
+        assert "value" not in payload["error"]["message"]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows OCR integration")

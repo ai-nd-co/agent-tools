@@ -312,6 +312,200 @@ def test_native_deadline_failure_after_winapp_success_does_not_restart_fallback(
     assert native.views == ["raw", "control", "content"]
 
 
+def test_interactive_inspection_rows_carry_actionable_references(monkeypatch, tmp_path) -> None:
+    """Regression (validation 2026-09-06): --interactive must not drop element refs.
+
+    The provider stub emulates the real winapp.exe contract: forwarding
+    --interactive returns flat rows with ancestorPath only (inexact ancestry),
+    while the unfiltered request returns the nested bounded tree.
+    """
+
+    class ProviderEmulatingWinApp(WinAppAdapter):
+        def __init__(self) -> None:
+            super().__init__(FakeBackend())
+            self.provider_arguments: list[list[str]] = []
+
+        def _target_json(self, _identity, arguments, **_kwargs):
+            self.provider_arguments.append(list(arguments))
+            if "--interactive" in arguments:
+                return _binding(), {
+                    "windows": [
+                        {
+                            "hwnd": 123,
+                            "elements": [
+                                {
+                                    "selector": "SettingsButton",
+                                    "automationId": "SettingsButton",
+                                    "type": "Button",
+                                    "className": "Button",
+                                    "name": "Settings",
+                                    "isInvokable": True,
+                                    "isEnabled": True,
+                                    "isOffscreen": False,
+                                    "x": 10,
+                                    "y": 10,
+                                    "width": 80,
+                                    "height": 24,
+                                    "ancestorPath": ["Window", "Pane"],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            return _binding(), {
+                "windows": [
+                    {
+                        "hwnd": 123,
+                        "elements": [
+                            {
+                                "selector": "pn-root-a1",
+                                "type": "Pane",
+                                "className": "Pane",
+                                "name": "Root",
+                                "isEnabled": True,
+                                "isOffscreen": False,
+                                "x": 0,
+                                "y": 0,
+                                "width": 800,
+                                "height": 600,
+                                "children": [
+                                    {
+                                        "selector": "SettingsButton",
+                                        "automationId": "SettingsButton",
+                                        "type": "Button",
+                                        "className": "Button",
+                                        "name": "Settings",
+                                        "isInvokable": True,
+                                        "isEnabled": True,
+                                        "isOffscreen": False,
+                                        "x": 10,
+                                        "y": 10,
+                                        "width": 80,
+                                        "height": 24,
+                                    },
+                                    {
+                                        "selector": "StatusLabel",
+                                        "type": "Text",
+                                        "className": "TextBlock",
+                                        "name": "Ready",
+                                        "isEnabled": True,
+                                        "isOffscreen": False,
+                                        "x": 10,
+                                        "y": 40,
+                                        "width": 120,
+                                        "height": 20,
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+
+    adapter = ProviderEmulatingWinApp()
+
+    result = semantic.inspect_semantic_window(
+        hwnd=123,
+        depth=3,
+        interactive=True,
+        max_elements=20,
+        backend=FakeBackend(),
+        winapp_adapter=adapter,
+        element_ref_store=ElementReferenceStore(tmp_path / "refs"),
+    )
+
+    assert adapter.provider_arguments, "the provider must have been consulted"
+    assert all(
+        "--interactive" not in arguments for arguments in adapter.provider_arguments
+    ), "interactive filtering must be applied locally, never forwarded to the provider"
+    assert result["interactive"] is True
+    assert result["provider_filter_applied"] is False
+    assert result["provider_bound"]["interactive_filter_forwarded"] is False
+    assert result["provider_bound"]["interactive_filter_applied"] == (
+        "agenttools_local_after_bounded_traversal"
+    )
+    interactive_rows = result["elements"]
+    assert [row["element"] for row in interactive_rows] == ["SettingsButton"]
+    settings = interactive_rows[0]
+    assert settings["action_supported"] is True
+    assert settings["locator"] is not None
+    assert settings["locator"]["ancestor_signature"].startswith("sha256:")
+    assert settings["hierarchy"]["ancestor_signature"].startswith("sha256:")
+    assert "identity_complete" not in settings["hierarchy"]
+    assert settings["element_ref_status"] == "available"
+    assert isinstance(settings["element_ref"], str) and settings["element_ref"]
+    assert settings.get("element_ref_reason") is None
+    assert isinstance(settings["expires_at"], str) and settings["expires_at"]
+    unfiltered = semantic.inspect_semantic_window(
+        hwnd=123,
+        depth=3,
+        interactive=False,
+        max_elements=20,
+        backend=FakeBackend(),
+        winapp_adapter=adapter,
+        element_ref_store=ElementReferenceStore(tmp_path / "refs"),
+    )
+    unfiltered_settings = next(
+        row
+        for row in unfiltered["elements"]
+        if row["element"] == "SettingsButton"
+    )
+    assert unfiltered_settings["element_ref_status"] == "available"
+    assert (
+        unfiltered_settings["locator"] == settings["locator"]
+    ), "interactive rows must carry the same usable identity an unfiltered inspect yields"
+
+
+def test_interactive_inspection_never_fabricates_ancestry_for_provider_rows(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """If a provider ever returns ancestorPath rows anyway, refs stay withheld."""
+
+    class AncestorPathOnlyWinApp(WinAppAdapter):
+        def __init__(self) -> None:
+            super().__init__(FakeBackend())
+
+        def _target_json(self, _identity, _arguments, **_kwargs):
+            return _binding(), {
+                "windows": [
+                    {
+                        "hwnd": 123,
+                        "elements": [
+                            {
+                                "selector": "SettingsButton",
+                                "automationId": "SettingsButton",
+                                "type": "Button",
+                                "className": "Button",
+                                "name": "Settings",
+                                "isInvokable": True,
+                                "isEnabled": True,
+                                "isOffscreen": False,
+                                "x": 10,
+                                "y": 10,
+                                "width": 80,
+                                "height": 24,
+                                "ancestorPath": ["Window", "Pane"],
+                            }
+                        ],
+                    }
+                ],
+            }
+
+    result = semantic.inspect_semantic_window(
+        hwnd=123,
+        depth=3,
+        interactive=True,
+        max_elements=20,
+        backend=FakeBackend(),
+        winapp_adapter=AncestorPathOnlyWinApp(),
+        element_ref_store=ElementReferenceStore(tmp_path / "refs2"),
+    )
+
+    assert result["elements"] == []
+    assert not (tmp_path / "refs2").exists()
+
+
 def test_winapp_interactive_diagnostics_use_the_unfiltered_tree() -> None:
     winapp = FakeWinApp(
         [

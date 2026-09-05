@@ -14,6 +14,9 @@ from agent_tools.computer import cli as computer_cli
 from agent_tools.computer import process_io, semantic_accessibility, uia_winapp
 from agent_tools.computer.models import Bounds, ComputerError, WindowIdentity
 from agent_tools.computer.uia_winapp import (
+    MAX_INSPECT_ELEMENTS,
+    MAX_READ_CHARS,
+    MAX_SCROLL_AREAS,
     ProcessResult,
     WinAppAdapter,
     WinAppBinding,
@@ -1605,13 +1608,15 @@ def test_inspect_bounds_provider_traversal_before_response_serialization(
         _identity(), depth=12, interactive=True, max_elements=2
     )
 
-    assert "--interactive" in calls[0]
+    assert "--interactive" not in calls[0]
     assert result["count"] == 2
     assert result["truncated"] is True
-    assert result["provider_filter_applied"] is True
+    assert result["interactive"] is True
+    assert result["provider_filter_applied"] is False
     assert result["provider_bound"] == {
         "max_elements": 2,
-        "interactive_filter_forwarded": True,
+        "interactive_filter_forwarded": False,
+        "interactive_filter_applied": "agenttools_local_after_bounded_traversal",
         "upstream_native_max_supported": False,
         "enforced_before_agenttools_response_serialization": True,
         "external_output_guard": "byte_cap_and_process_termination",
@@ -2387,19 +2392,42 @@ def test_cli_commands_emit_stable_versioned_json(monkeypatch, capsys) -> None:
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    ("arguments", "argument", "minimum", "maximum"),
     [
-        ["computer", "inspect", "--hwnd", "1", "--depth", "0", "--json"],
-        ["computer", "inspect", "--hwnd", "1", "--depth", "13", "--json"],
-        ["computer", "inspect", "--hwnd", "1", "--max-elements", "201", "--json"],
-        ["computer", "read", "--hwnd", "1", "--element", "doc", "--max-chars", "0", "--json"],
-        ["computer", "scroll-areas", "--hwnd", "1", "--max-elements", "51", "--json"],
+        (["computer", "inspect", "--hwnd", "1", "--depth", "0", "--json"], "--depth", 1, 12),
+        (["computer", "inspect", "--hwnd", "1", "--depth", "13", "--json"], "--depth", 1, 12),
+        (
+            ["computer", "inspect", "--hwnd", "1", "--max-elements", "201", "--json"],
+            "--max-elements",
+            1,
+            MAX_INSPECT_ELEMENTS,
+        ),
+        (
+            ["computer", "read", "--hwnd", "1", "--element", "doc", "--max-chars", "0", "--json"],
+            "--max-chars",
+            1,
+            MAX_READ_CHARS,
+        ),
+        (
+            ["computer", "scroll-areas", "--hwnd", "1", "--max-elements", "51", "--json"],
+            "--max-elements",
+            1,
+            MAX_SCROLL_AREAS,
+        ),
     ],
 )
-def test_cli_rejects_unbounded_uia_arguments(arguments: list[str], capsys) -> None:
+def test_cli_rejects_unbounded_uia_arguments(
+    arguments: list[str], argument: str, minimum: int, maximum: int, capsys
+) -> None:
     assert root_cli.main(arguments) == 2
     payload = json.loads(capsys.readouterr().out)
-    assert payload["error"]["code"] == "invalid_arguments"
+    assert payload["error"]["code"] == "argument_out_of_range"
+    details = payload["error"]["details"]
+    assert details["argument"] == argument
+    assert details["minimum"] == minimum
+    assert details["maximum"] == maximum
+    assert details["retryable"] is False
+    assert isinstance(details["next_action"], str) and details["next_action"]
 
 
 def test_non_windows_capabilities_degrade_without_import_failure(monkeypatch) -> None:
@@ -2414,7 +2442,9 @@ def test_non_windows_capabilities_degrade_without_import_failure(monkeypatch) ->
 
 def test_no_physical_or_semantic_mutation_command_is_public() -> None:
     parser = root_cli.build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ComputerError) as scroll_error:
         parser.parse_args(["computer", "scroll", "--hwnd", "123"])
-    with pytest.raises(SystemExit):
+    assert scroll_error.value.code == "missing_required_argument"
+    with pytest.raises(ComputerError) as click_error:
         parser.parse_args(["computer", "click", "--hwnd", "123"])
+    assert click_error.value.code == "missing_required_argument"

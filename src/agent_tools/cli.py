@@ -32,10 +32,12 @@ from agent_tools.codex_integration import (
 from agent_tools.codex_notify import dispatch_codex_notify
 from agent_tools.computer.cli import (
     add_computer_parser,
-    is_computer_json_request,
+    extract_argparse_error,
     render_computer_argument_error,
+    render_computer_parse_error,
     run_computer,
 )
+from agent_tools.computer.models import ComputerError
 from agent_tools.console import configure_windows_utf8
 from agent_tools.controller_client import (
     ProcessingNotice,
@@ -119,16 +121,31 @@ def _main(argv: list[str] | None = None) -> int:
         return run_voice(command_line[1:])
     if command_line[:1] == ["zcode"]:
         return run_zcode(command_line[1:])
-    if is_computer_json_request(command_line):
+    if command_line[:1] == ["computer"]:
+        # Every computer parse failure — leaf, parent, or root — routes through
+        # the structured sanitizer in both output modes. argparse writes raw
+        # usage/error text (which can embed caller values) to stderr before
+        # exiting, so stderr is suppressed and only the recovered message,
+        # validated against parser actions, is reclassified.
+        suppressed_stderr = io.StringIO()
         try:
-            with contextlib.redirect_stderr(io.StringIO()):
+            with contextlib.redirect_stderr(suppressed_stderr):
                 args = parser.parse_args(command_line)
+        except ComputerError as exc:
+            return render_computer_parse_error(command_line, exc)
         except SystemExit as exc:
             if exc.code == 2:
-                return render_computer_argument_error(command_line)
+                return render_computer_argument_error(
+                    command_line,
+                    parser_message=extract_argparse_error(suppressed_stderr.getvalue()),
+                    parser=parser,
+                )
             raise
     else:
-        args = parser.parse_args(command_line)
+        try:
+            args = parser.parse_args(command_line)
+        except ComputerError as exc:
+            return render_computer_parse_error(command_line, exc)
 
     if args.command == "transform":
         return _run_transform(args)

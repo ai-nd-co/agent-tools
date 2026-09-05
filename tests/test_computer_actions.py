@@ -1640,7 +1640,9 @@ def test_action_parser_rejects_non_finite_percent(capsys) -> None:
         == 2
     )
     payload = json.loads(capsys.readouterr().out)
-    assert payload["error"]["code"] == "invalid_arguments"
+    assert payload["error"]["code"] == "argument_out_of_range"
+    assert payload["error"]["details"]["argument"] == "--percent"
+    assert "nan" not in payload["error"]["message"]
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,10 @@ import pytest
 
 from agent_tools import cli as root_cli
 from agent_tools.computer import cli as computer_cli
+from agent_tools.computer import uia_winapp
+from agent_tools.computer.command_registry import all_command_names
 from agent_tools.computer.models import SCHEMA_VERSION, ComputerError
+from agent_tools.computer.rendering import render_human_error
 from agent_tools.computer.win32_backend import load_win32_modules
 
 
@@ -223,7 +226,299 @@ def test_parser_failure_is_stable_json(capsys, tmp_path: Path) -> None:
     assert captured.err == ""
     assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["command"] == "computer.screenshot"
+    assert payload["error"]["code"] == "invalid_argument_value"
+    assert payload["error"]["details"]["argument"] == "--hwnd"
+    assert payload["error"]["details"]["retryable"] is False
+    assert "not-an-integer" not in captured.out
+
+
+def test_argument_errors_are_distinct_structured_and_sanitized(capsys) -> None:
+    """Regression (validation 2026-09-06 backlog item 3).
+
+    Depth 0, max-elements 999999, unknown --grep, missing --hwnd, and a
+    non-integer --hwnd previously yielded the identical opaque invalid_arguments
+    envelope; each class must now carry its own code, sanitized details, and a
+    next action, without echoing caller argument values.
+    """
+    cases = [
+        (
+            ["computer", "inspect", "--hwnd", "1", "--depth", "0", "--json"],
+            "argument_out_of_range",
+            {"argument": "--depth", "minimum": 1, "maximum": 12},
+            ["0"],
+        ),
+        (
+            ["computer", "inspect", "--hwnd", "1", "--max-elements", "999999", "--json"],
+            "argument_out_of_range",
+            {"argument": "--max-elements", "minimum": 1, "maximum": 200},
+            ["999999"],
+        ),
+        (
+            ["computer", "inspect", "--hwnd", "1", "--grep", "Button", "--json"],
+            "unknown_argument",
+            {"unknown_arguments": ["--grep"]},
+            ["Button"],
+        ),
+        (
+            ["computer", "inspect", "--json"],
+            "missing_required_argument",
+            {"required_arguments": ["--hwnd"]},
+            [],
+        ),
+        (
+            ["computer", "read", "--hwnd", "not-an-integer", "--element", "x", "--json"],
+            "invalid_argument_value",
+            {"argument": "--hwnd", "expected_type": "int"},
+            ["not-an-integer"],
+        ),
+        (
+            ["computer", "scroll", "--hwnd", "1", "--percent", "200", "--json"],
+            "argument_out_of_range",
+            {"argument": "--percent", "minimum": 0, "maximum": 100},
+            ["200"],
+        ),
+    ]
+    for argv, code, expected_details, forbidden_fragments in cases:
+        result = root_cli.main(argv)
+        assert result == 2
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        payload = json.loads(captured.out)
+        assert payload["ok"] is False
+        assert payload["data"] is None
+        assert payload["error"]["code"] == code, argv
+        details = payload["error"]["details"]
+        assert details["retryable"] is False
+        assert isinstance(details["next_action"], str) and details["next_action"]
+        for key, value in expected_details.items():
+            assert details[key] == value, (argv, key)
+        for fragment in forbidden_fragments:
+            assert fragment not in captured.out, (argv, fragment)
+
+
+def test_argument_error_human_output_includes_next_action(capsys) -> None:
+    result = root_cli.main(["computer", "inspect", "--hwnd", "1", "--depth", "0"])
+
+    assert result == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Error [argument_out_of_range]:" in captured.err
+    assert "Retryable: no" in captured.err
+    assert "Next:" in captured.err
+    assert "between 1 and 12" in captured.err
+
+
+def test_unknown_argument_sanitizes_attached_values_and_dash_prefixed_values(capsys) -> None:
+    """Audit 2026-09-06 finding 1.
+
+    Unknown-argument sanitization must strip attached values (`--token=SECRET`),
+    drop dash-prefixed values copied from the unrecognized fragment, and bound
+    the reported option-name shape; caller values must never reach the message
+    or details in either form.
+    """
+    result = root_cli.main(
+        ["computer", "inspect", "--hwnd", "1", "--token=TESTSECRET", "--json"]
+    )
+    assert result == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.err == ""
+    assert payload["error"]["code"] == "unknown_argument"
+    assert payload["error"]["details"]["unknown_arguments"] == ["--token"]
+    assert "TESTSECRET" not in captured.out
+
+    result = root_cli.main(
+        ["computer", "inspect", "--hwnd", "1", "--grep", "-TESTSECRET", "--json"]
+    )
+    assert result == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["error"]["code"] == "unknown_argument"
+    assert payload["error"]["details"]["unknown_arguments"] == ["--grep"]
+    assert "TESTSECRET" not in captured.out
+
+
+def test_multiline_unknown_argument_cannot_inject_argparse_error_text(capsys) -> None:
+    """Audit 2026-09-06 finding 1.
+
+    Recovered stderr text is untrusted: a newline inside an unknown token must
+    not be able to fabricate the last argparse error line and leak text through
+    the choice classifier.
+    """
+    injected = "evil\nx: error: invalid choice: x (choose from TESTSECRET)"
+    result = root_cli.main(["computer", "inspect", "--hwnd", "1", injected, "--json"])
+
+    assert result == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.err == ""
     assert payload["error"]["code"] == "invalid_arguments"
+    assert payload["error"]["details"]["retryable"] is False
+    assert "TESTSECRET" not in captured.out
+
+
+def test_recovered_choice_text_is_validated_against_registered_actions(
+    capsys, tmp_path: Path
+) -> None:
+    """Audit 2026-09-06 finding 1.
+
+    An injected argument-prefixed choice line must not be treated as parser
+    metadata: allowed choices may only be emitted when they match the actions
+    the parser actually registered.
+    """
+    injected = "evil\nx: error: argument --profile: invalid choice: 'y' (choose from TESTSECRET)"
+    result = root_cli.main(
+        [
+            "computer",
+            "screenshot",
+            "--hwnd",
+            "1",
+            "--output",
+            str(tmp_path / "capture.png"),
+            injected,
+            "--json",
+        ]
+    )
+
+    assert result == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.err == ""
+    assert payload["error"]["code"] != "invalid_argument_choice"
+    assert "TESTSECRET" not in captured.out
+
+
+def test_required_flag_names_drop_argparse_list_commas(capsys) -> None:
+    """Audit 2026-09-06 finding 1 hardening.
+
+    argparse joins multi-argument required lists with ", "; the sanitized flag
+    names must not carry that punctuation into messages or details.
+    """
+    result = root_cli.main(["computer", "key", "--hwnd", "1", "--json"])
+
+    assert result == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"]["code"] == "missing_required_argument"
+    assert payload["error"]["details"]["required_arguments"] == [
+        "--from-capture",
+        "--image-at",
+        "--key",
+        "--staged-input",
+        "--draft-evidence",
+    ]
+
+
+def test_human_root_parser_failures_are_sanitized(capsys) -> None:
+    """Audit 2026-09-06 finding 2.
+
+    Parent/root parser failures in human mode must route through the same
+    classified, sanitized renderer as JSON mode: no raw usage, no raw argparse
+    message, and the promised retry/next-action fields.
+    """
+    result = root_cli.main(["computer", "inspect", "--hwnd", "1", "--grep", "TESTSECRET"])
+
+    assert result == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" not in captured.err
+    assert "unrecognized arguments" not in captured.err
+    assert "Error [unknown_argument]:" in captured.err
+    assert "Retryable: no" in captured.err
+    assert "Next:" in captured.err
+    assert "TESTSECRET" not in captured.err
+
+    result = root_cli.main(["computer", "TESTSECRET"])
+
+    assert result == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" not in captured.err
+    assert "choose from" not in captured.err
+    assert "Error [invalid_argument_choice]:" in captured.err
+    assert "Retryable: no" in captured.err
+    assert "Next:" in captured.err
+    assert "TESTSECRET" not in captured.err
+
+
+def test_invalid_computer_command_envelope_never_echoes_the_token(capsys) -> None:
+    """Audit 2026-09-06 findings 3 and 4.
+
+    The complete serialized envelope must use a command name only after
+    registry validation, and an invalid subcommand must classify as
+    invalid_argument_choice with the parser-registered choices, never the
+    submitted token.
+    """
+    result = root_cli.main(["computer", "TESTSECRET", "--json"])
+
+    assert result == 2
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["schema_version"] == SCHEMA_VERSION
+    assert payload["command"] == "computer.unknown"
+    assert payload["ok"] is False
+    assert payload["data"] is None
+    assert payload["error"]["code"] == "invalid_argument_choice"
+    details = payload["error"]["details"]
+    assert details["argument"] == "computer_command"
+    assert details["choices"] == all_command_names()
+    assert details["retryable"] is False
+    assert isinstance(details["next_action"], str) and details["next_action"]
+    assert "TESTSECRET" not in captured.out
+
+
+def test_invalid_argument_choice_reports_registered_choices_without_value(
+    capsys, tmp_path: Path
+) -> None:
+    """Audit 2026-09-06 finding 4.
+
+    Real parser-entry choice failures must reach the distinct
+    invalid_argument_choice classifier carrying the argument identity and the
+    allowed choices, without the submitted value.
+    """
+    result = root_cli.main(
+        [
+            "computer",
+            "screenshot",
+            "--hwnd",
+            "1",
+            "--output",
+            str(tmp_path / "capture.png"),
+            "--profile",
+            "TESTSECRET",
+            "--json",
+        ]
+    )
+
+    assert result == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["command"] == "computer.screenshot"
+    assert payload["error"]["code"] == "invalid_argument_choice"
+    details = payload["error"]["details"]
+    assert details["argument"] == "--profile"
+    assert details["choices"] == ["compact", "standard", "native"]
+    assert details["retryable"] is False
+    assert isinstance(details["next_action"], str) and details["next_action"]
+    assert "TESTSECRET" not in captured.out
+
+
+def test_identity_errors_carry_recovery_next_actions() -> None:
+    identity_error = uia_winapp._uia_identity_unavailable_error(
+        "The element's exact UI Automation identity could not be verified."
+    )
+    assert identity_error.code == "uia_identity_unavailable"
+    assert identity_error.details["retryable"] is True
+    assert "inspect" in identity_error.details["next_action"].casefold()
+
+    not_found = uia_winapp._element_not_found_error()
+    assert not_found.code == "element_not_found"
+    assert not_found.details["retryable"] is True
+    assert "inspect" in not_found.details["next_action"].casefold()
+
+    rendered = render_human_error(identity_error)
+    assert "Retryable: yes" in rendered
+    assert "Next:" in rendered
 
 
 def test_set_value_forwards_opt_in_keyboard_focus_requirement(monkeypatch, capsys) -> None:
@@ -302,13 +597,14 @@ def test_deep_semantic_inspection_is_explicit_and_bounded() -> None:
 
 def test_semantic_integer_bounds_reject_oversized_values_without_overflow() -> None:
     parser = root_cli.build_parser()
+    oversized = "1" + "0" * 400
 
-    with pytest.raises(SystemExit) as raised:
-        parser.parse_args(
-            ["computer", "inspect", "--hwnd", "1", "--depth", "1" + "0" * 400]
-        )
+    with pytest.raises(ComputerError) as raised:
+        parser.parse_args(["computer", "inspect", "--hwnd", "1", "--depth", oversized])
 
-    assert raised.value.code == 2
+    assert raised.value.code == "argument_out_of_range"
+    assert raised.value.exit_code == 2
+    assert oversized not in raised.value.message
 
 
 def test_non_windows_command_fails_without_import_breakage(monkeypatch, capsys) -> None:

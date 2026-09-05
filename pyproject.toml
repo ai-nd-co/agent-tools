@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "ai-nd-co" }]
-keywords = ["codex", "tts", "kokoro", "cli", "speech"]
+keywords = ["codex", "tts", "kokoro", "silero", "cli", "speech"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -23,9 +23,12 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
+  "cryptography>=44.0.0",
   "httpx>=0.28.1",
   "kokoro>=0.9.4",
   "numpy>=1.26.0",
+  "qrcode>=8.0",
+  "pywin32>=311; sys_platform == 'win32'",
 ]
 
 [project.urls]
@@ -42,6 +45,17 @@ dev = [
 ui = [
   "PySide6>=6.8.0",
 ]
+computer = [
+  "Pillow>=12.1.1; sys_platform == 'win32'",
+  "pywin32>=311; sys_platform == 'win32'",
+  "winrt-Windows.Foundation>=3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Foundation.Collections>=3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Globalization>=3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Graphics.Imaging>=3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Media.Ocr>=3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Storage>=3.2.1; sys_platform == 'win32'",
+  "winrt-Windows.Storage.Streams>=3.2.1; sys_platform == 'win32'",
+]
 
 [project.scripts]
 agent-tools = "agent_tools.cli:main"
@@ -49,6 +63,8 @@ agent-tools = "agent_tools.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_tools"]
 include = [
+  "src/agent_tools/*.ps1",
+  "src/agent_tools/*.pyw",
   "src/agent_tools/prompts/*.md",
   "src/agent_tools/codex_hooks/*.json",
   "src/agent_tools/codex_hooks/*.sh",

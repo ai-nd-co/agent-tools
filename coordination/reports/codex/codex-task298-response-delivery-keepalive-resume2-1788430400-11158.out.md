@@ -1,0 +1,1 @@
+CLEAN — the regression gap is resolved and no actionable findings remain. The pipelined, HTTP/1.0 close, HTTP/1.1 explicit-close, idle-timeout, and unauthenticated-teardown tests all pass.

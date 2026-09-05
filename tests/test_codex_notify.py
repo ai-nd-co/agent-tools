@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_tools.codex_notify import dispatch_codex_notify, parse_codex_notify_payload
 from agent_tools.codex_private_api import TransformResult
+from agent_tools.playback_queue import PlaybackDispatchResult
 from agent_tools.tts import TtsResult
 from agent_tools.ttsify import TtsifyResult
 
@@ -76,26 +77,38 @@ def test_dispatch_codex_notify_defaults_to_auto_and_dedupes(
                 usage=None,
                 session_id="session-1",
             ),
-            tts_result=TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1),
+            tts_result=TtsResult(
+                wav=b"WAV",
+                sample_rate=24_000,
+                chunks=1,
+                engine="silero",
+                model="snakers4/silero-models:v5_5_ru",
+                voice="xenia",
+                language="ru",
+            ),
             model="gpt-5.4-mini",
             reasoning_effort="medium",
-            voice="af_heart",
-            language="a",
+            voice="xenia",
+            language="ru",
             speed=1.0,
             device="auto",
             resolved_device="cpu",
             device_fallback_reason="torch cuda unavailable",
+            tts_engine="silero",
+            tts_model="snakers4/silero-models:v5_5_ru",
         )
 
-    class FakeQueueItem:
-        queue_id = 42
-        item_id = "item-42"
-
-    def fake_enqueue_for_playback(request: object) -> FakeQueueItem:
+    def fake_enqueue_for_playback(request: object) -> PlaybackDispatchResult:
         assert isinstance(request, object)
         captured["source_label"] = request.source_label
         captured["raw_text"] = request.raw_text
-        return FakeQueueItem()
+        captured["tts_engine"] = request.tts_engine
+        captured["tts_model"] = request.tts_model
+        return PlaybackDispatchResult(
+            playback_target="windows",
+            queue_id=42,
+            item_id="item-42",
+        )
 
     class FakeNotice:
         def __init__(self, progress_id: str) -> None:
@@ -141,11 +154,15 @@ def test_dispatch_codex_notify_defaults_to_auto_and_dedupes(
     assert captured["device"] == "auto"
     assert captured["source_label"] == "codex-notify:thread-1"
     assert captured["raw_text"] == "assistant message"
+    assert captured["tts_engine"] == "silero"
+    assert captured["tts_model"] == "snakers4/silero-models:v5_5_ru"
     assert duplicate.status == "duplicate"
     assert result.marker_path is not None and result.marker_path.exists()
     log_text = result.log_path.read_text(encoding="utf-8")
     assert "dispatch_completed" in log_text
     assert "requested_device=auto" in log_text
+    assert "tts_engine=silero" in log_text
+    assert "tts_model=snakers4/silero-models:v5_5_ru" in log_text
     assert "resolved_device=cpu" in log_text
     assert "transform_ms=" in log_text
     assert "tts_device_probe_ms=" in log_text
@@ -156,6 +173,7 @@ def test_dispatch_codex_notify_defaults_to_auto_and_dedupes(
     assert perf_events[0][1]["turn_id"] == "turn-1"
     assert perf_events[0][1]["queue_id"] == 42
     assert perf_events[0][1]["requested_device"] == "auto"
+    assert perf_events[0][1]["tts_engine"] == "silero"
 
 
 def test_dispatch_codex_notify_respects_device_env(tmp_path: Path, monkeypatch: object) -> None:
@@ -184,10 +202,6 @@ def test_dispatch_codex_notify_respects_device_env(tmp_path: Path, monkeypatch: 
             resolved_device="cuda",
         )
 
-    class FakeQueueItem:
-        queue_id = 7
-        item_id = "item-7"
-
     class FakeNotice:
         def __init__(self) -> None:
             self.available = True
@@ -196,7 +210,15 @@ def test_dispatch_codex_notify_respects_device_env(tmp_path: Path, monkeypatch: 
             return True
 
     monkeypatch.setattr(notify_module, "ttsify_text", fake_ttsify_text)
-    monkeypatch.setattr(notify_module, "enqueue_for_playback", lambda _request: FakeQueueItem())
+    monkeypatch.setattr(
+        notify_module,
+        "enqueue_for_playback",
+        lambda _request: PlaybackDispatchResult(
+            playback_target="windows",
+            queue_id=7,
+            item_id="item-7",
+        ),
+    )
     monkeypatch.setattr(
         notify_module,
         "start_processing_notice",

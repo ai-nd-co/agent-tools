@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 import uuid
@@ -12,8 +14,13 @@ from time import perf_counter
 from agent_tools.claude_integration import is_claude_integration_triggered
 from agent_tools.codex_config import (
     ALLOWED_CLAUDE_CODE_MODELS,
+    ENV_ADB_SERIAL,
     ENV_KOKORO_SPEED,
+    ENV_KOKORO_VOICE,
+    ENV_PLAYBACK_TARGET,
+    ENV_SILERO_VOICE,
     ENV_SOURCE,
+    ENV_TTS_ENGINE,
     read_float_env,
     read_preferred_tts_speed,
     read_string_env,
@@ -23,6 +30,13 @@ from agent_tools.codex_integration import (
     load_codex_integration_enabled,
 )
 from agent_tools.codex_notify import dispatch_codex_notify
+from agent_tools.computer.cli import (
+    add_computer_parser,
+    is_computer_json_request,
+    render_computer_argument_error,
+    run_computer,
+)
+from agent_tools.console import configure_windows_utf8
 from agent_tools.controller_client import (
     ProcessingNotice,
     send_controller_command,
@@ -42,13 +56,36 @@ from agent_tools.transformer import (
     resolve_effective_transform_provider,
     transform_text,
 )
-from agent_tools.tts import SUPPORTED_LANGUAGES, synthesize_wav
+from agent_tools.tts import (
+    DEFAULT_KOKORO_VOICE,
+    DEFAULT_SILERO_VOICE,
+    SUPPORTED_LANGUAGES,
+    SUPPORTED_TTS_ENGINES,
+    resolve_tts_engine,
+    synthesize_wav,
+)
+from agent_tools.tts_server import (
+    DEFAULT_TTS_SERVER_HOST,
+    DEFAULT_TTS_SERVER_PORT,
+    run_tts_server,
+)
+from agent_tools.tts_startup import main as run_tts_startup
 from agent_tools.ttsify import SUPPORTED_TTSIFY_DEVICES, TtsifyOptions, ttsify_text
 from agent_tools.ui_app import run_ui
+from agent_tools.voice_onboarding import main as run_voice
+from agent_tools.voxflow_adb import (
+    PLAYBACK_TARGET_CHOICES,
+    PLAYBACK_TARGET_VOXFLOW_ADB,
+    PLAYBACK_TARGET_WINDOWS,
+    VoxFlowAdbDispatchRequest,
+    dispatch_to_voxflow_adb,
+)
 from agent_tools.worklog import generate_worklog_report, render_worklog_table
+from agent_tools.zcode_bridge import main as run_zcode
 
 REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh", "none")
 OUTPUT_MODE_CHOICES = ("write", "play")
+CLI_ERROR_TEXT_LIMIT = 1024
 
 
 @dataclass(frozen=True)
@@ -59,12 +96,39 @@ class AudioOutputMetrics:
     file_write_ms: float = 0.0
     enqueue_ms: float = 0.0
     queue_id: int | None = None
+    playback_target: str = PLAYBACK_TARGET_WINDOWS
     output_target: str | None = None
+    dispatch_ms: float = 0.0
+    remote_item_id: str | None = None
+    adb_serial: str | None = None
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_windows_utf8()
+    try:
+        return _main(argv)
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: {_bounded_cli_error(exc)}", file=sys.stderr)
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    command_line = list(sys.argv[1:] if argv is None else argv)
+    if command_line[:1] == ["voice"]:
+        return run_voice(command_line[1:])
+    if command_line[:1] == ["zcode"]:
+        return run_zcode(command_line[1:])
+    if is_computer_json_request(command_line):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                args = parser.parse_args(command_line)
+        except SystemExit as exc:
+            if exc.code == 2:
+                return render_computer_argument_error(command_line)
+            raise
+    else:
+        args = parser.parse_args(command_line)
 
     if args.command == "transform":
         return _run_transform(args)
@@ -72,6 +136,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_tts(args)
     if args.command == "ttsify":
         return _run_ttsify(args)
+    if args.command == "tts-server":
+        return _run_tts_server(args)
+    if args.command == "tts-startup":
+        return run_tts_startup(args.startup_args)
     if args.command == "ui":
         return _run_ui(args)
     if args.command == "install-integrations":
@@ -90,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_cuda_self_check(args)
     if args.command == "worklog":
         return _run_worklog(args)
+    if args.command == "computer":
+        return run_computer(args)
 
     parser.print_help()
     return 1
@@ -98,13 +168,14 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-tools")
     subparsers = parser.add_subparsers(dest="command")
+    add_computer_parser(subparsers)
 
     transform_parser = subparsers.add_parser(
         "transform",
         help="Transform text through Codex or Claude Code.",
     )
     transform_parser.add_argument("--system-prompt-file", required=True, type=Path)
-    transform_parser.add_argument("--provider", choices=("codex", "claude-code"))
+    transform_parser.add_argument("--provider", choices=("codex", "claude-code", "ollama"))
     transform_parser.add_argument("--model")
     transform_parser.add_argument("--reasoning-effort", choices=REASONING_EFFORT_CHOICES)
     transform_parser.add_argument("--fast", action="store_true")
@@ -118,8 +189,9 @@ def build_parser() -> argparse.ArgumentParser:
     transform_parser.add_argument("--originator")
     transform_parser.add_argument("--timeout-seconds", type=float, default=120.0)
 
-    tts_parser = subparsers.add_parser("tts", help="Synthesize text with Kokoro.")
-    tts_parser.add_argument("--voice", default="af_heart")
+    tts_parser = subparsers.add_parser("tts", help="Synthesize text with Kokoro or Silero.")
+    tts_parser.add_argument("--tts-engine", choices=SUPPORTED_TTS_ENGINES)
+    tts_parser.add_argument("--voice")
     tts_parser.add_argument("--language", choices=SUPPORTED_LANGUAGES)
     tts_parser.add_argument("--speed", type=float)
     tts_parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -127,18 +199,26 @@ def build_parser() -> argparse.ArgumentParser:
     tts_parser.add_argument("--output-file", default="-")
     tts_parser.add_argument("--output-mode", choices=OUTPUT_MODE_CHOICES, default="write")
     tts_parser.add_argument("--source")
+    tts_parser.add_argument("--playback-target", choices=PLAYBACK_TARGET_CHOICES)
+    tts_parser.add_argument("--adb-serial")
 
     ttsify_parser = subparsers.add_parser(
         "ttsify",
         help="Transform raw text into TTS-friendly text and synthesize it in one step.",
     )
-    ttsify_parser.add_argument("--provider", choices=("codex", "claude-code"))
+    ttsify_parser.add_argument("--provider", choices=("codex", "claude-code", "ollama"))
     ttsify_parser.add_argument("--model")
     ttsify_parser.add_argument("--reasoning-effort", choices=REASONING_EFFORT_CHOICES)
     ttsify_parser.add_argument("--fast", action="store_true")
+    ttsify_parser.add_argument(
+        "--no-transform",
+        action="store_true",
+        help="Synthesize the input verbatim without calling an LLM transform provider.",
+    )
     ttsify_parser.add_argument("--claude-model", choices=ALLOWED_CLAUDE_CODE_MODELS)
     ttsify_parser.add_argument("--claude-effort", choices=("low", "medium", "high", "max"))
     ttsify_parser.add_argument("--claude-bare", action="store_true")
+    ttsify_parser.add_argument("--tts-engine", choices=SUPPORTED_TTS_ENGINES)
     ttsify_parser.add_argument("--voice")
     ttsify_parser.add_argument("--language", choices=SUPPORTED_LANGUAGES)
     ttsify_parser.add_argument("--speed", type=float)
@@ -147,10 +227,43 @@ def build_parser() -> argparse.ArgumentParser:
     ttsify_parser.add_argument("--output-file", default="-")
     ttsify_parser.add_argument("--output-mode", choices=OUTPUT_MODE_CHOICES, default="write")
     ttsify_parser.add_argument("--source")
+    ttsify_parser.add_argument("--playback-target", choices=PLAYBACK_TARGET_CHOICES)
+    ttsify_parser.add_argument("--adb-serial")
     ttsify_parser.add_argument("--codex-home", type=Path)
     ttsify_parser.add_argument("--base-url")
     ttsify_parser.add_argument("--originator")
-    ttsify_parser.add_argument("--timeout-seconds", type=float, default=120.0)
+    ttsify_parser.add_argument("--timeout-seconds", type=float)
+
+    tts_server_parser = subparsers.add_parser(
+        "tts-server",
+        help="Serve authenticated local Kokoro and Silero WAV synthesis.",
+    )
+    tts_server_parser.add_argument("--host", default=DEFAULT_TTS_SERVER_HOST)
+    tts_server_parser.add_argument("--port", type=int, default=DEFAULT_TTS_SERVER_PORT)
+    tts_server_parser.add_argument("--token-file", type=Path, required=True)
+    tts_server_parser.add_argument(
+        "--device",
+        choices=SUPPORTED_TTSIFY_DEVICES,
+        default="cpu",
+    )
+
+    tts_startup_parser = subparsers.add_parser(
+        "tts-startup",
+        help="Manage the exact owner-logon lifecycle for the optional TTS service.",
+    )
+    tts_startup_parser.add_argument("startup_args", nargs=argparse.REMAINDER)
+
+    voice_parser = subparsers.add_parser(
+        "voice",
+        help="Set up, check, repair, or pair the Vox voice client.",
+    )
+    voice_parser.add_argument("voice_args", nargs=argparse.REMAINDER)
+
+    zcode_parser = subparsers.add_parser(
+        "zcode",
+        help="Control the running ZCode Desktop harness through a private bridge.",
+    )
+    zcode_parser.add_argument("zcode_args", nargs=argparse.REMAINDER)
 
     ui_parser = subparsers.add_parser("ui", help="Run or focus the desktop queue controller.")
     ui_parser.add_argument("--hidden", action="store_true", help=argparse.SUPPRESS)
@@ -247,6 +360,7 @@ def _run_transform(args: argparse.Namespace) -> int:
         provider=resolve_effective_transform_provider(
             getattr(args, "provider", None),
             codex_home=args.codex_home,
+            base_url=args.base_url,
         ),
         requested_provider=getattr(args, "provider", None),
         requested_model=args.model,
@@ -265,9 +379,26 @@ def _run_transform(args: argparse.Namespace) -> int:
 def _run_tts(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
     trace_id = str(uuid.uuid4())
-    speed = args.speed if args.speed is not None else read_float_env(ENV_KOKORO_SPEED)
-    if speed is None:
-        speed = read_preferred_tts_speed() or 1.0
+    requested_tts_engine = (
+        getattr(args, "tts_engine", None) or read_string_env(ENV_TTS_ENGINE) or "auto"
+    )
+    resolved_tts_engine = resolve_tts_engine(
+        input_text,
+        engine=requested_tts_engine,
+        language=args.language,
+    )
+    if args.voice is not None:
+        voice = args.voice
+    elif resolved_tts_engine == "silero":
+        voice = read_string_env(ENV_SILERO_VOICE) or DEFAULT_SILERO_VOICE
+    else:
+        voice = read_string_env(ENV_KOKORO_VOICE) or DEFAULT_KOKORO_VOICE
+    if args.speed is not None:
+        speed = args.speed
+    elif resolved_tts_engine == "kokoro":
+        speed = read_float_env(ENV_KOKORO_SPEED) or read_preferred_tts_speed() or 1.0
+    else:
+        speed = 1.0
     source_label = args.source or read_string_env(ENV_SOURCE)
     processing_notice = _maybe_start_processing_notice(
         output_mode=args.output_mode,
@@ -278,10 +409,11 @@ def _run_tts(args: argparse.Namespace) -> int:
     try:
         result = synthesize_wav(
             input_text,
-            voice=args.voice,
+            voice=voice,
             language=args.language,
             speed=speed,
             device=args.device,
+            engine=requested_tts_engine,
         )
         output_metrics = _handle_audio_output(
             output_mode=args.output_mode,
@@ -290,19 +422,26 @@ def _run_tts(args: argparse.Namespace) -> int:
             raw_text=input_text,
             tts_text=input_text,
             source_label=source_label,
-            voice=args.voice,
-            language=args.language,
+            voice=result.voice,
+            language=result.language,
             speed=speed,
             model=None,
             reasoning_effort=None,
+            tts_engine=result.engine,
+            tts_model=result.model,
+            playback_target=args.playback_target,
+            adb_serial=args.adb_serial,
         )
         append_perf_event(
             "tts_completed",
             trace_id=trace_id,
             command="tts",
             source_label=source_label,
-            voice=args.voice,
-            language=args.language,
+            requested_engine=requested_tts_engine,
+            tts_engine=result.engine,
+            tts_model=result.model,
+            voice=result.voice,
+            language=result.language,
             speed=speed,
             requested_device=args.device,
             resolved_device=result.resolved_device,
@@ -316,11 +455,15 @@ def _run_tts(args: argparse.Namespace) -> int:
             tts_generation_ms=result.metrics.generation_ms,
             tts_postprocess_ms=result.metrics.postprocess_ms,
             output_mode=output_metrics.output_mode,
+            playback_target=output_metrics.playback_target,
             output_target=output_metrics.output_target,
             output_total_ms=output_metrics.total_ms,
             output_file_write_ms=output_metrics.file_write_ms,
             output_enqueue_ms=output_metrics.enqueue_ms,
+            output_dispatch_ms=output_metrics.dispatch_ms,
             queue_id=output_metrics.queue_id,
+            remote_item_id=output_metrics.remote_item_id,
+            adb_serial=output_metrics.adb_serial,
             bytes_written=output_metrics.bytes_written,
         )
     finally:
@@ -352,6 +495,7 @@ def _run_ttsify(args: argparse.Namespace) -> int:
                 model=args.model,
                 reasoning_effort=args.reasoning_effort,
                 fast=args.fast,
+                tts_engine=getattr(args, "tts_engine", None),
                 voice=args.voice,
                 language=args.language,
                 speed=args.speed,
@@ -363,6 +507,7 @@ def _run_ttsify(args: argparse.Namespace) -> int:
                 claude_effort=getattr(args, "claude_effort", None),
                 claude_bare=getattr(args, "claude_bare", False),
                 timeout_seconds=args.timeout_seconds,
+                no_transform=getattr(args, "no_transform", False),
             ),
         )
         output_metrics = _handle_audio_output(
@@ -377,18 +522,32 @@ def _run_ttsify(args: argparse.Namespace) -> int:
             speed=result.speed,
             model=result.model,
             reasoning_effort=result.reasoning_effort,
+            tts_engine=result.tts_engine,
+            tts_model=result.tts_model,
+            playback_target=args.playback_target,
+            adb_serial=args.adb_serial,
         )
         append_perf_event(
             "ttsify_completed",
             trace_id=trace_id,
             command="ttsify",
-            provider=resolve_effective_transform_provider(
-                getattr(args, "provider", None),
-                codex_home=args.codex_home,
+            provider=(
+                "passthrough"
+                if getattr(args, "no_transform", False)
+                else resolve_effective_transform_provider(
+                    getattr(args, "provider", None),
+                    codex_home=args.codex_home,
+                    base_url=args.base_url,
+                )
             ),
             requested_provider=getattr(args, "provider", None),
             model=result.model,
             reasoning_effort=result.reasoning_effort,
+            requested_engine=getattr(args, "tts_engine", None)
+            or read_string_env(ENV_TTS_ENGINE)
+            or "auto",
+            tts_engine=result.tts_engine,
+            tts_model=result.tts_model,
             source_label=source_label,
             input_chars=len(input_text),
             transformed_chars=len(result.transformed_text),
@@ -407,11 +566,15 @@ def _run_ttsify(args: argparse.Namespace) -> int:
             tts_generation_ms=result.tts_result.metrics.generation_ms,
             tts_postprocess_ms=result.tts_result.metrics.postprocess_ms,
             output_mode=output_metrics.output_mode,
+            playback_target=output_metrics.playback_target,
             output_target=output_metrics.output_target,
             output_total_ms=output_metrics.total_ms,
             output_file_write_ms=output_metrics.file_write_ms,
             output_enqueue_ms=output_metrics.enqueue_ms,
+            output_dispatch_ms=output_metrics.dispatch_ms,
             queue_id=output_metrics.queue_id,
+            remote_item_id=output_metrics.remote_item_id,
+            adb_serial=output_metrics.adb_serial,
             bytes_written=output_metrics.bytes_written,
             response_id=result.transform_result.response_id,
             session_id=result.transform_result.session_id,
@@ -419,6 +582,15 @@ def _run_ttsify(args: argparse.Namespace) -> int:
     finally:
         processing_notice.finish()
     return 0
+
+
+def _run_tts_server(args: argparse.Namespace) -> int:
+    return run_tts_server(
+        host=args.host,
+        port=args.port,
+        token_file=args.token_file,
+        device=args.device,
+    )
 
 
 def _run_ui(args: argparse.Namespace) -> int:
@@ -522,6 +694,7 @@ def _run_codex_notify_dispatch(args: argparse.Namespace) -> int:
     result = dispatch_codex_notify(args.payload_json, codex_home=args.codex_home)
     success_statuses = {
         "queued",
+        "dispatched",
         "duplicate",
         "ignored-event",
         "ignored-blank-message",
@@ -625,6 +798,10 @@ def _handle_audio_output(
     speed: float,
     model: str | None,
     reasoning_effort: str | None,
+    tts_engine: str,
+    tts_model: str | None,
+    playback_target: str | None,
+    adb_serial: str | None,
 ) -> AudioOutputMetrics:
     file_write_ms = 0.0
     if output_mode == "write":
@@ -639,13 +816,44 @@ def _handle_audio_output(
             output_target="stdout" if output_file == "-" else output_file,
         )
 
-    if sys.platform != "win32":
-        raise RuntimeError("Playback mode is currently supported only on Windows.")
+    resolved_playback_target = _resolve_playback_target(playback_target)
+
+    if resolved_playback_target == PLAYBACK_TARGET_WINDOWS and sys.platform != "win32":
+        raise RuntimeError("Windows playback mode is currently supported only on Windows.")
 
     if output_file != "-":
         file_write_started = perf_counter()
         Path(output_file).write_bytes(data)
         file_write_ms = (perf_counter() - file_write_started) * 1000.0
+
+    if resolved_playback_target == PLAYBACK_TARGET_VOXFLOW_ADB:
+        dispatch_started = perf_counter()
+        dispatch_result = dispatch_to_voxflow_adb(
+            VoxFlowAdbDispatchRequest(
+                raw_text=raw_text,
+                tts_text=tts_text,
+                wav_data=data,
+                source_label=source_label,
+                voice=voice or "unknown",
+                language=language,
+                speed=speed,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                adb_serial=adb_serial or read_string_env(ENV_ADB_SERIAL),
+            )
+        )
+        dispatch_ms = (perf_counter() - dispatch_started) * 1000.0
+        return AudioOutputMetrics(
+            output_mode=output_mode,
+            bytes_written=len(data),
+            total_ms=file_write_ms + dispatch_ms,
+            file_write_ms=file_write_ms,
+            playback_target=resolved_playback_target,
+            output_target=dispatch_result.remote_audio_path,
+            dispatch_ms=dispatch_ms,
+            remote_item_id=dispatch_result.remote_item_id,
+            adb_serial=dispatch_result.adb_serial,
+        )
 
     enqueue_started = perf_counter()
     queue_item = enqueue_for_playback(
@@ -659,6 +867,8 @@ def _handle_audio_output(
             speed=speed,
             model=model,
             reasoning_effort=reasoning_effort,
+            tts_engine=tts_engine,
+            tts_model=tts_model,
         )
     )
     enqueue_ms = (perf_counter() - enqueue_started) * 1000.0
@@ -669,6 +879,7 @@ def _handle_audio_output(
         file_write_ms=file_write_ms,
         enqueue_ms=enqueue_ms,
         queue_id=queue_item.queue_id,
+        playback_target=resolved_playback_target,
         output_target="queue" if output_file == "-" else output_file,
     )
 
@@ -679,7 +890,7 @@ def _maybe_start_processing_notice(
     source_label: str | None,
     preview_text: str,
     stage: str,
-)-> ProcessingNotice:
+) -> ProcessingNotice:
     if output_mode != "play" or sys.platform != "win32":
         return ProcessingNotice(progress_id="", available=False)
     return start_processing_notice(
@@ -688,3 +899,21 @@ def _maybe_start_processing_notice(
         detail_text=preview_text,
         stage=stage,
     )
+
+
+def _resolve_playback_target(playback_target: str | None) -> str:
+    configured = playback_target or read_string_env(ENV_PLAYBACK_TARGET) or PLAYBACK_TARGET_WINDOWS
+    if configured not in PLAYBACK_TARGET_CHOICES:
+        raise ValueError(
+            f"Unsupported playback target {configured!r}. "
+            f"Expected one of {PLAYBACK_TARGET_CHOICES}."
+        )
+    return configured
+
+
+def _bounded_cli_error(exc: Exception) -> str:
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    if len(text) <= CLI_ERROR_TEXT_LIMIT:
+        return text
+    suffix = "...[truncated]"
+    return f"{text[: CLI_ERROR_TEXT_LIMIT - len(suffix)]}{suffix}"

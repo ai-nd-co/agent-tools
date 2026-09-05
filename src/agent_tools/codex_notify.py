@@ -8,7 +8,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 
-from agent_tools.codex_config import ENV_KOKORO_DEVICE, read_string_env, resolve_codex_home
+from agent_tools.codex_config import (
+    ENV_ADB_SERIAL,
+    ENV_KOKORO_DEVICE,
+    ENV_PLAYBACK_TARGET,
+    read_string_env,
+    resolve_codex_home,
+)
 from agent_tools.codex_integration import load_codex_integration_enabled
 from agent_tools.controller_client import start_processing_notice
 from agent_tools.perf_log import append_perf_event
@@ -34,6 +40,7 @@ class CodexNotifyDispatchResult:
     child_log_path: Path
     marker_path: Path | None = None
     queue_id: int | None = None
+    remote_item_id: str | None = None
 
 
 def dispatch_codex_notify(
@@ -110,6 +117,8 @@ def dispatch_codex_notify(
         )
 
     desired_device = read_string_env(ENV_KOKORO_DEVICE) or "auto"
+    playback_target = read_string_env(ENV_PLAYBACK_TARGET)
+    adb_serial = read_string_env(ENV_ADB_SERIAL)
     trace_id = payload.turn_id or f"codex-notify-{int(dispatch_started * 1000)}"
     source_label = f"codex-notify:{payload.thread_id}" if payload.thread_id else "codex-notify"
     processing_notice = start_processing_notice(
@@ -146,6 +155,10 @@ def dispatch_codex_notify(
                 speed=ttsify_result.speed,
                 model=ttsify_result.model,
                 reasoning_effort=ttsify_result.reasoning_effort,
+                tts_engine=ttsify_result.tts_engine,
+                tts_model=ttsify_result.tts_model,
+                playback_target=playback_target,
+                adb_serial=adb_serial,
             )
         )
         enqueue_ms = (perf_counter() - enqueue_started) * 1000.0
@@ -166,7 +179,8 @@ def dispatch_codex_notify(
         )
 
     if payload.turn_id:
-        marker_path.write_text(queue_item.item_id, encoding="utf-8")
+        marker_value = queue_item.item_id or queue_item.remote_item_id or "dispatched"
+        marker_path.write_text(marker_value, encoding="utf-8")
     total_dispatch_ms = (perf_counter() - dispatch_started) * 1000.0
     transform_ms = ttsify_result.metrics.transform_ms
     tts_wall_ms = ttsify_wall_ms
@@ -190,7 +204,13 @@ def dispatch_codex_notify(
         log_path,
         (
             f"dispatch_completed turn_id={payload.turn_id or '<empty>'} "
-            f"queue_id={queue_item.queue_id} source={source_label} "
+            f"status={'dispatched' if queue_item.remote_item_id else 'queued'} "
+            f"queue_id={queue_item.queue_id} "
+            f"remote_item_id={_render_log_value(queue_item.remote_item_id)} "
+            f"source={source_label} playback_target={queue_item.playback_target} "
+            f"tts_engine={ttsify_result.tts_engine} "
+            f"tts_model={_render_log_value(ttsify_result.tts_model)} "
+            f"voice={ttsify_result.voice} language={_render_log_value(ttsify_result.language)} "
             f"requested_device={desired_device} resolved_device={ttsify_result.resolved_device} "
             f"total_ms={_fmt_ms(total_dispatch_ms)} transform_ms={_fmt_ms(transform_ms)} "
             f"tts_wall_ms={_fmt_ms(tts_wall_ms)} "
@@ -212,6 +232,8 @@ def dispatch_codex_notify(
         thread_id=payload.thread_id,
         source_label=source_label,
         queue_id=queue_item.queue_id,
+        remote_item_id=queue_item.remote_item_id,
+        playback_target=queue_item.playback_target,
         requested_device=desired_device,
         resolved_device=ttsify_result.resolved_device,
         device_fallback_reason=ttsify_result.device_fallback_reason,
@@ -230,15 +252,20 @@ def dispatch_codex_notify(
         transformed_chars=len(ttsify_result.transformed_text),
         model=ttsify_result.model,
         reasoning_effort=ttsify_result.reasoning_effort,
+        tts_engine=ttsify_result.tts_engine,
+        tts_model=ttsify_result.tts_model,
+        voice=ttsify_result.voice,
+        language=ttsify_result.language,
     )
     processing_notice.finish()
     return CodexNotifyDispatchResult(
-        status="queued",
+        status="dispatched" if queue_item.remote_item_id else "queued",
         codex_home=home,
         log_path=log_path,
         child_log_path=child_log_path,
         marker_path=marker_path if payload.turn_id else None,
         queue_id=queue_item.queue_id,
+        remote_item_id=queue_item.remote_item_id,
     )
 
 

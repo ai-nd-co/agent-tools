@@ -17,7 +17,9 @@ from agent_tools.codex_config import (
     DEFAULT_CLAUDE_CODE_EFFORT,
     DEFAULT_CLAUDE_CODE_MODEL,
     DEFAULT_MODEL,
+    DEFAULT_OLLAMA_MODEL,
     DEFAULT_TRANSFORM_PROVIDER,
+    ENV_OLLAMA_MODEL,
     ENV_TRANSFORM_PROVIDER,
     CodexDefaults,
     load_codex_defaults,
@@ -26,8 +28,13 @@ from agent_tools.codex_config import (
     read_string_env,
 )
 from agent_tools.codex_private_api import ClientSettings, CodexPrivateClient, TransformResult
+from agent_tools.ollama_transform import (
+    OllamaTransformOptions,
+    ollama_available,
+    transform_with_ollama,
+)
 
-TransformProvider = Literal["codex", "claude-code"]
+TransformProvider = Literal["codex", "claude-code", "ollama"]
 
 
 @dataclass(frozen=True)
@@ -51,6 +58,7 @@ def transform_text(input_text: str, options: TransformOptions) -> TransformResul
     provider = resolve_effective_transform_provider(
         options.provider,
         codex_home=options.codex_home,
+        base_url=options.base_url,
     )
     if provider == "claude-code":
         system_prompt = _read_system_prompt(options)
@@ -61,6 +69,16 @@ def transform_text(input_text: str, options: TransformOptions) -> TransformResul
                 model=_resolve_claude_model(options),
                 effort=_resolve_claude_effort(options),
                 bare=options.claude_bare,
+                timeout_seconds=options.timeout_seconds,
+            )
+        )
+    if provider == "ollama":
+        return transform_with_ollama(
+            OllamaTransformOptions(
+                system_prompt=_read_system_prompt(options),
+                input_text=input_text,
+                model=options.model or read_string_env(ENV_OLLAMA_MODEL) or DEFAULT_OLLAMA_MODEL,
+                base_url=options.base_url,
                 timeout_seconds=options.timeout_seconds,
             )
         )
@@ -91,8 +109,16 @@ def resolve_effective_transform_provider(
     value: TransformProvider | None,
     *,
     codex_home: Path | None = None,
+    base_url: str | None = None,
 ) -> TransformProvider:
     requested_provider = resolve_transform_provider(value)
+    if requested_provider == "ollama":
+        available, issue = ollama_available(base_url=base_url)
+        if available:
+            return "ollama"
+        if value is not None:
+            message = issue or "Ollama server is not reachable."
+            raise RuntimeError(f"ollama is not available. {message}")
     integration_status = load_agent_integration_status(
         codex_home=codex_home,
     )
@@ -110,7 +136,7 @@ def resolve_transform_provider(value: TransformProvider | None) -> TransformProv
         or read_string_env(ENV_TRANSFORM_PROVIDER)
         or DEFAULT_TRANSFORM_PROVIDER
     )
-    if provider not in {"codex", "claude-code"}:
+    if provider not in {"codex", "claude-code", "ollama"}:
         raise ValueError(f"Unsupported transform provider {provider!r}.")
     return cast(TransformProvider, provider)
 

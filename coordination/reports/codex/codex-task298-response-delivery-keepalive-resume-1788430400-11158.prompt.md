@@ -1,0 +1,1 @@
+The prior resume command timed out locally before returning or writing its output file. Continue the same current keep-alive lifecycle audit from the work already completed. Do not repeat broad exploration unnecessarily. Return findings first; if no actionable findings remain, say CLEAN explicitly. Do not edit files or perform live actions.

@@ -42,6 +42,8 @@ class QueueItem:
     speed: float
     model: str | None
     reasoning_effort: str | None
+    tts_engine: str = "kokoro"
+    tts_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class EnqueueRequest:
     speed: float
     model: str | None
     reasoning_effort: str | None
+    tts_engine: str = "kokoro"
+    tts_model: str | None = None
 
 
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
@@ -71,29 +75,44 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS queue_items (
-            queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item_id TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            source_label TEXT,
-            raw_text TEXT NOT NULL,
-            tts_text TEXT NOT NULL,
-            audio_path TEXT NOT NULL,
-            status TEXT NOT NULL,
-            duration_ms INTEGER NOT NULL,
-            error_message TEXT,
-            voice TEXT NOT NULL,
-            language TEXT,
-            speed REAL NOT NULL,
-            model TEXT,
-            reasoning_effort TEXT
-        )
-        """
-    )
     conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS queue_items (
+                queue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                source_label TEXT,
+                raw_text TEXT NOT NULL,
+                tts_text TEXT NOT NULL,
+                audio_path TEXT NOT NULL,
+                status TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                error_message TEXT,
+                voice TEXT NOT NULL,
+                language TEXT,
+                speed REAL NOT NULL,
+                model TEXT,
+                reasoning_effort TEXT,
+                tts_engine TEXT NOT NULL DEFAULT 'kokoro',
+                tts_model TEXT
+            )
+            """
+        )
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(queue_items)")}
+        if "tts_engine" not in columns:
+            conn.execute(
+                "ALTER TABLE queue_items ADD COLUMN tts_engine TEXT NOT NULL DEFAULT 'kokoro'"
+            )
+        if "tts_model" not in columns:
+            conn.execute("ALTER TABLE queue_items ADD COLUMN tts_model TEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def normalize_inflight_items(conn: sqlite3.Connection) -> None:
@@ -117,8 +136,8 @@ def enqueue_item(conn: sqlite3.Connection, request: EnqueueRequest) -> QueueItem
         INSERT INTO queue_items (
             item_id, created_at, updated_at, source_label, raw_text, tts_text,
             audio_path, status, duration_ms, error_message, voice, language,
-            speed, model, reasoning_effort
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            speed, model, reasoning_effort, tts_engine, tts_model
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             item_id,
@@ -136,10 +155,13 @@ def enqueue_item(conn: sqlite3.Connection, request: EnqueueRequest) -> QueueItem
             request.speed,
             request.model,
             request.reasoning_effort,
+            request.tts_engine,
+            request.tts_model,
         ),
     )
+    item = get_item_by_item_id(conn, item_id)
     conn.commit()
-    return get_item_by_item_id(conn, item_id)
+    return item
 
 
 def get_item_by_item_id(conn: sqlite3.Connection, item_id: str) -> QueueItem:
@@ -282,6 +304,8 @@ def row_to_item(row: sqlite3.Row) -> QueueItem:
         speed=float(row["speed"]),
         model=row["model"],
         reasoning_effort=row["reasoning_effort"],
+        tts_engine=str(row["tts_engine"]),
+        tts_model=row["tts_model"],
     )
 
 

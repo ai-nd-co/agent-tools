@@ -12,6 +12,85 @@ from agent_tools.ttsify import TtsifyMetrics, TtsifyResult
 from agent_tools.worklog import RepoHours, WeeklyHours, WorklogReport
 
 
+def test_main_dispatches_zcode_arguments_without_root_parser_reinterpretation(
+    monkeypatch: object,
+) -> None:
+    import agent_tools.cli as cli_module
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        cli_module,
+        "run_zcode",
+        lambda arguments: captured.append(list(arguments)) or 0,
+    )
+
+    result = cli_module.main(["zcode", "bridge", "status", "--json"])
+
+    assert result == 0
+    assert captured == [["bridge", "status", "--json"]]
+
+
+def test_main_renders_runtime_failure_without_traceback(
+    monkeypatch: object,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import agent_tools.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "_run_tts",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("CPU runtime unavailable")),
+    )
+
+    result = cli_module.main(["tts", "--device", "cpu"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "error: CPU runtime unavailable\n"
+    assert "Traceback" not in captured.err
+
+
+def test_main_bounds_multiline_runtime_failure(
+    monkeypatch: object,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import agent_tools.cli as cli_module
+
+    monkeypatch.setattr(
+        cli_module,
+        "_run_tts",
+        lambda _args: (_ for _ in ()).throw(RuntimeError("detail\r\n" * 4_000)),
+    )
+
+    result = cli_module.main(["tts", "--device", "cpu"])
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert error.startswith("error: detail detail")
+    assert error.endswith("...[truncated]\n")
+    assert error.count("\n") == 1
+    payload = error.removeprefix("error: ").removesuffix("\n")
+    assert len(payload) == cli_module.CLI_ERROR_TEXT_LIMIT
+
+
+def test_ttsify_no_transform_rejects_explicit_timeout(
+    monkeypatch: object,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import agent_tools.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "_read_text_input", lambda _path: "ready text")
+
+    result = cli_module.main(
+        ["ttsify", "--no-transform", "--device", "cpu", "--timeout-seconds", "5"]
+    )
+
+    error = capsys.readouterr().err
+    assert result == 1
+    assert "--no-transform cannot be combined" in error
+
+
 def test_run_ttsify_short_circuits_for_disabled_codex_integration(
     monkeypatch: object,
     capsys: object,
@@ -42,6 +121,8 @@ def test_run_ttsify_short_circuits_for_disabled_codex_integration(
             output_file="-",
             output_mode="write",
             source=None,
+            playback_target=None,
+            adb_serial=None,
             codex_home=None,
             base_url=None,
             originator=None,
@@ -73,7 +154,7 @@ def test_run_ttsify_keeps_manual_path_unchanged(monkeypatch: object, tmp_path: P
     monkeypatch.setattr(
         cli_module,
         "resolve_effective_transform_provider",
-        lambda provider, *, codex_home=None: provider or "codex",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
     )
     monkeypatch.setattr(
         cli_module,
@@ -111,6 +192,8 @@ def test_run_ttsify_keeps_manual_path_unchanged(monkeypatch: object, tmp_path: P
             output_file=str(output_path),
             output_mode="write",
             source=None,
+            playback_target=None,
+            adb_serial=None,
             codex_home=None,
             base_url=None,
             originator=None,
@@ -145,7 +228,7 @@ def test_run_transform_logs_perf_entry(monkeypatch: object, tmp_path: Path) -> N
     monkeypatch.setattr(
         cli_module,
         "resolve_effective_transform_provider",
-        lambda provider, *, codex_home=None: provider or "codex",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
     )
     monkeypatch.setattr(
         cli_module,
@@ -207,6 +290,10 @@ def test_run_tts_logs_perf_entry(monkeypatch: object) -> None:
             sample_rate=24_000,
             chunks=2,
             resolved_device="cpu",
+            engine="kokoro",
+            model="hexgrad/Kokoro-82M",
+            voice="af_heart",
+            language="a",
             metrics=TtsMetrics(
                 total_ms=55.0,
                 device_probe_ms=1.0,
@@ -239,6 +326,8 @@ def test_run_tts_logs_perf_entry(monkeypatch: object) -> None:
             output_file="-",
             output_mode="write",
             source="manual",
+            playback_target=None,
+            adb_serial=None,
         )
     )
 
@@ -246,6 +335,28 @@ def test_run_tts_logs_perf_entry(monkeypatch: object) -> None:
     assert perf_events and perf_events[0][0] == "tts_completed"
     assert perf_events[0][1]["tts_total_ms"] == 55.0
     assert perf_events[0][1]["output_total_ms"] == 4.0
+    assert perf_events[0][1]["tts_engine"] == "kokoro"
+    assert perf_events[0][1]["tts_model"] == "hexgrad/Kokoro-82M"
+
+
+def test_tts_cli_accepts_explicit_silero_engine_and_russian_language() -> None:
+    import agent_tools.cli as cli_module
+
+    args = cli_module.build_parser().parse_args(
+        [
+            "tts",
+            "--tts-engine",
+            "silero",
+            "--language",
+            "ru",
+            "--voice",
+            "baya",
+        ]
+    )
+
+    assert args.tts_engine == "silero"
+    assert args.language == "ru"
+    assert args.voice == "baya"
 
 
 def test_cli_rejects_opus_for_claude_model() -> None:

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import subprocess
 import sys
+import threading
 import warnings
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -27,6 +29,59 @@ SUPPORTED_INSTALL_MACHINES = {"amd64", "x86_64"}
 
 
 RunCallable = Callable[..., subprocess.CompletedProcess[str]]
+
+CUDA_PROBE_TIMEOUT_SECONDS = 30.0
+CUDA_PROBE_OUTPUT_LIMIT = 16_384
+CUDA_PROBE_ENV_KEYS = (
+    "CUDA_DEVICE_ORDER",
+    "CUDA_VISIBLE_DEVICES",
+    "PATH",
+    "PATHEXT",
+    "PROCESSOR_ARCHITECTURE",
+    "PYTORCH_NVML_BASED_CUDA_CHECK",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "WINDIR",
+)
+_CUDA_PROBE_SCRIPT = r"""
+import json
+import warnings
+
+payload = {
+    "ok": False,
+    "reason": None,
+    "torch_version": None,
+    "torch_cuda_version": None,
+    "device_count": 0,
+    "device_name": None,
+    "warning_text": None,
+}
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    import torch
+
+    payload["torch_version"] = getattr(torch, "__version__", None)
+    payload["torch_cuda_version"] = getattr(getattr(torch, "version", None), "cuda", None)
+    if not payload["torch_cuda_version"]:
+        payload["reason"] = "Installed torch build does not include CUDA support."
+    elif not torch.cuda.is_available():
+        payload["reason"] = "torch.cuda.is_available() returned false."
+    else:
+        payload["device_count"] = int(torch.cuda.device_count())
+        if payload["device_count"] < 1:
+            payload["reason"] = "torch.cuda.device_count() returned zero."
+        else:
+            payload["device_name"] = torch.cuda.get_device_name(0)
+            sample = torch.tensor([1.0], device="cuda")
+            result = float((sample * 2.0).sum().item())
+            if result <= 0.0:
+                raise RuntimeError("CUDA validation produced an invalid test result.")
+            payload["ok"] = True
+    messages = [str(item.message).strip() for item in caught if str(item.message).strip()]
+    payload["warning_text"] = " | ".join(messages) or None
+print(json.dumps(payload, sort_keys=True))
+"""
 
 
 @dataclass(frozen=True)
@@ -163,7 +218,19 @@ def resolve_torch_device(requested_device: str) -> DeviceResolution:
             f"Unsupported device {requested_device!r}. Expected one of ('auto', 'cpu', 'cuda')."
         )
     if requested_device == "cpu":
-        return DeviceResolution(requested_device="cpu", resolved_device="cpu")
+        torch_version = _distribution_version("torch")
+        if _is_cuda_torch_build(torch_version):
+            raise RuntimeError(
+                "CPU synthesis requires a CPU-only PyTorch runtime because CUDA-enabled "
+                "PyTorch can initialize the GPU driver while a TTS model loads. The active build "
+                f"is {torch_version!r}. Create the locked AgentTools CPU runtime described in "
+                "the README and use its agent-tools executable."
+            )
+        return DeviceResolution(
+            requested_device="cpu",
+            resolved_device="cpu",
+            torch_version=torch_version,
+        )
 
     probe_started = perf_counter()
     probe = probe_cuda_runtime()
@@ -193,12 +260,20 @@ def resolve_torch_device(requested_device: str) -> DeviceResolution:
             torch_cuda_version=probe.torch_cuda_version,
             device_name=probe.device_name,
         )
+    fallback_torch_version = probe.torch_version or _distribution_version("torch")
+    if _is_cuda_torch_build(fallback_torch_version):
+        raise RuntimeError(
+            "Automatic device selection cannot safely fall back to CPU because the active "
+            f"PyTorch build is CUDA-enabled ({fallback_torch_version!r}) and the CUDA probe "
+            "failed. Use a working CUDA runtime or the locked AgentTools CPU runtime "
+            "described in the README."
+        )
     return DeviceResolution(
         requested_device="auto",
         resolved_device="cpu",
         probe_ms=probe_ms,
         fallback_reason=probe.reason,
-        torch_version=probe.torch_version,
+        torch_version=fallback_torch_version,
         torch_cuda_version=probe.torch_cuda_version,
         device_name=probe.device_name,
     )
@@ -244,70 +319,143 @@ def clear_cuda_probe_cache() -> None:
 
 @lru_cache(maxsize=1)
 def _probe_cuda_runtime_cached() -> CudaProbeResult:
-    warning_text: str | None = None
-    torch_version: str | None = None
-    torch_cuda_version: str | None = None
-    device_count = 0
-    device_name: str | None = None
     try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            import torch
-
-            warning_text = _collect_warning_text(caught)
-            torch_version = getattr(torch, "__version__", None)
-            torch_cuda_version = getattr(getattr(torch, "version", None), "cuda", None)
-            if not torch_cuda_version:
-                return CudaProbeResult(
-                    ok=False,
-                    reason="Installed torch build does not include CUDA support.",
-                    torch_version=torch_version,
-                    torch_cuda_version=torch_cuda_version,
-                    warning_text=warning_text,
-                )
-            if not torch.cuda.is_available():
-                return CudaProbeResult(
-                    ok=False,
-                    reason="torch.cuda.is_available() returned false.",
-                    torch_version=torch_version,
-                    torch_cuda_version=torch_cuda_version,
-                    warning_text=_collect_warning_text(caught),
-                )
-            device_count = int(torch.cuda.device_count())
-            if device_count < 1:
-                return CudaProbeResult(
-                    ok=False,
-                    reason="torch.cuda.device_count() returned zero.",
-                    torch_version=torch_version,
-                    torch_cuda_version=torch_cuda_version,
-                    device_count=device_count,
-                    warning_text=_collect_warning_text(caught),
-                )
-            device_name = torch.cuda.get_device_name(0)
-            sample = torch.tensor([1.0], device="cuda")
-            result = float((sample * 2.0).sum().item())
-            if result <= 0.0:
-                raise RuntimeError("CUDA validation produced an invalid test result.")
-            return CudaProbeResult(
-                ok=True,
-                torch_version=torch_version,
-                torch_cuda_version=torch_cuda_version,
-                device_count=device_count,
-                device_name=device_name,
-                warning_text=_collect_warning_text(caught),
-            )
-    except Exception as exc:
-        detail = warning_text or ""
-        suffix = f" Warning: {detail}" if detail else ""
+        result = _run_cuda_probe_subprocess()
+    except _CudaProbeOutputLimit:
         return CudaProbeResult(
             ok=False,
-            reason=f"{exc}{suffix}",
-            torch_version=torch_version,
-            torch_cuda_version=torch_cuda_version,
-            device_count=device_count,
-            device_name=device_name,
-            warning_text=warning_text,
+            reason=f"CUDA probe exceeded the {CUDA_PROBE_OUTPUT_LIMIT}-byte output limit.",
         )
+    except subprocess.TimeoutExpired:
+        return CudaProbeResult(
+            ok=False,
+            reason=f"CUDA probe timed out after {CUDA_PROBE_TIMEOUT_SECONDS:g} seconds.",
+        )
+    except Exception as exc:
+        return CudaProbeResult(
+            ok=False,
+            reason=f"CUDA probe could not start: {exc}",
+        )
+    stdout = _bounded_detail(result.stdout)
+    stderr = _bounded_detail(result.stderr)
+    if result.returncode != 0:
+        detail = f" Detail: {stderr}" if stderr else ""
+        return CudaProbeResult(
+            ok=False,
+            reason=f"CUDA probe subprocess exited with code {result.returncode}.{detail}",
+            warning_text=stderr,
+        )
+    try:
+        payload = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        return CudaProbeResult(
+            ok=False,
+            reason=f"CUDA probe returned invalid JSON: {exc}",
+            warning_text=stderr,
+        )
+    if not isinstance(payload, dict):
+        return CudaProbeResult(ok=False, reason="CUDA probe returned a non-object result.")
+    return CudaProbeResult(
+        ok=payload.get("ok") is True,
+        reason=_optional_string(payload.get("reason")),
+        torch_version=_optional_string(payload.get("torch_version")),
+        torch_cuda_version=_optional_string(payload.get("torch_cuda_version")),
+        device_count=_nonnegative_int(payload.get("device_count")),
+        device_name=_optional_string(payload.get("device_name")),
+        warning_text=_merge_detail_text(
+            _optional_string(payload.get("warning_text")),
+            stderr,
+        ),
+    )
+
+
+def _run_cuda_probe_subprocess() -> subprocess.CompletedProcess[str]:
+    environment = {
+        key: value
+        for key in CUDA_PROBE_ENV_KEYS
+        if (value := os.environ.get(key)) is not None
+    }
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-X", "utf8", "-c", _CUDA_PROBE_SCRIPT],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+    )
+    streams = {"stdout": bytearray(), "stderr": bytearray()}
+    overflow = threading.Event()
+
+    def drain(name: str) -> None:
+        stream = getattr(process, name)
+        if stream is None:
+            return
+        try:
+            while chunk := stream.read(4096):
+                remaining = CUDA_PROBE_OUTPUT_LIMIT - len(streams[name])
+                if remaining > 0:
+                    streams[name].extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    overflow.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                    return
+        except OSError:
+            return
+
+    readers = [
+        threading.Thread(target=drain, args=(name,), daemon=True)
+        for name in streams
+    ]
+    for reader in readers:
+        reader.start()
+    try:
+        returncode = process.wait(timeout=CUDA_PROBE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        for reader in readers:
+            reader.join(timeout=5.0)
+    if overflow.is_set():
+        raise _CudaProbeOutputLimit
+    return subprocess.CompletedProcess(
+        args=process.args,
+        returncode=returncode,
+        stdout=streams["stdout"].decode("utf-8", errors="replace"),
+        stderr=streams["stderr"].decode("utf-8", errors="replace"),
+    )
+
+
+def _bounded_detail(value: str | None) -> str:
+    text = (value or "").strip()
+    if len(text) <= CUDA_PROBE_OUTPUT_LIMIT:
+        return text
+    return f"{text[:CUDA_PROBE_OUTPUT_LIMIT]}...[truncated]"
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def _is_cuda_torch_build(version: str | None) -> bool:
+    if not version:
+        return False
+    return bool(re.search(r"\+cu[0-9]+(?:\.|$)", version, re.IGNORECASE))
+
+
+class _CudaProbeOutputLimit(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)

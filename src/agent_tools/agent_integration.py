@@ -18,7 +18,7 @@ from agent_tools.hook_install import (
 )
 
 AgentIntegrationInstallState = Literal["installed", "missing", "broken"]
-TransformProvider = Literal["codex", "claude-code"]
+TransformProvider = Literal["codex", "claude-code", "ollama"]
 
 
 @dataclass(frozen=True)
@@ -241,4 +241,8 @@ def _available_provider_label(providers: tuple[TransformProvider, ...]) -> str:
 
 
 def _provider_label(provider: TransformProvider) -> str:
-    return "Claude Code" if provider == "claude-code" else "Codex"
+    if provider == "claude-code":
+        return "Claude Code"
+    if provider == "ollama":
+        return "Ollama"
+    return "Codex"

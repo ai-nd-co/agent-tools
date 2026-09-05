@@ -4,6 +4,7 @@ import json
 import platform
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -88,6 +89,137 @@ def test_resolve_torch_device_auto_falls_back_to_cpu(monkeypatch: pytest.MonkeyP
     assert result.fallback_reason == "torch.cuda.is_available() returned false."
     assert result.torch_version == "2.11.0"
     assert result.probe_ms >= 0.0
+
+
+def test_resolve_torch_device_auto_rejects_cuda_wheel_after_failed_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_tools.cuda_runtime as cuda_runtime
+
+    monkeypatch.setattr(
+        cuda_runtime,
+        "probe_cuda_runtime",
+        lambda: cuda_runtime.CudaProbeResult(
+            ok=False,
+            reason="torch.cuda.is_available() returned false.",
+            torch_version="2.11.0+cu130",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="cannot safely fall back to CPU"):
+        resolve_torch_device("auto")
+
+
+def test_resolve_torch_device_auto_checks_distribution_after_native_probe_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_tools.cuda_runtime as cuda_runtime
+
+    monkeypatch.setattr(
+        cuda_runtime,
+        "probe_cuda_runtime",
+        lambda: cuda_runtime.CudaProbeResult(
+            ok=False,
+            reason="CUDA probe subprocess exited with code 139.",
+        ),
+    )
+    monkeypatch.setattr(cuda_runtime, "_distribution_version", lambda _name: "2.11.0+cu130")
+
+    with pytest.raises(RuntimeError, match="cannot safely fall back to CPU"):
+        resolve_torch_device("auto")
+
+
+def test_resolve_torch_device_cpu_never_runs_cuda_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_tools.cuda_runtime as cuda_runtime
+
+    monkeypatch.setattr(cuda_runtime, "_distribution_version", lambda _name: "2.13.0")
+    monkeypatch.setattr(
+        cuda_runtime,
+        "probe_cuda_runtime",
+        lambda: pytest.fail("explicit CPU selection must not run the CUDA probe"),
+    )
+
+    result = resolve_torch_device("cpu")
+
+    assert result.resolved_device == "cpu"
+    assert result.torch_version == "2.13.0"
+
+
+def test_resolve_torch_device_cpu_rejects_cuda_wheel_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_tools.cuda_runtime as cuda_runtime
+
+    monkeypatch.setattr(cuda_runtime, "_distribution_version", lambda _name: "2.11.0+cu130")
+
+    with pytest.raises(RuntimeError, match="CPU-only PyTorch runtime"):
+        resolve_torch_device("cpu")
+
+
+def test_cuda_probe_reports_native_child_crash_without_crashing_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_tools.cuda_runtime as cuda_runtime
+
+    cuda_runtime.clear_cuda_probe_cache()
+    monkeypatch.setattr(
+        cuda_runtime,
+        "_run_cuda_probe_subprocess",
+        lambda: subprocess.CompletedProcess(
+            args=[sys.executable],
+            returncode=139,
+            stdout="",
+            stderr="native probe failed",
+        ),
+    )
+
+    result = cuda_runtime.probe_cuda_runtime()
+
+    assert result.ok is False
+    assert result.reason == (
+        "CUDA probe subprocess exited with code 139. Detail: native probe failed"
+    )
+    cuda_runtime.clear_cuda_probe_cache()
+
+
+def test_cuda_probe_subprocess_enforces_output_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_tools.cuda_runtime as cuda_runtime
+
+    monkeypatch.setattr(
+        cuda_runtime,
+        "_CUDA_PROBE_SCRIPT",
+        f"import sys; sys.stdout.write('x' * {cuda_runtime.CUDA_PROBE_OUTPUT_LIMIT + 1})",
+    )
+
+    with pytest.raises(cuda_runtime._CudaProbeOutputLimit):
+        cuda_runtime._run_cuda_probe_subprocess()
+
+
+def test_cuda_probe_subprocess_isolates_cwd_and_pythonpath(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import agent_tools.cuda_runtime as cuda_runtime
+
+    shadow = tmp_path / "task290_shadow_probe.py"
+    shadow.write_text("VALUE = 'shadowed'\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setattr(
+        cuda_runtime,
+        "_CUDA_PROBE_SCRIPT",
+        "import importlib.util; print(importlib.util.find_spec('task290_shadow_probe'))",
+    )
+
+    result = cuda_runtime._run_cuda_probe_subprocess()
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "None"
+    assert str(tmp_path) not in result.stdout
 
 
 def test_resolve_torch_device_cuda_raises_on_failed_probe(

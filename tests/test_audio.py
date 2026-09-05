@@ -58,6 +58,7 @@ def test_synthesize_wav_uses_resolved_device(monkeypatch: object) -> None:
         ),
     )
     monkeypatch.setitem(sys.modules, "kokoro", types.SimpleNamespace(KPipeline=FakePipeline))
+    monkeypatch.setattr(tts_module, "_create_kokoro_pipeline", lambda cls, **kwargs: cls(**kwargs))
 
     result = synthesize_wav("hello there", voice="af_heart", device="auto")
 
@@ -86,3 +87,80 @@ def test_synthesize_wav_reports_actionable_kokoro_import_error(
 
     with pytest.raises(RuntimeError, match="Re-run `agent-tools install-cuda`"):
         tts_module._load_kokoro_pipeline()
+
+
+def test_synthesize_wav_resolves_cpu_before_importing_kokoro(monkeypatch: object) -> None:
+    import agent_tools.tts as tts_module
+
+    events: list[str] = []
+
+    def fake_resolve(_requested_device: str) -> DeviceResolution:
+        events.append("resolve")
+        return DeviceResolution(requested_device="cpu", resolved_device="cpu")
+
+    def fake_load() -> object:
+        events.append("import")
+        raise RuntimeError("stop after ordering proof")
+
+    monkeypatch.setattr(tts_module, "resolve_torch_device", fake_resolve)
+    monkeypatch.setattr(tts_module, "_load_kokoro_pipeline", fake_load)
+
+    with pytest.raises(RuntimeError, match="ordering proof"):
+        synthesize_wav("hello", voice="af_heart", device="cpu")
+
+    assert events == ["resolve", "import"]
+
+
+def test_create_kokoro_pipeline_uses_offline_english_fallback(
+    monkeypatch: object,
+) -> None:
+    import agent_tools.tts as tts_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, *, lang_code: str, repo_id: str, device: str) -> None:
+            captured.update(lang_code=lang_code, repo_id=repo_id, device=device)
+            self.g2p = None
+
+    class FakeEspeakG2P:
+        def __init__(self, *, language: str) -> None:
+            captured["fallback_language"] = language
+
+    monkeypatch.setattr(tts_module, "_has_spacy_english_model", lambda: False)
+    monkeypatch.setitem(
+        sys.modules,
+        "misaki.espeak",
+        types.SimpleNamespace(EspeakG2P=FakeEspeakG2P),
+    )
+
+    pipeline = tts_module._create_kokoro_pipeline(
+        FakePipeline,
+        lang_code="a",
+        device="cpu",
+    )
+
+    assert captured == {
+        "lang_code": "e",
+        "repo_id": "hexgrad/Kokoro-82M",
+        "device": "cpu",
+        "fallback_language": "en-us",
+    }
+    assert isinstance(pipeline.g2p, FakeEspeakG2P)
+
+
+def test_spacy_model_detection_uses_distribution_not_importable_module(
+    monkeypatch: object,
+) -> None:
+    import agent_tools.tts as tts_module
+
+    monkeypatch.setitem(sys.modules, "en_core_web_sm", types.SimpleNamespace())
+    monkeypatch.setattr(
+        tts_module.importlib_metadata,
+        "distribution",
+        lambda _name: (_ for _ in ()).throw(
+            tts_module.importlib_metadata.PackageNotFoundError("en-core-web-sm")
+        ),
+    )
+
+    assert tts_module._has_spacy_english_model() is False

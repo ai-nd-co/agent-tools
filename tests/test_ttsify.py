@@ -65,25 +65,22 @@ def test_ttsify_uses_repo_defaults_and_env(monkeypatch: object) -> None:
         language: str | None,
         speed: float,
         device: str,
+        engine: str,
     ) -> TtsResult:
         captured["tts_text"] = text
         captured["voice"] = voice
         captured["language"] = language
         captured["speed"] = speed
         captured["device"] = device
+        captured["engine"] = engine
         return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
 
     monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
     monkeypatch.setattr(
         ttsify_module,
-        "resolve_transform_provider",
-        lambda value: value or "codex",
-    )
-    monkeypatch.setattr(
-        ttsify_module,
-        "load_agent_integration_status",
-        lambda codex_home=None: SimpleNamespace(available_providers=("codex", "claude-code")),
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
     )
     monkeypatch.setenv("AGENT_TOOLS_CODEX_REASONING_EFFORT", "medium")
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_VOICE", "bf_emma")
@@ -127,24 +124,21 @@ def test_ttsify_cli_values_override_env(monkeypatch: object) -> None:
         language: str | None,
         speed: float,
         device: str,
+        engine: str,
     ) -> TtsResult:
         captured["voice"] = voice
         captured["language"] = language
         captured["speed"] = speed
         captured["device"] = device
+        captured["engine"] = engine
         return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
 
     monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
     monkeypatch.setattr(
         ttsify_module,
-        "resolve_transform_provider",
-        lambda value: value or "codex",
-    )
-    monkeypatch.setattr(
-        ttsify_module,
-        "load_agent_integration_status",
-        lambda codex_home=None: SimpleNamespace(available_providers=("codex", "claude-code")),
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
     )
     monkeypatch.setenv("AGENT_TOOLS_CODEX_MODEL", "env-model")
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_VOICE", "env-voice")
@@ -191,13 +185,8 @@ def test_ttsify_defaults_to_medium_reasoning_without_env(monkeypatch: object) ->
     )
     monkeypatch.setattr(
         ttsify_module,
-        "resolve_transform_provider",
-        lambda value: value or "codex",
-    )
-    monkeypatch.setattr(
-        ttsify_module,
-        "load_agent_integration_status",
-        lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
     )
     monkeypatch.delenv("AGENT_TOOLS_CODEX_REASONING_EFFORT", raising=False)
 
@@ -211,18 +200,216 @@ def test_ttsify_rejects_invalid_env_device(monkeypatch: object) -> None:
 
     monkeypatch.setattr(
         ttsify_module,
-        "resolve_transform_provider",
-        lambda value: value or "codex",
-    )
-    monkeypatch.setattr(
-        ttsify_module,
-        "load_agent_integration_status",
-        lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
     )
     monkeypatch.setenv("AGENT_TOOLS_KOKORO_DEVICE", "neural-engine")
 
-    with pytest.raises(ValueError, match="Unsupported Kokoro device"):
+    with pytest.raises(ValueError, match="Unsupported TTS device"):
         ttsify_text("raw text", TtsifyOptions())
+
+
+def test_ttsify_no_transform_never_resolves_or_calls_provider(monkeypatch: object) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_effective_transform_provider",
+        lambda *_args, **_kwargs: pytest.fail("provider resolution must stay offline"),
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "transform_text",
+        lambda *_args, **_kwargs: pytest.fail("LLM transform must stay offline"),
+    )
+
+    def fake_synthesize(
+        text: str,
+        *,
+        voice: str,
+        language: str | None,
+        speed: float,
+        device: str,
+        engine: str,
+    ) -> TtsResult:
+        captured.update(
+            text=text,
+            voice=voice,
+            language=language,
+            speed=speed,
+            device=device,
+            engine=engine,
+        )
+        return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
+
+    monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize)
+
+    result = ttsify_text(
+        "speak this verbatim",
+        TtsifyOptions(
+            no_transform=True,
+            voice="af_heart",
+            language="a",
+            speed=1.0,
+            device="cpu",
+        ),
+    )
+
+    assert captured["text"] == "speak this verbatim"
+    assert result.transformed_text == "speak this verbatim"
+    assert result.model == "passthrough"
+    assert result.reasoning_effort is None
+
+
+def test_ttsify_no_transform_rejects_transform_options() -> None:
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ttsify_text(
+            "raw text",
+            TtsifyOptions(no_transform=True, provider="codex", device="cpu"),
+        )
+
+
+def test_ttsify_routes_from_final_transformed_russian_text(monkeypatch: object) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+    final_text = "Всё готово. Замок уже открыт?"
+    monkeypatch.delenv("AGENT_TOOLS_KOKORO_LANGUAGE", raising=False)
+    monkeypatch.delenv("AGENT_TOOLS_KOKORO_VOICE", raising=False)
+    monkeypatch.delenv("AGENT_TOOLS_SILERO_VOICE", raising=False)
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
+    )
+    monkeypatch.setattr(
+        ttsify_module,
+        "transform_text",
+        lambda *_args, **_kwargs: TransformResult(
+            text=final_text,
+            response_id="resp-ru",
+            usage=None,
+            session_id="session-ru",
+        ),
+    )
+
+    def fake_synthesize(
+        text: str,
+        *,
+        voice: str,
+        language: str | None,
+        speed: float,
+        device: str,
+        engine: str,
+    ) -> TtsResult:
+        captured.update(
+            text=text,
+            voice=voice,
+            language=language,
+            speed=speed,
+            device=device,
+            engine=engine,
+        )
+        return TtsResult(
+            wav=b"WAV",
+            sample_rate=24_000,
+            chunks=1,
+            engine="silero",
+            model="snakers4/silero-models:v5_5_ru",
+            voice=voice,
+            language="ru",
+        )
+
+    monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize)
+
+    result = ttsify_text("English raw input", TtsifyOptions(device="cpu"))
+
+    assert captured == {
+        "text": final_text,
+        "voice": "xenia",
+        "language": None,
+        "speed": 1.0,
+        "device": "cpu",
+        "engine": "auto",
+    }
+    assert result.tts_engine == "silero"
+    assert result.tts_model == "snakers4/silero-models:v5_5_ru"
+    assert result.voice == "xenia"
+    assert result.language == "ru"
+
+
+def test_ttsify_explicit_engine_overrides_environment(monkeypatch: object) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("AGENT_TOOLS_TTS_ENGINE", "kokoro")
+    monkeypatch.setattr(
+        ttsify_module,
+        "synthesize_wav",
+        lambda _text, **kwargs: captured.update(kwargs)
+        or TtsResult(
+            wav=b"WAV",
+            sample_rate=24_000,
+            chunks=1,
+            engine="silero",
+            model="snakers4/silero-models:v5_5_ru",
+            voice="baya",
+            language="ru",
+        ),
+    )
+
+    result = ttsify_text(
+        "Привет, мир!",
+        TtsifyOptions(
+            no_transform=True,
+            tts_engine="silero",
+            voice="baya",
+            language="ru",
+            device="cpu",
+        ),
+    )
+
+    assert captured["engine"] == "silero"
+    assert result.tts_engine == "silero"
+    assert result.voice == "baya"
+
+
+def test_ttsify_prompt_requires_source_language_preservation() -> None:
+    prompt = load_ttsify_prompt()
+    assert "Preserve the source language. Do not translate" in prompt
+    assert "plain spoken English" not in prompt
+
+
+def test_russian_auto_routing_ignores_kokoro_language_env(monkeypatch: object) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("AGENT_TOOLS_KOKORO_LANGUAGE", "a")
+    monkeypatch.setattr(
+        ttsify_module,
+        "synthesize_wav",
+        lambda _text, **kwargs: captured.update(kwargs)
+        or TtsResult(
+            wav=b"WAV",
+            sample_rate=24_000,
+            chunks=1,
+            engine="silero",
+            model="snakers4/silero-models:v5_5_ru",
+            voice="xenia",
+            language="ru",
+        ),
+    )
+
+    result = ttsify_text(
+        "Привет, мир!",
+        TtsifyOptions(no_transform=True, device="cpu"),
+    )
+
+    assert captured["language"] is None
+    assert result.tts_engine == "silero"
+    assert result.language == "ru"
 
 
 def test_transformer_accepts_system_prompt_text(tmp_path: Path, monkeypatch: object) -> None:
@@ -293,6 +480,7 @@ def test_ttsify_can_select_claude_code_provider(monkeypatch: object) -> None:
         language: str | None,
         speed: float,
         device: str,
+        engine: str,
     ) -> TtsResult:
         return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
 
@@ -300,8 +488,8 @@ def test_ttsify_can_select_claude_code_provider(monkeypatch: object) -> None:
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
     monkeypatch.setattr(
         ttsify_module,
-        "load_agent_integration_status",
-        lambda codex_home=None: SimpleNamespace(available_providers=("codex", "claude-code")),
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
     )
 
     result = ttsify_text(
@@ -344,6 +532,7 @@ def test_ttsify_uses_preferred_provider_when_not_explicit(monkeypatch: object) -
         language: str | None,
         speed: float,
         device: str,
+        engine: str,
     ) -> TtsResult:
         return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
 
@@ -356,7 +545,7 @@ def test_ttsify_uses_preferred_provider_when_not_explicit(monkeypatch: object) -
     monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
     monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
     monkeypatch.setattr(
-        ttsify_module,
+        transformer_module,
         "load_agent_integration_status",
         lambda codex_home=None: SimpleNamespace(available_providers=("claude-code",)),
     )
@@ -388,7 +577,7 @@ def test_ttsify_falls_back_when_preferred_provider_unavailable(monkeypatch: obje
         lambda: "claude-code",
     )
     monkeypatch.setattr(
-        ttsify_module,
+        transformer_module,
         "load_agent_integration_status",
         lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
     )
@@ -405,10 +594,10 @@ def test_ttsify_falls_back_when_preferred_provider_unavailable(monkeypatch: obje
 
 
 def test_ttsify_rejects_explicit_unavailable_provider(monkeypatch: object) -> None:
-    import agent_tools.ttsify as ttsify_module
+    import agent_tools.transformer as transformer_module
 
     monkeypatch.setattr(
-        ttsify_module,
+        transformer_module,
         "load_agent_integration_status",
         lambda codex_home=None: SimpleNamespace(available_providers=("codex",)),
     )

@@ -19,6 +19,7 @@ Reference scale:
 
 Requirements:
 - Keep the original meaning intact.
+- Preserve the source language. Do not translate the input.
 - Remove markup, bullets, code formatting, URLs when non-essential, and visual-only structure.
 - Rewrite into smooth spoken sentences.
 - Expand abbreviations only when that improves speech clarity.
@@ -84,7 +85,7 @@ Logs and errors policy:
 - Strip repeated prefixes, timestamps, and boilerplate markers unless they matter.
 
 Code policy:
-- Translate code, commands, JSON, and stack traces into plain spoken English.
+- Explain code, commands, JSON, and stack traces in natural speech using the source language.
 - Say what the command or snippet does, not every token in it.
 - Preserve exact syntax only when the user must copy it back.
 - Summarize nested structure instead of reading punctuation aloud.

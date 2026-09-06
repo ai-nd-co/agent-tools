@@ -34,6 +34,13 @@ TAILSCALE_IP = "100.64.10.20"
 BEARER = "task320-local-bearer-0123456789abcdef"
 
 
+def test_child_interpreter_disables_bytecode_in_protected_package(tmp_path, monkeypatch):
+    captured = []
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda argv, **kwargs: captured.append(argv))
+    bridge._spawn_service(_config(tmp_path, 50000), "fixture")
+    assert captured[0][1:4] == ("-I", "-B", "-c")
+
+
 @dataclass
 class FakeNetwork:
     adapters_value: tuple[AdapterSnapshot, ...]

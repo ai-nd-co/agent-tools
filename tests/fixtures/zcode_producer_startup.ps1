@@ -1,11 +1,15 @@
 param([string]$Helper,[string]$Scenario,[string]$FixtureRoot)
 $ErrorActionPreference='Stop'
+$env:NODE_OPTIONS='fixture injection must not reach producer'
+$env:NODE_PATH='C:\fixture\mutable'
+$env:ELECTRON_RUN_AS_NODE='1'
 $global:Task354Launches=0
 $global:Task354FixtureExe=Join-Path $FixtureRoot 'ZCode.exe'
 [IO.File]::WriteAllText($global:Task354FixtureExe,'disposable non-executable identity fixture')
 $hash=(Get-FileHash -LiteralPath $global:Task354FixtureExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 function Start-Process { param($FilePath,$WorkingDirectory,$WindowStyle)
+    if($env:NODE_OPTIONS -or $env:NODE_PATH -or $env:ELECTRON_RUN_AS_NODE) {throw 'inherited producer injection'}
     if($FilePath -ne $global:Task354FixtureExe -or $WindowStyle -ne 'Hidden') {throw 'bad fixture launch'}
     $global:Task354Launches++
 }

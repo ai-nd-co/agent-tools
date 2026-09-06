@@ -171,10 +171,10 @@ def render_task_xml(owner_sid: str, command: Path, arguments: list[str], working
 
 
 def _high_owner_session(pid: int, owner_sid: str) -> bool:
-    import win32api
-    import win32con
-    import win32security
-    import win32ts
+    import win32api  # type: ignore[import-untyped]
+    import win32con  # type: ignore[import-untyped]
+    import win32security  # type: ignore[import-untyped]
+    import win32ts  # type: ignore[import-untyped]
 
     try:
         with closing(win32api.OpenProcess(0x1000, False, pid)) as process:

@@ -6,6 +6,10 @@ param(
     [ValidateRange(1,60)][int]$TimeoutSeconds = 60
 )
 $ErrorActionPreference = 'Stop'
+$env:PSModulePath=Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\Modules'
+$env:NODE_OPTIONS=$null
+$env:NODE_PATH=$null
+$env:ELECTRON_RUN_AS_NODE=$null
 # Do not emit process arguments: they can contain enrolled relay credentials.
 Add-Type -TypeDefinition @'
 using System;

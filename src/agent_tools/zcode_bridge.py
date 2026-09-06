@@ -987,6 +987,7 @@ def _spawn_service(config: BridgeConfig, launch_id: str) -> subprocess.Popen[byt
         (
             str(config.python_executable),
             "-I",
+            "-B",
             "-c",
             _BOOTSTRAP,
             str(config.module_file.parent.parent),

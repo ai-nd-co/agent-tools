@@ -871,6 +871,49 @@ def test_relay_controller_requires_ready_workspace_and_forces_replay_delivery(
     assert scoped["deliveryKind"] == "web-remote-replayable"
 
 
+def test_vox_rename_and_stop_keep_exact_workspace_and_execution_guards(tmp_path: Path) -> None:
+    config = _config(tmp_path, _free_port())
+    controller = bridge._BridgeRelayController(config)
+    controller.workspace = {
+        "workspacePath": str(tmp_path.resolve()), "workspaceIdentity": "workspace-one"
+    }
+    controller._record_authorized_result("zcode-task", "listTasks", [
+        {"taskId": "owned-task", "workspacePath": str(tmp_path)},
+    ])
+    renamed = controller._scope_argument(
+        "zcode-task", "renameTask", {"taskId": "owned-task", "title": "Build review"}
+    )
+    assert renamed["workspacePath"] == str(config.workspace)
+    assert renamed["workspaceIdentity"] == "workspace-one"
+    assert renamed["title"] == "Build review"
+    with pytest.raises(BridgeError):
+        controller._scope_argument(
+            "zcode-task", "renameTask", {"taskId": "foreign-task", "title": "Wrong task"}
+        )
+    for title in ("", "x" * 121, "bad\nname"):
+        with pytest.raises(BridgeError):
+            controller._scope_argument(
+                "zcode-task", "renameTask", {"taskId": "owned-task", "title": title}
+            )
+    envelope = {
+        "commandId": "stop-one", "clientId": "phone", "sessionId": "owned-task",
+        "type": "stop", "payload": {"expectedForegroundExecutionId": "execution-one"}, "issuedAt": 1
+    }
+    scoped = controller._scope_argument(
+        "zcode-agent", "sendConversationCommandV4", {"envelope": envelope}
+    )
+    assert scoped["envelope"]["payload"] == {"expectedForegroundExecutionId": "execution-one"}
+    for payload in (
+        {}, {"expectedForegroundExecutionId": ""},
+        {"expectedForegroundExecutionId": "execution-one", "other": True}
+    ):
+        with pytest.raises(BridgeError):
+            controller._scope_argument(
+                "zcode-agent", "sendConversationCommandV4",
+                {"envelope": {**envelope, "payload": payload}}
+            )
+
+
 def test_relay_controller_restricts_v4_command_types(tmp_path: Path) -> None:
     controller = bridge._BridgeRelayController(_config(tmp_path, _free_port()))
     controller.workspace = {"workspacePath": str(tmp_path.resolve())}

@@ -89,6 +89,7 @@ _ALLOWED_CALLS = frozenset(
     {
         ("zcode-task", "listTasks"),
         ("zcode-task", "createTask"),
+        ("zcode-task", "renameTask"),
         ("zcode-task", "sendPrompt"),
         ("zcode-task", "getTaskSnapshot"),
         ("zcode-task", "respondPermission"),
@@ -107,9 +108,10 @@ _ALLOWED_EVENTS = frozenset(
         ("zcode-agent", "onDynamicSessionEvent"),
     }
 )
-_ALLOWED_V4_COMMANDS = frozenset({"cancelBackgroundWork", "sendText"})
+_ALLOWED_V4_COMMANDS = frozenset({"cancelBackgroundWork", "sendText", "stop"})
 _TASK_ID_OPERATIONS = frozenset(
     {
+        ("zcode-task", "renameTask"),
         ("zcode-task", "sendPrompt"),
         ("zcode-task", "getTaskSnapshot"),
         ("zcode-task", "respondPermission"),
@@ -131,6 +133,7 @@ _OPERATION_FIELDS = {
     ("zcode-task", "listTasks"): _WORKSPACE_FIELDS,
     ("zcode-task", "createTask"): _WORKSPACE_FIELDS
     | {"mode", "deferPersistenceUntilFirstPrompt"},
+    ("zcode-task", "renameTask"): _WORKSPACE_FIELDS | {"taskId", "title"},
     ("zcode-task", "sendPrompt"): {
         "taskId",
         "traceId",
@@ -159,6 +162,7 @@ _OPERATION_FIELDS = {
 }
 _WORKSPACE_SCOPED_OPERATIONS = frozenset(
     {
+        ("zcode-task", "renameTask"),
         ("zcode-task", "listTasks"),
         ("zcode-task", "createTask"),
         ("zcode-task", "getTaskSnapshot"),
@@ -1509,6 +1513,14 @@ class _BridgeRelayController:
                 "Send only the documented fields for this bridge operation.",
             )
         argument = dict(argument)
+        if pair == ("zcode-task", "renameTask"):
+            title = argument.get("title")
+            if not isinstance(title, str) or not title.strip() or len(title) > 120 or any(
+                ord(char) < 32 or ord(char) == 127 for char in title
+            ):
+                raise BridgeError(
+                    "invalid_title", "The conversation name is invalid.", "Use a short name."
+                )
         if pair in {
             ("zcode-task", "sendPrompt"),
             ("zcode-task", "getTaskSnapshot"),
@@ -1548,8 +1560,20 @@ class _BridgeRelayController:
                 raise BridgeError(
                     "conversation_command_not_allowed",
                     "The V4 conversation command is not exposed by this bridge.",
-                    "Use sendText or cancelBackgroundWork for one authorized session.",
+                    "Use one supported command for an authorized session.",
                 )
+            if envelope.get("type") == "stop":
+                payload = envelope["payload"]
+                expected = payload.get("expectedForegroundExecutionId")
+                if (
+                    set(payload) != {"expectedForegroundExecutionId"}
+                    or not isinstance(expected, str)
+                    or not _NAME_RE.fullmatch(expected)
+                ):
+                    raise BridgeError(
+                        "stop_target_missing", "The exact work to stop is unknown.",
+                        "Check the conversation on the computer."
+                    )
             envelope["clientId"] = self._client_id
             argument["envelope"] = envelope
         self._authorize_target_ids(channel, operation, argument)
@@ -2260,6 +2284,8 @@ def _serve_client(connection: WebSocketConnection, service: _BridgeService) -> N
                 "serverId": service.config.server_id,
                 "generation": service.controller.relay_generation,
                 "zcodeVersion": service.config.zcode_version,
+                "workspacePath": str(service.config.workspace),
+                "capabilities": ["taskRename", "guardedStop", "completeTaskList"],
             }
         )
         while True:

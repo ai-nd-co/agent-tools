@@ -214,13 +214,13 @@ def _verify_pairing_permissions(path: Path, metadata: os.stat_result) -> None:
         owner = descriptor.GetSecurityDescriptorOwner()
         acl = descriptor.GetSecurityDescriptorDacl()
         current_text = win32security.ConvertSidToStringSid(current)
+        allowed = {current_text, "S-1-5-18", "S-1-5-32-544"}
         if (
-            win32security.ConvertSidToStringSid(owner) != current_text
+            win32security.ConvertSidToStringSid(owner) not in allowed
             or acl is None
             or acl.GetAceCount() < 1
         ):
             raise OSError("unsafe owner")
-        allowed = {current_text, "S-1-5-18", "S-1-5-32-544"}
         granting = {
             win32security.ACCESS_ALLOWED_ACE_TYPE,
             getattr(win32security, "ACCESS_ALLOWED_COMPOUND_ACE_TYPE", 4),

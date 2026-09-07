@@ -149,6 +149,27 @@ def test_create_kokoro_pipeline_uses_offline_english_fallback(
     assert isinstance(pipeline.g2p, FakeEspeakG2P)
 
 
+def test_kokoro_prewarm_is_reused_with_a_bounded_model_cache(monkeypatch: object) -> None:
+    import agent_tools.tts as tts_module
+
+    created: list[object] = []
+
+    class Pipeline:
+        def __init__(self, **_kwargs: object) -> None:
+            created.append(self)
+
+    monkeypatch.setattr(tts_module, "_has_spacy_english_model", lambda: True)
+    first = tts_module._create_kokoro_pipeline(Pipeline, lang_code="a", device="cpu")
+    again = tts_module._create_kokoro_pipeline(Pipeline, lang_code="a", device="cpu")
+    assert first is again
+    assert len(created) == 1
+    tts_module._create_kokoro_pipeline(Pipeline, lang_code="b", device="cpu")
+    tts_module._create_kokoro_pipeline(Pipeline, lang_code="f", device="cpu")
+    assert tts_module._create_kokoro_pipeline(Pipeline, lang_code="a", device="cpu") is not first
+    assert tts_module._create_kokoro_pipeline.cache_info().currsize == 2
+    tts_module._create_kokoro_pipeline.cache_clear()
+
+
 def test_spacy_model_detection_uses_distribution_not_importable_module(
     monkeypatch: object,
 ) -> None:

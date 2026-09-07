@@ -3,6 +3,7 @@ from __future__ import annotations
 import platform
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from importlib import metadata as importlib_metadata
 from math import isfinite
 from time import perf_counter
@@ -349,6 +350,7 @@ def _load_kokoro_pipeline() -> Any:
     return KPipeline
 
 
+@lru_cache(maxsize=2)
 def _create_kokoro_pipeline(KPipeline: Any, *, lang_code: str, device: str) -> Any:
     if lang_code not in {"a", "b"} or _has_spacy_english_model():
         return KPipeline(lang_code=lang_code, repo_id=KOKORO_REPO_ID, device=device)

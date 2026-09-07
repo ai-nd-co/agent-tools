@@ -5,7 +5,7 @@ import json
 import socket
 import threading
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -914,6 +914,106 @@ def test_vox_rename_and_stop_keep_exact_workspace_and_execution_guards(tmp_path:
             )
 
 
+def test_opted_in_create_keeps_the_selected_location_for_later_reads_and_stop(
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(tmp_path, _free_port()), allow_workspace_selection=True)
+    other = tmp_path / "another-project"
+    other.mkdir()
+    controller = bridge._BridgeRelayController(config)
+    controller.workspace = {"workspacePath": str(config.workspace)}
+    controller.relay_generation = 1
+
+    class Rpc:
+        def call(self, channel: str, method: str, argument: object, timeout: float) -> object:
+            assert (channel, method) == ("zcode-task", "createTask")
+            assert argument["workspacePath"] == str(other.resolve())
+            assert argument["v4Create"] is True
+            return {"taskId": "created-local", "workspacePath": str(other.resolve())}
+
+    controller.rpc = Rpc()  # type: ignore[assignment]
+    controller.call(1, "zcode-task", "createTask", {"workspacePath": str(other), "mode": "yolo"}, 1)
+    read = controller._scope_argument("zcode-task", "getTaskSnapshot", {"taskId": "created-local"})
+    assert read["workspacePath"] == str(other.resolve())
+    envelope = {"commandId": "stop-one", "clientId": "phone", "sessionId": "created-local",
+                "type": "stop", "payload": {"expectedForegroundExecutionId": "execution-one"}}
+    stop = controller._scope_argument(
+        "zcode-agent", "sendConversationCommandV4", {"envelope": envelope}
+    )
+    assert stop["workspacePath"] == str(other.resolve())
+    assert stop["envelope"]["payload"] == envelope["payload"]
+    with pytest.raises(BridgeError, match="different workspace"):
+        controller._scope_argument("zcode-task", "getTaskSnapshot", {
+            "taskId": "created-local", "workspacePath": str(config.workspace),
+        })
+
+
+def test_opted_in_catalog_includes_pinned_local_tasks_without_losing_locations(
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(tmp_path, _free_port()), allow_workspace_selection=True)
+    controller = bridge._BridgeRelayController(config)
+    controller.workspace = {"workspacePath": str(config.workspace)}
+    controller.relay_generation = 1
+    first = {"taskId": "first", "workspacePath": str(tmp_path)}
+    other = {"taskId": "other", "workspacePath": str(tmp_path / "other")}
+    pinned = {"taskId": "pinned", "workspacePath": str(tmp_path)}
+    methods = []
+
+    class Rpc:
+        def call(self, channel: str, method: str, argument: object, timeout: float) -> object:
+            methods.append(method)
+            assert argument == {}
+            assert 0 < timeout <= 1
+            return [first, other] if method == "listTasks" else [other, pinned]
+
+    controller.rpc = Rpc()  # type: ignore[assignment]
+    result = controller.call(1, "zcode-task", "listTasks", {}, 1)
+    assert result == [first, other, pinned]
+    assert methods == ["listTasks", "listPinnedTasks"]
+    assert controller._scope_argument("zcode-task", "getTaskSnapshot", {"taskId": "other"})[
+        "workspacePath"
+    ] == str(tmp_path / "other")
+
+
+def test_conflicting_global_task_locations_fail_before_authorizing_any_target(
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(tmp_path, _free_port()), allow_workspace_selection=True)
+    controller = bridge._BridgeRelayController(config)
+    controller.workspace = {"workspacePath": str(config.workspace)}
+    controller.relay_generation = 1
+
+    class Rpc:
+        def call(self, channel: str, method: str, argument: object, timeout: float) -> object:
+            path = tmp_path if method == "listTasks" else tmp_path / "other"
+            return [{"taskId": "duplicate", "workspacePath": str(path)}]
+
+    controller.rpc = Rpc()  # type: ignore[assignment]
+    with pytest.raises(BridgeError) as failure:
+        controller.call(1, "zcode-task", "listTasks", {}, 1)
+    assert failure.value.code == "catalog_scope_conflict"
+    assert not controller._known_task_ids
+
+
+def test_directory_browser_reads_only_folders_and_needs_explicit_configuration(
+    tmp_path: Path,
+) -> None:
+    base = _config(tmp_path, _free_port())
+    (tmp_path / "project").mkdir()
+    (tmp_path / "private-file.txt").write_text("test-owned content")
+    controller = bridge._BridgeRelayController(replace(base, allow_workspace_selection=True))
+    controller.relay_generation = 1
+    controller.rpc = object()  # type: ignore[assignment]
+    result = controller.call(1, "vox-files", "listDirectories", {"path": str(tmp_path)}, 1)
+    assert result["path"] == str(tmp_path.resolve())
+    assert {entry["fileName"] for entry in result["entries"]} == {"project"}
+    scoped = bridge._BridgeRelayController(base)
+    with pytest.raises(BridgeError) as failure:
+        scoped._scope_argument("vox-files", "listDirectories", {"path": str(tmp_path)})
+    assert failure.value.code == "operation_not_allowed"
+
+
 def test_relay_controller_restricts_v4_command_types(tmp_path: Path) -> None:
     controller = bridge._BridgeRelayController(_config(tmp_path, _free_port()))
     controller.workspace = {"workspacePath": str(tmp_path.resolve())}
@@ -970,6 +1070,71 @@ def test_relay_controller_fails_closed_after_rebind_commit(
 
     assert controller.fatal is not None
     assert controller.fatal.code == "relay_reconnect_commit_failed"
+
+
+def test_relay_network_outage_keeps_server_recoverable_without_replaying_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = bridge._BridgeRelayController(_config(tmp_path, _free_port()))
+
+    class FailedTerminal:
+        failure = bridge.ZCodeRelayError("websocket_closed")
+
+        @staticmethod
+        def wait_failed(_timeout: float) -> bool:
+            return True
+
+    controller.terminal = FailedTerminal()  # type: ignore[assignment]
+    now = [0.0]
+    attempts = []
+    monkeypatch.setattr(bridge.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: now[0])
+
+    def connect(*, reconnect: bool) -> None:
+        assert reconnect
+        attempts.append(1)
+        if len(attempts) <= bridge.MAX_RECONNECTS:
+            raise bridge.RelayClosedError("websocket_io_error")
+        controller.last_code = "ready"
+
+    monkeypatch.setattr(controller, "_connect", connect)
+    controller.monitor(0)
+    assert controller.fatal is None
+    assert controller.last_code == "reconnecting"
+    with pytest.raises(BridgeError) as error:
+        controller.call(1, "zcode-task", "listTasks", {}, 1)
+    assert error.value.code == "relay_reconnecting"
+    now[0] = 59
+    controller.monitor(0)
+    assert len(attempts) == bridge.MAX_RECONNECTS
+    now[0] = 61
+    controller.monitor(0)
+    assert len(attempts) == bridge.MAX_RECONNECTS + 1
+    assert controller.fatal is None
+    assert controller.last_code == "ready"
+
+
+def test_relay_auth_failure_is_not_treated_as_a_network_outage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    controller = bridge._BridgeRelayController(_config(tmp_path, _free_port()))
+
+    class FailedTerminal:
+        failure = bridge.ZCodeRelayError("websocket_closed")
+
+        @staticmethod
+        def wait_failed(_timeout: float) -> bool:
+            return True
+
+    controller.terminal = FailedTerminal()  # type: ignore[assignment]
+    monkeypatch.setattr(bridge.time, "sleep", lambda _delay: None)
+    def connect(*, reconnect: bool) -> None:
+        raise bridge.ZCodeRelayError("auth_failed")
+    monkeypatch.setattr(controller, "_connect", connect)
+    controller.monitor(0)
+    assert controller.fatal is not None
+    assert controller.fatal.code == "auth_failed"
+    assert controller.reconnect_count == 1
 
 
 def test_prepare_rejects_plaintext_lan_mode(tmp_path: Path) -> None:

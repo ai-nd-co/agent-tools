@@ -1523,7 +1523,12 @@ class RelayTerminal:
             raise self._failure
         if not self._connection:
             raise RelayClosedError("relay_not_connected")
-        self._connection.send_json(value)
+        try:
+            self._connection.send_json(value)
+        except OSError as error:
+            self._failure = RelayClosedError("relay_io_error")
+            self._failure_event.set()
+            raise self._failure from error
 
     def _receive_loop(self) -> None:
         try:

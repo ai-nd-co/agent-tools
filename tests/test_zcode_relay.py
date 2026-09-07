@@ -33,6 +33,22 @@ from agent_tools.zcode_relay import (
 )
 
 
+def test_heartbeat_write_failure_wakes_the_existing_reconnect_monitor() -> None:
+    terminal = relay.RelayTerminal(relay.RelayIdentity("sid", "mid", "hash"))
+
+    class BrokenConnection:
+        @staticmethod
+        def send_json(_value: object) -> None:
+            raise ConnectionResetError("test-owned transport failure")
+
+    terminal._connection = BrokenConnection()  # type: ignore[assignment]
+    with pytest.raises(relay.RelayClosedError, match="relay_io_error"):
+        terminal.heartbeat()
+    assert terminal.wait_failed(0)
+    assert terminal.failure is not None
+    assert terminal.failure.code == "relay_io_error"
+
+
 def test_vsbuffer_tag_three_and_nested_values_round_trip() -> None:
     direct = VSBuffer(b"\x00buffer\xff")
     nested = {"direct": direct, "bytes": b"nested"}

@@ -871,6 +871,25 @@ def test_relay_controller_requires_ready_workspace_and_forces_replay_delivery(
     assert scoped["deliveryKind"] == "web-remote-replayable"
 
 
+@pytest.mark.parametrize("cursor", [0, 12, -1, True, "12", 1.5, 2**53])
+def test_native_session_replay_cursor_is_bounded_and_preserves_scope(
+    tmp_path: Path, cursor: object,
+) -> None:
+    controller = bridge._BridgeRelayController(_config(tmp_path, _free_port()))
+    controller.workspace = {"workspacePath": str(tmp_path.resolve())}
+    controller._known_session_ids.add("owned-session")
+    args = {"sessionId": "owned-session", "afterSeq": cursor, "includeSnapshot": True}
+    if type(cursor) is not int or not 0 <= cursor <= 2**53 - 1:
+        with pytest.raises(BridgeError) as failure:
+            controller._scope_argument("zcode-agent", "onDynamicSessionEvent", args)
+        assert failure.value.code == "operation_argument_invalid"
+    else:
+        scoped = controller._scope_argument("zcode-agent", "onDynamicSessionEvent", args)
+        assert scoped["afterSeq"] == cursor
+        assert scoped["workspacePath"] == str(tmp_path.resolve())
+        assert scoped["deliveryKind"] == "web-remote-replayable"
+
+
 def test_vox_rename_and_stop_keep_exact_workspace_and_execution_guards(tmp_path: Path) -> None:
     config = _config(tmp_path, _free_port())
     controller = bridge._BridgeRelayController(config)

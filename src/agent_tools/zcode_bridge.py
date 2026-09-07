@@ -161,7 +161,7 @@ _OPERATION_FIELDS = {
     ("zcode-task", "onDynamicTaskEvent"): _WORKSPACE_FIELDS
     | {"taskId", "deliveryKind"},
     ("zcode-agent", "onDynamicSessionEvent"): _WORKSPACE_FIELDS
-    | {"sessionId", "deliveryKind", "includeSnapshot"},
+    | {"sessionId", "deliveryKind", "includeSnapshot", "afterSeq"},
 }
 _WORKSPACE_SCOPED_OPERATIONS = frozenset(
     {
@@ -1626,6 +1626,13 @@ class _BridgeRelayController:
             argument["deliveryKind"] = "replayable"
         if pair == ("zcode-agent", "onDynamicSessionEvent"):
             argument["deliveryKind"] = "web-remote-replayable"
+            if "afterSeq" in argument and (
+                type(argument["afterSeq"]) is not int or not 0 <= argument["afterSeq"] <= 2**53 - 1
+            ):
+                raise BridgeError(
+                    "operation_argument_invalid", "The replay cursor is invalid.",
+                    "Reconnect with a valid saved event cursor.",
+                )
         is_v4_command = channel == "zcode-agent" and operation == "sendConversationCommandV4"
         if is_v4_command:
             if not isinstance(argument, Mapping) or not isinstance(
@@ -2458,7 +2465,7 @@ def _serve_client(connection: WebSocketConnection, service: _BridgeService) -> N
                 "zcodeVersion": service.config.zcode_version,
                 "workspacePath": str(service.config.workspace),
                 "homePath": str(Path.home()),
-                "capabilities": ["taskRename", "guardedStop", "completeTaskList"] +
+                "capabilities": ["taskRename", "guardedStop", "completeTaskList", "sessionReplay"] +
                     (["workspaceSelection"] if service.config.allow_workspace_selection else []),
             }
         )

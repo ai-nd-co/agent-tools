@@ -16,6 +16,7 @@ import threading
 import warnings
 import wave
 from collections.abc import Callable
+from ctypes import wintypes
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,23 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from agent_tools.ttsify import TtsifyOptions, TtsifyResult, ttsify_text
+
+
+# ctypes caches pointer types for the lifetime of the process. These structures
+# must not be recreated by each credential check in the startup polling loop.
+class _WindowsAcl(ctypes.Structure):
+    _fields_ = [
+        ("revision", ctypes.c_ubyte), ("reserved1", ctypes.c_ubyte),
+        ("size", wintypes.WORD), ("ace_count", wintypes.WORD), ("reserved2", wintypes.WORD),
+    ]
+
+
+class _WindowsSidAndAttributes(ctypes.Structure):
+    _fields_ = [("sid", wintypes.LPVOID), ("attributes", wintypes.DWORD)]
+
+
+class _WindowsTokenUser(ctypes.Structure):
+    _fields_ = [("user", _WindowsSidAndAttributes)]
 
 DEFAULT_TTS_SERVER_HOST = "127.0.0.1"
 DEFAULT_TTS_SERVER_PORT = 4223
@@ -831,21 +849,6 @@ def _verify_windows_owner_only_acl_native(path: Path) -> None:
     access_allowed_ace_type = 0
     access_granting_ace_types = {0, 4, 5, 9, 11}
 
-    class Acl(ctypes.Structure):
-        _fields_ = [
-            ("revision", ctypes.c_ubyte),
-            ("reserved1", ctypes.c_ubyte),
-            ("size", wintypes.WORD),
-            ("ace_count", wintypes.WORD),
-            ("reserved2", wintypes.WORD),
-        ]
-
-    class SidAndAttributes(ctypes.Structure):
-        _fields_ = [("sid", wintypes.LPVOID), ("attributes", wintypes.DWORD)]
-
-    class TokenUser(ctypes.Structure):
-        _fields_ = [("user", SidAndAttributes)]
-
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     advapi32.OpenProcessToken.argtypes = [
@@ -868,13 +871,13 @@ def _verify_windows_owner_only_acl_native(path: Path) -> None:
         wintypes.DWORD,
         ctypes.POINTER(wintypes.LPVOID),
         ctypes.POINTER(wintypes.LPVOID),
-        ctypes.POINTER(ctypes.POINTER(Acl)),
-        ctypes.POINTER(ctypes.POINTER(Acl)),
+        ctypes.POINTER(ctypes.POINTER(_WindowsAcl)),
+        ctypes.POINTER(ctypes.POINTER(_WindowsAcl)),
         ctypes.POINTER(wintypes.LPVOID),
     ]
     advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
     advapi32.GetAce.argtypes = [
-        ctypes.POINTER(Acl),
+        ctypes.POINTER(_WindowsAcl),
         wintypes.DWORD,
         ctypes.POINTER(wintypes.LPVOID),
     ]
@@ -913,10 +916,10 @@ def _verify_windows_owner_only_acl_native(path: Path) -> None:
             ctypes.byref(required),
         ):
             raise OSError("current user identity could not be read")
-        current_sid = ctypes.cast(token_buffer, ctypes.POINTER(TokenUser)).contents.user.sid
+        current_sid = ctypes.cast(token_buffer, ctypes.POINTER(_WindowsTokenUser)).contents.user.sid
 
         owner_sid = wintypes.LPVOID()
-        dacl = ctypes.POINTER(Acl)()
+        dacl = ctypes.POINTER(_WindowsAcl)()
         status = advapi32.GetNamedSecurityInfoW(
             str(path),
             se_file_object,

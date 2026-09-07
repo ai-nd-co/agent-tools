@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import struct
+import sys
 import threading
 from pathlib import Path
 
@@ -249,6 +250,37 @@ def test_relay_assembly_expires_without_another_payload() -> None:
     assert receiver.accept(frames[0])
     assert degraded.wait(0.5)
     assert receiver.degraded_code == "assembly_timeout"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL contract")
+def test_pairing_store_accepts_elevated_owner_but_rejects_other_readers(tmp_path: Path) -> None:
+    import ntsecuritycon
+    import win32api
+    import win32con
+    import win32security
+
+    path = tmp_path / "pair.json"
+    path.write_text("{}", encoding="ascii")
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    if not win32security.GetTokenInformation(token, win32security.TokenElevation):
+        token.Close()
+        pytest.skip("Assigning the real Administrators owner requires elevation")
+    current = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    token.Close()
+    admins = win32security.ConvertStringSidToSid("S-1-5-32-544")
+    acl = win32security.ACL()
+    for sid in (current, admins):
+        acl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_ALL_ACCESS, sid)
+    win32security.SetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+        win32security.OWNER_SECURITY_INFORMATION | win32security.DACL_SECURITY_INFORMATION |
+        win32security.PROTECTED_DACL_SECURITY_INFORMATION, admins, None, acl, None)
+    assert relay._stable_json_file(path, 100) == {}
+    acl.AddAccessAllowedAce(win32security.ACL_REVISION, win32con.GENERIC_READ,
+        win32security.ConvertStringSidToSid("S-1-1-0"))
+    win32security.SetNamedSecurityInfo(str(path), win32security.SE_FILE_OBJECT,
+        win32security.DACL_SECURITY_INFORMATION, None, None, acl, None)
+    with pytest.raises(ZCodeRelayError, match="relay_pair_store_invalid"):
+        relay._stable_json_file(path, 100)
 
 
 def test_pairing_store_rejects_unverifiable_permissions(

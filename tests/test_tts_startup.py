@@ -1819,6 +1819,66 @@ def test_startup_inspection_does_not_import_synthesis_dependencies() -> None:
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows file sharing semantics")
+def test_state_publication_survives_a_brief_concurrent_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    path = tmp_path / "runtime-state.json"
+    startup._write_private_text(path, "old state")
+    reader = path.open("rb")
+    released = threading.Event()
+    denied = threading.Event()
+    replace = startup.os.replace
+
+    def observe_replace(source: Path, target: Path) -> None:
+        try:
+            replace(source, target)
+        except PermissionError:
+            denied.set()
+            raise
+
+    monkeypatch.setattr(startup.os, "replace", observe_replace)
+
+    def close_reader() -> None:
+        denied.wait(2)
+        reader.close()
+        released.set()
+
+    thread = threading.Thread(target=close_reader)
+    thread.start()
+    try:
+        startup._write_private_text(path, "new state")
+        assert released.wait(1)
+        assert path.read_text() == "new state"
+        assert not list(tmp_path.glob("*.tmp"))
+    finally:
+        thread.join(timeout=2)
+
+
+def test_state_publication_does_not_hide_permanent_access_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "runtime-state.json"
+    startup._write_private_text(path, "old state")
+    attempts: list[int] = []
+
+    def deny(_source: Path, _target: Path) -> None:
+        attempts.append(1)
+        error = PermissionError("permanent denial")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(startup.os, "replace", deny)
+    monkeypatch.setattr(startup.time, "sleep", lambda _seconds: None)
+    with pytest.raises(PermissionError, match="permanent denial"):
+        startup._write_private_text(path, "new state")
+    assert len(attempts) == 11
+    assert path.read_text() == "old state"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_windows_listener_detection_includes_wildcard_bind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

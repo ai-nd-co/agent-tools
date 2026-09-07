@@ -1285,7 +1285,11 @@ def _publish_state(
         restart_count=restart_count,
         authenticated_ready=authenticated_ready,
     )
-    _write_private_json(config.state_directory / STATE_FILENAME, asdict(state))
+    try:
+        _write_private_json(config.state_directory / STATE_FILENAME, asdict(state))
+    except OSError:
+        _append_redacted_event(config.log_directory, "state_write_failed")
+        raise
 
 
 def _read_runtime_state(path: Path) -> RuntimeState | None:
@@ -1999,7 +2003,16 @@ def _write_private_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt in range(11):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                # Windows readers can briefly deny atomic replacement. Keep the old
+                # complete state and retry for at most 250ms; permanent denial still fails.
+                if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 10:
+                    raise
+                time.sleep(0.025)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
@@ -2242,7 +2255,7 @@ class WindowsRuntimeBackend:
 
 
 def _append_redacted_event(log_directory: Path, event: str) -> None:
-    if event not in {"child_spawn"}:
+    if event not in {"child_spawn", "state_write_failed"}:
         raise ValueError("unsupported TTS startup event")
     path = log_directory / EVENT_LOG_FILENAME
     data = (json.dumps({"event": event}, separators=(",", ":")) + "\n").encode("ascii")

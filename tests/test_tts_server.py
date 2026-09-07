@@ -204,15 +204,13 @@ def test_hung_prewarm_is_bounded_and_never_becomes_ready() -> None:
 def test_default_synthesizer_uses_no_transform_and_maps_api_language(
     monkeypatch: Any,
 ) -> None:
-    import agent_tools.tts_server as server_module
-
     captured: dict[str, object] = {}
 
     def fake_ttsify(text: str, options: object) -> Any:
         captured.update(text=text, options=options)
         return _result("ru")
 
-    monkeypatch.setattr(server_module, "ttsify_text", fake_ttsify)
+    monkeypatch.setattr("agent_tools.ttsify.ttsify_text", fake_ttsify)
 
     result = _synthesize_prepared_text("Точный текст.", "ru-RU", "cpu")
 

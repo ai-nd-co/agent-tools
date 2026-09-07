@@ -1802,6 +1802,23 @@ def test_execution_lock_polling_does_not_retain_new_ctypes_types(tmp_path: Path)
     assert len(ctypes._pointer_type_cache) == baseline
 
 
+def test_startup_inspection_does_not_import_synthesis_dependencies() -> None:
+    import subprocess
+
+    source = str(Path(startup.__file__).resolve().parent.parent)
+    script = (
+        "import sys; sys.path.insert(0, " + repr(source) + "); "
+        "import agent_tools.tts_startup; "
+        "assert 'numpy' not in sys.modules; "
+        "assert 'torch' not in sys.modules; "
+        "assert 'agent_tools.ttsify' not in sys.modules"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", script], capture_output=True, timeout=15
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+
+
 def test_windows_listener_detection_includes_wildcard_bind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

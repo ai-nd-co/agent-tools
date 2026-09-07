@@ -21,10 +21,11 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from agent_tools.ttsify import TtsifyOptions, TtsifyResult, ttsify_text
+if TYPE_CHECKING:
+    from agent_tools.ttsify import TtsifyResult
 
 
 # ctypes caches pointer types for the lifetime of the process. These structures
@@ -116,7 +117,7 @@ class TtsAudioResponse:
     language: str
 
 
-Synthesizer = Callable[[str, str, str], TtsifyResult]
+Synthesizer = Callable[[str, str, str], "TtsifyResult"]
 
 
 class TtsService:
@@ -645,6 +646,8 @@ def load_owner_only_bearer_token(path: Path) -> str:
 
 
 def _synthesize_prepared_text(text: str, language: str, device: str) -> TtsifyResult:
+    from agent_tools.ttsify import TtsifyOptions, ttsify_text
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return ttsify_text(

@@ -230,6 +230,7 @@ def _load_torch() -> Any:
 @lru_cache(maxsize=2)
 def _load_silero_model_cached(model_path: str, device: str) -> Any:
     torch = _load_torch()
+    thread_count = torch.get_num_threads()
     try:
         model = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
         model.to(torch.device(device))
@@ -240,4 +241,8 @@ def _load_silero_model_cached(model_path: str, device: str) -> Any:
             "The cached official Silero v5_5_ru model could not be loaded. "
             f"cache={model_path} device={device} error={exc}"
         ) from exc
+    finally:
+        # The packaged model sets the process-wide count to one during import,
+        # slowing every subsequent Kokoro request in the same speech server.
+        torch.set_num_threads(thread_count)
     return model

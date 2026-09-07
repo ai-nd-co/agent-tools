@@ -5,6 +5,7 @@ import io
 import wave
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import URLError
 
 import numpy as np
@@ -20,6 +21,42 @@ class FakeResponse(io.BytesIO):
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_loading_silero_preserves_shared_torch_thread_count(
+    monkeypatch: pytest.MonkeyPatch, load_fails: bool,
+) -> None:
+    import agent_tools.silero_tts as silero_module
+
+    threads = 8
+
+    def set_threads(value: int) -> None:
+        nonlocal threads
+        threads = value
+
+    def load(*_args: object) -> object:
+        set_threads(1)
+        if load_fails:
+            raise RuntimeError("model load failed")
+        return SimpleNamespace(to=lambda _device: None, eval=lambda: None)
+
+    torch = SimpleNamespace(
+        get_num_threads=lambda: threads, set_num_threads=set_threads,
+        device=lambda value: value,
+        package=SimpleNamespace(PackageImporter=lambda _path: SimpleNamespace(load_pickle=load)),
+    )
+    monkeypatch.setattr(silero_module, "_load_torch", lambda: torch)
+    silero_module._load_silero_model_cached.cache_clear()
+    try:
+        if load_fails:
+            with pytest.raises(RuntimeError, match="could not be loaded"):
+                silero_module._load_silero_model_cached("test-model.pt", "cpu")
+        else:
+            silero_module._load_silero_model_cached("test-model.pt", "cpu")
+        assert threads == 8
+    finally:
+        silero_module._load_silero_model_cached.cache_clear()
 
 
 def _use_small_model_identity(monkeypatch: pytest.MonkeyPatch, payload: bytes) -> None:

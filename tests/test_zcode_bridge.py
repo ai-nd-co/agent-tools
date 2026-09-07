@@ -890,6 +890,59 @@ def test_native_session_replay_cursor_is_bounded_and_preserves_scope(
         assert scoped["deliveryKind"] == "web-remote-replayable"
 
 
+def test_native_history_uses_explicit_turn_headers_and_latest_visible_answer() -> None:
+    result = bridge._native_turn_history("session-one", {"hasMore": False, "rows": [
+        {"rowId": 1, "turnId": "turn-one", "kind": "turnHeader", "state": "completedSuccess"},
+        {"rowId": 2, "turnId": "turn-one", "kind": "assistantText",
+         "state": "complete", "text": "preamble"},
+        {"rowId": 3, "turnId": "turn-other", "kind": "assistantText",
+         "state": "complete", "text": "unproven"},
+        {"rowId": 4, "turnId": "turn-one", "kind": "thinkingGroup", "text": "private reasoning"},
+        {"rowId": 5, "turnId": "turn-one", "kind": "assistantText",
+         "state": "complete", "text": "final answer"},
+        {"rowId": 6, "turnId": "turn-one", "kind": "assistantText",
+         "state": "complete", "text": "hidden", "visibility": "hidden"},
+    ]})
+    assert result == {
+        "version": 1, "sessionId": "session-one", "complete": True,
+        "turns": [{"turnId": "turn-one", "status": "completed", "finalText": "final answer"}],
+    }
+
+
+def test_native_history_never_substitutes_a_preamble_for_an_unfinished_answer() -> None:
+    result = bridge._native_turn_history("session-one", {"hasMore": False, "rows": [
+        {"rowId": 1, "turnId": "turn-one", "kind": "turnHeader", "state": "completedSuccess"},
+        {"rowId": 2, "turnId": "turn-one", "kind": "assistantText",
+         "state": "complete", "text": "preamble"},
+        {"rowId": 3, "turnId": "turn-one", "kind": "assistantText",
+         "state": "streaming", "text": "unfinished"},
+    ]})
+    assert result["turns"] == [] and result["complete"] is False
+
+
+@pytest.mark.parametrize("page", [
+    {}, {"rows": [], "hasMore": "false"},
+    {"hasMore": False, "rows": [{"rowId": True, "turnId": "turn-one"}]},
+    {"hasMore": False, "rows": [{"rowId": 1, "turnId": "bad id"}]},
+    {"hasMore": False, "rows": [
+        {"rowId": 1, "turnId": "turn-one", "kind": "turnHeader", "state": "invented"}]},
+])
+def test_native_history_rejects_invalid_proof(page: object) -> None:
+    with pytest.raises(BridgeError) as failure:
+        bridge._native_turn_history("session-one", page)
+    assert failure.value.code == "history_schema_invalid"
+
+
+def test_native_history_marks_bounded_or_paged_results_incomplete() -> None:
+    rows = [{"rowId": index, "turnId": f"turn-{index}", "kind": "turnHeader",
+             "state": "completedSuccess"}
+            for index in range(65)]
+    result = bridge._native_turn_history("session-one", {"hasMore": False, "rows": rows})
+    assert len(result["turns"]) == 64 and result["complete"] is False
+    paged = bridge._native_turn_history("session-one", {"hasMore": True, "rows": []})
+    assert paged["complete"] is False
+
+
 def test_vox_rename_and_stop_keep_exact_workspace_and_execution_guards(tmp_path: Path) -> None:
     config = _config(tmp_path, _free_port())
     controller = bridge._BridgeRelayController(config)

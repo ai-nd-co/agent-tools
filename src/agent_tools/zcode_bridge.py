@@ -49,6 +49,7 @@ from agent_tools.zcode_relay import (
     AcknowledgedRelayProtocol,
     ChannelRpcClient,
     ChannelSubscription,
+    RelayClosedError,
     RelayConflictError,
     RelayFrameIdentity,
     RelayIdentity,
@@ -87,6 +88,7 @@ MAX_RECONNECTS = 3
 _NAME_RE = re.compile(r"^[A-Za-z0-9._/:-]{1,160}$")
 _ALLOWED_CALLS = frozenset(
     {
+        ("vox-files", "listDirectories"),
         ("zcode-task", "listTasks"),
         ("zcode-task", "createTask"),
         ("zcode-task", "renameTask"),
@@ -130,6 +132,7 @@ _SESSION_ID_OPERATIONS = frozenset(
 )
 _WORKSPACE_FIELDS = frozenset({"workspacePath", "workspaceIdentity"})
 _OPERATION_FIELDS = {
+    ("vox-files", "listDirectories"): frozenset({"path"}),
     ("zcode-task", "listTasks"): _WORKSPACE_FIELDS,
     ("zcode-task", "createTask"): _WORKSPACE_FIELDS
     | {"mode", "deferPersistenceUntilFirstPrompt"},
@@ -226,6 +229,7 @@ class BridgeConfig:
     server_id: str
     identity_fingerprint: str
     relay_url: str
+    allow_workspace_selection: bool = False
 
 
 @dataclass(frozen=True)
@@ -504,6 +508,7 @@ def prepare_bridge(
     trust_lan: bool,
     network_backend: NetworkBackend,
     zcode_cli: Path | None = None,
+    allow_workspace_selection: bool = False,
 ) -> dict[str, object]:
     validate_bridge_bind(bind_address, port)
     if network_mode != "tailscale" or trust_lan:
@@ -555,6 +560,7 @@ def prepare_bridge(
             and current.zcode_cli == resolved_zcode
             and current.zcode_version == version
             and current.network_class == network.network_class
+            and current.allow_workspace_selection == allow_workspace_selection
         )
         if not expected:
             raise BridgeError(
@@ -583,6 +589,7 @@ def prepare_bridge(
             "port": port,
             "networkClass": network.network_class,
             "workspace": str(resolved_workspace),
+            "allowWorkspaceSelection": allow_workspace_selection,
             "workspaceFingerprint": _workspace_fingerprint(resolved_workspace),
             "zcodeCli": str(resolved_zcode),
             "zcodeCliSha256": _sha256(resolved_zcode, "zcode_identity_invalid"),
@@ -655,8 +662,12 @@ def load_bridge_config(root: Path) -> BridgeConfig:
     try:
         raw = _read_private(path, MAX_CONFIG_BYTES)
         payload = json.loads(raw.decode("ascii"))
-        if not isinstance(payload, dict) or set(payload) != _CONFIG_FIELDS:
+        if not isinstance(payload, dict) or set(payload) not in (
+            _CONFIG_FIELDS, _CONFIG_FIELDS | {"allowWorkspaceSelection"}
+        ):
             raise ValueError("schema")
+        if type(payload.get("allowWorkspaceSelection", False)) is not bool:
+            raise ValueError("workspace selection")
         if payload["schema"] != BRIDGE_SCHEMA or payload["zcodeVersion"] != EXPECTED_ZCODE_VERSION:
             raise ValueError("schema")
         bind_address = str(payload["bindAddress"])
@@ -737,6 +748,7 @@ def load_bridge_config(root: Path) -> BridgeConfig:
         server_id=str(payload["serverId"]),
         identity_fingerprint=str(payload["identityFingerprint"]),
         relay_url=str(payload["relayUrl"]),
+        allow_workspace_selection=payload.get("allowWorkspaceSelection", False),
     )
     _validate_config_inputs(config)
     return config
@@ -1389,9 +1401,11 @@ class _BridgeRelayController:
         self._client_id = f"agenttools-{secrets.token_hex(16)}"
         self._known_task_ids: set[str] = set()
         self._known_session_ids: set[str] = set()
+        self._task_workspaces: dict[str, dict[str, object]] = {}
         self._reconnecting = False
         self._rebind_committed = False
         self._candidate_terminal: RelayTerminal | None = None
+        self._next_reconnect_at = 0.0
 
     @property
     def fatal(self) -> BridgeError | None:
@@ -1452,9 +1466,69 @@ class _BridgeRelayController:
                 "Wait for the next bridge status event, then retry safely.",
             )
         try:
+            if (channel, method) == ("vox-files", "listDirectories"):
+                selected = Path(str(scoped_argument["path"]))
+                directories = []
+                try:
+                    with os.scandir(selected) as entries:
+                        for entry in entries:
+                            if entry.is_dir(follow_symlinks=False):
+                                directories.append({
+                                    "fileName": entry.name, "isDirectory": True, "isFile": False,
+                                })
+                                if len(directories) > 512:
+                                    raise BridgeError(
+                                        "directory_too_large",
+                                        "This folder has too many subfolders.",
+                                        "Choose another folder.",
+                                    )
+                except OSError as error:
+                    raise BridgeError(
+                        "directory_unavailable", "The folder could not be opened.",
+                        "Choose another location.",
+                    ) from error
+                return {"path": str(selected), "entries": directories}
+            started_at = time.monotonic()
             result = rpc.call(channel, method, scoped_argument, timeout)
+            if self.config.allow_workspace_selection and (channel, method) == (
+                "zcode-task", "listTasks"
+            ):
+                if not isinstance(result, list):
+                    raise BridgeError(
+                        "catalog_schema_invalid", "The task catalog was invalid.",
+                        "Check ZCode on the computer.",
+                    )
+                remaining = timeout - (time.monotonic() - started_at)
+                if remaining <= 0:
+                    raise ZCodeRelayError("relay_operation_timeout")
+                pinned = rpc.call(channel, "listPinnedTasks", scoped_argument, remaining)
+                if not isinstance(pinned, list):
+                    raise BridgeError(
+                        "catalog_schema_invalid", "The pinned task catalog was invalid.",
+                        "Check ZCode on the computer.",
+                    )
+                unique: dict[str, object] = {}
+                scopes: dict[str, object] = {}
+                for item in result + pinned:
+                    workspace = self._local_task_workspace(item)
+                    if workspace is None or not isinstance(item, Mapping):
+                        continue
+                    task_id = item.get("taskId")
+                    if not isinstance(task_id, str) or not _NAME_RE.fullmatch(task_id):
+                        raise BridgeError(
+                            "catalog_schema_invalid", "A task identity was invalid.",
+                            "Check ZCode on the computer.",
+                        )
+                    if task_id in scopes and scopes[task_id] != workspace:
+                        raise BridgeError(
+                            "catalog_scope_conflict", "A task has conflicting locations.",
+                            "Resolve the duplicate on the computer.",
+                        )
+                    unique[task_id] = item
+                    scopes[task_id] = workspace
+                result = list(unique.values())
             with self._lock:
-                self._record_authorized_result(channel, method, result)
+                self._record_authorized_result(channel, method, result, scoped_argument)
             return result
         except ZCodeRelayError as exc:
             raise BridgeError(
@@ -1513,6 +1587,26 @@ class _BridgeRelayController:
                 "Send only the documented fields for this bridge operation.",
             )
         argument = dict(argument)
+        if pair == ("zcode-task", "createTask"):
+            # The desktop's legacy create path can index an unresumable session.
+            # Its V4 path creates and reads the actual session before returning.
+            argument["v4Create"] = True
+        if pair == ("vox-files", "listDirectories"):
+            if not self.config.allow_workspace_selection:
+                raise BridgeError(
+                    "operation_not_allowed", "Folder browsing is not enabled on this server.",
+                    "Enable workspace selection on the computer.",
+                )
+            path = argument.get("path")
+            if (
+                not isinstance(path, str) or not Path(path).is_absolute()
+                or path.startswith(("//", "\\\\"))
+            ):
+                raise BridgeError(
+                    "workspace_invalid", "Choose an existing local folder.",
+                    "Choose another location.",
+                )
+            return {"path": str(_validate_workspace(Path(path)))}
         if pair == ("zcode-task", "renameTask"):
             title = argument.get("title")
             if not isinstance(title, str) or not title.strip() or len(title) > 120 or any(
@@ -1577,18 +1671,48 @@ class _BridgeRelayController:
             envelope["clientId"] = self._client_id
             argument["envelope"] = envelope
         self._authorize_target_ids(channel, operation, argument)
+        if self.config.allow_workspace_selection:
+            if pair == ("zcode-task", "listTasks") and not set(argument).intersection(
+                _WORKSPACE_FIELDS
+            ):
+                return argument
+            if pair == ("zcode-task", "createTask"):
+                raw_path = argument.get("workspacePath")
+                if (
+                    not isinstance(raw_path, str) or not Path(raw_path).is_absolute()
+                    or raw_path.startswith(("//", "\\\\"))
+                ):
+                    raise BridgeError(
+                        "workspace_invalid", "Choose an existing local folder.",
+                        "Choose another location.",
+                    )
+                selected_path = _validate_workspace(Path(raw_path))
+                if argument.get("workspaceIdentity") is not None:
+                    raise BridgeError(
+                        "workspace_scope_mismatch", "The location identity was unexpected.",
+                        "Choose the location again.",
+                    )
+                return {**argument, "workspacePath": str(selected_path)}
         if pair not in _WORKSPACE_SCOPED_OPERATIONS and not (
             "workspacePath" in argument or "workspaceIdentity" in argument
         ):
             return dict(argument)
-        workspace = self.workspace
+        target_id = argument.get("taskId") or argument.get("sessionId")
+        if is_v4_command:
+            target_id = argument["envelope"].get("sessionId")
+        workspace = (
+            self._task_workspaces.get(str(target_id))
+            if self.config.allow_workspace_selection else None
+        )
+        workspace = workspace or self.workspace
         if workspace is None:
             raise BridgeError(
                 "workspace_unavailable",
                 "The exact relay workspace is unavailable.",
                 "Wait for bridge readiness before retrying.",
             )
-        expected_path = os.path.normcase(os.path.normpath(str(self.config.workspace)))
+        scoped_path = str(workspace.get("workspacePath") or self.config.workspace)
+        expected_path = os.path.normcase(os.path.normpath(scoped_path))
         supplied_path = argument.get("workspacePath")
         if supplied_path is not None and (
             not isinstance(supplied_path, str)
@@ -1608,7 +1732,7 @@ class _BridgeRelayController:
                 "Use the bridge's prepared workspace only.",
             )
         scoped = dict(argument)
-        scoped["workspacePath"] = str(self.config.workspace)
+        scoped["workspacePath"] = scoped_path
         if isinstance(selected_identity, str) and selected_identity:
             scoped["workspaceIdentity"] = selected_identity
         else:
@@ -1650,7 +1774,7 @@ class _BridgeRelayController:
                     "List or create the session through this bridge before using its ID.",
                 )
     def _record_authorized_result(
-        self, channel: str, operation: str, result: object
+        self, channel: str, operation: str, result: object, argument: object = None
     ) -> None:
         values: list[object] = []
         scoped_create = False
@@ -1664,15 +1788,48 @@ class _BridgeRelayController:
         for value in values:
             if not isinstance(value, Mapping):
                 continue
-            if not scoped_create and not self._result_matches_workspace(value):
+            selected_workspace = (
+                self._local_task_workspace(value) if self.config.allow_workspace_selection else None
+            )
+            if self.config.allow_workspace_selection:
+                if selected_workspace is None:
+                    continue
+                if scoped_create and isinstance(argument, Mapping) and (
+                    os.path.normcase(os.path.normpath(str(argument.get("workspacePath")))) !=
+                    os.path.normcase(os.path.normpath(str(selected_workspace["workspacePath"])))
+                ):
+                    # Return the actual result so the phone retains an unknown create
+                    # outcome, but never authorize a mismatched task for later mutation.
+                    continue
+            elif not scoped_create and not self._result_matches_workspace(value):
                 continue
             task_id = value.get("taskId")
             session_id = value.get("sessionId")
             if isinstance(task_id, str) and _NAME_RE.fullmatch(task_id):
                 self._known_task_ids.add(task_id)
                 self._known_session_ids.add(task_id)
+                if selected_workspace is not None:
+                    self._task_workspaces[task_id] = selected_workspace
             if isinstance(session_id, str) and _NAME_RE.fullmatch(session_id):
                 self._known_session_ids.add(session_id)
+                if selected_workspace is not None:
+                    self._task_workspaces[session_id] = selected_workspace
+
+    def _local_task_workspace(self, value: object) -> dict[str, object] | None:
+        if not isinstance(value, Mapping):
+            return None
+        nested = value.get("workspace")
+        workspace = nested if isinstance(nested, Mapping) else value
+        path = workspace.get("workspacePath")
+        identity = workspace.get("workspaceIdentity")
+        if (
+            not isinstance(path, str) or not Path(path).is_absolute()
+            or path.startswith(("//", "\\\\"))
+        ):
+            return None
+        if identity not in (None, "") and not self._result_matches_workspace(value):
+            return None
+        return {"workspacePath": path, "workspaceIdentity": identity}
 
     def _result_matches_workspace(self, value: Mapping[str, object]) -> bool:
         nested = value.get("workspace")
@@ -1690,6 +1847,8 @@ class _BridgeRelayController:
         return observed_identity is None or observed_identity == configured_identity
 
     def monitor(self, timeout_seconds: float) -> None:
+        if self._fatal is not None or time.monotonic() < self._next_reconnect_at:
+            return
         terminal = self.terminal
         if terminal is None or not terminal.wait_failed(timeout_seconds):
             return
@@ -1719,7 +1878,7 @@ class _BridgeRelayController:
                     "Stop the bridge and retry only in an owner-approved quiet window.",
                 )
                 break
-            except (BridgeError, ZCodeRelayError, OSError):
+            except (BridgeError, ZCodeRelayError, OSError) as error:
                 if self._candidate_terminal:
                     self._candidate_terminal.close()
                     self._candidate_terminal = None
@@ -1730,13 +1889,26 @@ class _BridgeRelayController:
                         "Stop and retire this generation before starting a new bridge.",
                     )
                     break
+                transient = isinstance(error, (ConnectionError, TimeoutError, socket.gaierror)) or (
+                    isinstance(error, ZCodeRelayError) and error.code in {
+                        "websocket_closed", "websocket_io_error", "websocket_upgrade_closed",
+                        "relay_closed", "relay_io_error",
+                        "relay_auth_timeout", "relay_operation_timeout",
+                    }
+                )
+                if not transient:
+                    self._fatal = BridgeError(
+                        getattr(error, "code", "relay_reconnect_failed"),
+                        "The relay could not reconnect safely.",
+                        "Check the authentication or configuration error before reconnecting.",
+                    )
+                    break
                 continue
         if self._fatal is None:
-            self._fatal = BridgeError(
-                "relay_reconnect_exhausted",
-                "The bridge could not recover its official relay connection.",
-                "Check relay availability, then retire the stale generation before restarting.",
-            )
+            # A network outage must not permanently remove the default server. Keep the
+            # existing controller as the retry owner; mutations remain refused meanwhile.
+            self._next_reconnect_at = time.monotonic() + 60.0
+            self.last_code = "reconnecting"
 
     def close(self) -> None:
         with self._lock:
@@ -2285,7 +2457,9 @@ def _serve_client(connection: WebSocketConnection, service: _BridgeService) -> N
                 "generation": service.controller.relay_generation,
                 "zcodeVersion": service.config.zcode_version,
                 "workspacePath": str(service.config.workspace),
-                "capabilities": ["taskRename", "guardedStop", "completeTaskList"],
+                "homePath": str(Path.home()),
+                "capabilities": ["taskRename", "guardedStop", "completeTaskList"] +
+                    (["workspaceSelection"] if service.config.allow_workspace_selection else []),
             }
         )
         while True:
@@ -2565,8 +2739,11 @@ def _run_service(root: Path, launch_id: str, expected_config_sha256: str) -> int
             ):
                 service.publish("ready", "ready")
             if time.monotonic() - last_heartbeat >= 10.0:
-                if controller.terminal:
-                    controller.terminal.heartbeat()
+                if controller.terminal and controller.last_code != "reconnecting":
+                    try:
+                        controller.terminal.heartbeat()
+                    except RelayClosedError:
+                        controller.monitor(0.0)
                 last_heartbeat = time.monotonic()
     except (BridgeError, ZCodeRelayError, OSError) as exc:
         service.mark_stopping()
@@ -2620,6 +2797,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--bind", required=True)
     prepare.add_argument("--port", required=True, type=int)
     prepare.add_argument("--workspace", required=True, type=Path)
+    prepare.add_argument("--allow-workspace-selection", action="store_true")
     prepare.add_argument("--network", required=True, choices=("tailscale",))
     prepare.add_argument("--zcode-cli", type=Path, help=argparse.SUPPRESS)
     prepare.add_argument("--root", type=Path)
@@ -2678,6 +2856,7 @@ def main(
                 trust_lan=False,
                 network_backend=network_backend or WindowsNetworkBackend(),
                 zcode_cli=args.zcode_cli,
+                allow_workspace_selection=args.allow_workspace_selection,
             )
         elif args.action == "start":
             result = start_bridge(root, network_backend=network_backend)

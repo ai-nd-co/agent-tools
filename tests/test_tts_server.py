@@ -31,6 +31,25 @@ from agent_tools.tts_server import (
 TOKEN = "task298-owner-only-token-0123456789abcdef"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows native ACL inspection")
+def test_native_acl_polling_does_not_retain_new_ctypes_types(tmp_path: Path) -> None:
+    import ctypes
+    import gc
+
+    from agent_tools.tts_server import _verify_windows_owner_only_acl_native
+
+    token_path = tmp_path / "owner-token"
+    token_path.write_text(TOKEN)
+    _restrict_to_current_owner(token_path)
+    _verify_windows_owner_only_acl_native(token_path)
+    gc.collect()
+    baseline = len(ctypes._pointer_type_cache)
+    for _ in range(300):
+        _verify_windows_owner_only_acl_native(token_path)
+    gc.collect()
+    assert len(ctypes._pointer_type_cache) == baseline
+
+
 def _server_address(server: TtsHttpServer) -> tuple[str, int]:
     host, port = server.server_address[:2]
     assert isinstance(host, str)

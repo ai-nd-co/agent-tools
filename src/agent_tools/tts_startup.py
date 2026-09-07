@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import hashlib
 import http.client
 import json
@@ -14,6 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from ctypes import wintypes
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TextIO
@@ -22,6 +24,16 @@ from agent_tools.tts_server import (
     load_owner_only_bearer_token,
     validate_tts_server_bind,
 )
+
+
+class _WindowsByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("file_attributes", wintypes.DWORD), ("creation_time", wintypes.FILETIME),
+        ("last_access_time", wintypes.FILETIME), ("last_write_time", wintypes.FILETIME),
+        ("volume_serial_number", wintypes.DWORD), ("file_size_high", wintypes.DWORD),
+        ("file_size_low", wintypes.DWORD), ("number_of_links", wintypes.DWORD),
+        ("file_index_high", wintypes.DWORD), ("file_index_low", wintypes.DWORD),
+    ]
 
 if TYPE_CHECKING:
     from _typeshed import ReadableBuffer, WriteableBuffer
@@ -2034,20 +2046,6 @@ def _windows_execution_lock(path: Path) -> Iterator[None]:
     file_flag_open_reparse_point = 0x00200000
     invalid_handle_value = ctypes.c_void_p(-1).value
 
-    class ByHandleFileInformation(ctypes.Structure):
-        _fields_ = [
-            ("file_attributes", wintypes.DWORD),
-            ("creation_time", wintypes.FILETIME),
-            ("last_access_time", wintypes.FILETIME),
-            ("last_write_time", wintypes.FILETIME),
-            ("volume_serial_number", wintypes.DWORD),
-            ("file_size_high", wintypes.DWORD),
-            ("file_size_low", wintypes.DWORD),
-            ("number_of_links", wintypes.DWORD),
-            ("file_index_high", wintypes.DWORD),
-            ("file_index_low", wintypes.DWORD),
-        ]
-
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -2061,7 +2059,7 @@ def _windows_execution_lock(path: Path) -> Iterator[None]:
     kernel32.CreateFileW.restype = wintypes.HANDLE
     kernel32.GetFileInformationByHandle.argtypes = [
         wintypes.HANDLE,
-        ctypes.POINTER(ByHandleFileInformation),
+        ctypes.POINTER(_WindowsByHandleFileInformation),
     ]
     kernel32.GetFileInformationByHandle.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -2077,7 +2075,7 @@ def _windows_execution_lock(path: Path) -> Iterator[None]:
     )
     if handle == invalid_handle_value:
         raise TtsStartupError("executable_lock_failed", "TTS startup executable lock failed.")
-    information = ByHandleFileInformation()
+    information = _WindowsByHandleFileInformation()
     if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(information)):
         kernel32.CloseHandle(handle)
         raise TtsStartupError("executable_lock_failed", "TTS startup executable lock failed.")

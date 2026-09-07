@@ -1784,6 +1784,24 @@ def test_windows_execution_lock_rejects_reparse_path(tmp_path: Path) -> None:
     assert error.value.code == "executable_lock_failed"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows executable identity locking")
+def test_execution_lock_polling_does_not_retain_new_ctypes_types(tmp_path: Path) -> None:
+    import ctypes
+    import gc
+
+    executable = tmp_path / "test-owned.exe"
+    executable.write_bytes(b"identity test")
+    with startup._windows_execution_lock(executable):
+        pass
+    gc.collect()
+    baseline = len(ctypes._pointer_type_cache)
+    for _ in range(300):
+        with startup._windows_execution_lock(executable):
+            pass
+    gc.collect()
+    assert len(ctypes._pointer_type_cache) == baseline
+
+
 def test_windows_listener_detection_includes_wildcard_bind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

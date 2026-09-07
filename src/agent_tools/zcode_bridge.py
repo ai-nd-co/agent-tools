@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -181,6 +182,58 @@ _WORKSPACE_SCOPED_OPERATIONS = frozenset(
         ("zcode-agent", "onDynamicSessionEvent"),
     }
 )
+
+
+def _native_turn_history(session_id: str, page: object) -> dict[str, object]:
+    def invalid() -> BridgeError:
+        return BridgeError("history_schema_invalid", "ZCode returned invalid history.",
+                           "Check the conversation on the computer.")
+
+    if not isinstance(page, Mapping) or not isinstance(page.get("rows"), list) or \
+            type(page.get("hasMore")) is not bool or len(page["rows"]) > 200:
+        raise invalid()
+    headers: dict[str, tuple[float, str]] = {}
+    answers: dict[str, tuple[float, str, str]] = {}
+    row_ids: set[float] = set()
+    states = {"running": "running", "completedSuccess": "completed",
+              "completedInterrupted": "interrupted", "failed": "failed"}
+    for row in page["rows"]:
+        if not isinstance(row, Mapping):
+            raise invalid()
+        row_id, turn_id = row.get("rowId"), row.get("turnId")
+        if type(row_id) not in (int, float) or not math.isfinite(row_id) or row_id in row_ids or \
+                not isinstance(turn_id, str) or not _NAME_RE.fullmatch(turn_id):
+            raise invalid()
+        row_ids.add(row_id)
+        if row.get("visibility") not in (None, "visible"):
+            continue
+        if row.get("kind") == "turnHeader":
+            if row.get("state") not in states or turn_id in headers:
+                raise invalid()
+            headers[turn_id] = row_id, states[row["state"]]
+        elif row.get("kind") == "assistantText":
+            if not isinstance(row.get("text"), str) or row.get("state") not in {
+                "streaming", "complete", "interrupted", "failed"
+            }:
+                raise invalid()
+            if turn_id not in answers or answers[turn_id][0] < row_id:
+                answers[turn_id] = row_id, row["text"], row["state"]
+    turns: list[dict[str, str]] = []
+    complete = not page["hasMore"]
+    total_bytes = 0
+    for turn_id, (_, status) in sorted(headers.items(), key=lambda item: item[1][0], reverse=True):
+        answer = answers.get(turn_id)
+        if status != "running" and answer is not None and answer[2] == "streaming":
+            complete = False
+            continue
+        text = answer[1] if answer is not None and status != "running" else ""
+        encoded = text.encode("utf-8")
+        if len(turns) >= 64 or total_bytes + len(encoded) > 64 * 1024:
+            complete = False
+            break
+        turns.append({"turnId": turn_id, "status": status, "finalText": text})
+        total_bytes += len(encoded)
+    return {"version": 1, "sessionId": session_id, "turns": turns, "complete": complete}
 
 
 class BridgeError(RuntimeError):
@@ -1490,6 +1543,21 @@ class _BridgeRelayController:
                 return {"path": str(selected), "entries": directories}
             started_at = time.monotonic()
             result = rpc.call(channel, method, scoped_argument, timeout)
+            if (channel, method) == ("zcode-task", "getTaskSnapshot"):
+                remaining = timeout - (time.monotonic() - started_at)
+                if remaining <= 0:
+                    raise ZCodeRelayError("relay_operation_timeout")
+                rows = rpc.call("zcode-agent", "conversationRowsRangeV4", {
+                    **{key: value for key, value in scoped_argument.items()
+                       if key in _WORKSPACE_FIELDS},
+                    "sessionId": scoped_argument["taskId"],
+                    "clientMode": "web-remote-replayable", "limit": 200,
+                }, remaining)
+                if not isinstance(result, Mapping):
+                    raise BridgeError("history_schema_invalid", "ZCode returned invalid history.",
+                                      "Check the conversation on the computer.")
+                result = {**result, "voxTurnHistory": _native_turn_history(
+                    scoped_argument["taskId"], rows)}
             if self.config.allow_workspace_selection and (channel, method) == (
                 "zcode-task", "listTasks"
             ):
@@ -2465,7 +2533,7 @@ def _serve_client(connection: WebSocketConnection, service: _BridgeService) -> N
                 "zcodeVersion": service.config.zcode_version,
                 "workspacePath": str(service.config.workspace),
                 "homePath": str(Path.home()),
-                "capabilities": ["taskRename", "guardedStop", "completeTaskList", "sessionReplay"] +
+                "capabilities": ["taskRename", "guardedStop", "completeTaskList", "turnHistory"] +
                     (["workspaceSelection"] if service.config.allow_workspace_selection else []),
             }
         )

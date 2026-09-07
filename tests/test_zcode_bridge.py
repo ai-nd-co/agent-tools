@@ -902,10 +902,11 @@ def test_native_history_uses_explicit_turn_headers_and_latest_visible_answer() -
          "state": "complete", "text": "final answer"},
         {"rowId": 6, "turnId": "turn-one", "kind": "assistantText",
          "state": "complete", "text": "hidden", "visibility": "hidden"},
-    ]})
+    ]}, {"turn-one": "runtime-turn-one"})
     assert result == {
         "version": 1, "sessionId": "session-one", "complete": True,
-        "turns": [{"turnId": "turn-one", "status": "completed", "finalText": "final answer"}],
+        "turns": [{"turnId": "runtime-turn-one", "status": "completed",
+                   "finalText": "final answer"}],
     }
 
 
@@ -916,7 +917,7 @@ def test_native_history_never_substitutes_a_preamble_for_an_unfinished_answer() 
          "state": "complete", "text": "preamble"},
         {"rowId": 3, "turnId": "turn-one", "kind": "assistantText",
          "state": "streaming", "text": "unfinished"},
-    ]})
+    ]}, {"turn-one": "runtime-turn-one"})
     assert result["turns"] == [] and result["complete"] is False
 
 
@@ -937,10 +938,38 @@ def test_native_history_marks_bounded_or_paged_results_incomplete() -> None:
     rows = [{"rowId": index, "turnId": f"turn-{index}", "kind": "turnHeader",
              "state": "completedSuccess"}
             for index in range(65)]
-    result = bridge._native_turn_history("session-one", {"hasMore": False, "rows": rows})
+    result = bridge._native_turn_history("session-one", {"hasMore": False, "rows": rows},
+                                         {f"turn-{i}": f"runtime-{i}" for i in range(65)})
     assert len(result["turns"]) == 64 and result["complete"] is False
     paged = bridge._native_turn_history("session-one", {"hasMore": True, "rows": []})
     assert paged["complete"] is False
+
+
+def test_native_turn_anchor_read_is_scoped_and_read_only(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "db.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE message(id TEXT, session_id TEXT, data TEXT)")
+        db.executemany("INSERT INTO message VALUES(?,?,?)", [
+            ("message-one", "session-one", '{"anchor":{"turnId":"runtime-one"}}'),
+            ("message-other", "session-other", '{"anchor":{"turnId":"runtime-other"}}'),
+        ])
+    before = path.read_bytes()
+    assert bridge._native_turn_anchors("session-one", ["message-one", "message-other"],
+                                      database=path) == {"message-one": "runtime-one"}
+    assert path.read_bytes() == before
+    missing = tmp_path / "missing.sqlite"
+    with pytest.raises(BridgeError):
+        bridge._native_turn_anchors("session-one", ["message-one"], database=missing)
+    assert not missing.exists()
+
+
+def test_missing_runtime_anchor_never_fabricates_a_turn_identity() -> None:
+    result = bridge._native_turn_history("session-one", {"hasMore": False, "rows": [
+        {"rowId": 1, "turnId": "product-one", "kind": "turnHeader", "state": "completedSuccess"},
+    ]}, {})
+    assert result["turns"] == [] and result["complete"] is False
 
 
 def test_vox_rename_and_stop_keep_exact_workspace_and_execution_guards(tmp_path: Path) -> None:

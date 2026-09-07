@@ -14,6 +14,7 @@ import secrets
 import shutil
 import socket
 import socketserver
+import sqlite3
 import stat
 import struct
 import subprocess
@@ -22,6 +23,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TextIO
@@ -184,7 +186,40 @@ _WORKSPACE_SCOPED_OPERATIONS = frozenset(
 )
 
 
-def _native_turn_history(session_id: str, page: object) -> dict[str, object]:
+def _native_turn_anchors(
+    session_id: str, message_ids: Sequence[str], *, database: Path | None = None,
+) -> dict[str, str]:
+    if not message_ids:
+        return {}
+    path = database or Path.home() / ".zcode" / "cli" / "db" / "db.sqlite"
+    placeholders = ",".join("?" for _ in message_ids)
+    try:
+        with closing(sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1,
+        )) as db:
+            rows = db.execute(
+                "SELECT id,json_extract(data,'$.anchor.turnId') FROM message "
+                "WHERE session_id=? AND id IN (" + placeholders + ")",
+                (session_id, *message_ids),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise BridgeError("history_identity_unavailable",
+                          "Saved turn identities could not be read.",
+                          "Check the conversation on the computer.") from exc
+    result = {}
+    for message_id, turn_id in rows:
+        if turn_id is None:
+            continue
+        if not isinstance(turn_id, str) or not _NAME_RE.fullmatch(turn_id):
+            raise BridgeError("history_identity_invalid", "A saved turn identity is invalid.",
+                              "Check the conversation on the computer.")
+        result[message_id] = turn_id
+    return result
+
+
+def _native_turn_history(
+    session_id: str, page: object, anchors: Mapping[str, str] | None = None,
+) -> dict[str, object]:
     def invalid() -> BridgeError:
         return BridgeError("history_schema_invalid", "ZCode returned invalid history.",
                            "Check the conversation on the computer.")
@@ -221,7 +256,18 @@ def _native_turn_history(session_id: str, page: object) -> dict[str, object]:
     turns: list[dict[str, str]] = []
     complete = not page["hasMore"]
     total_bytes = 0
+    # Canonical rows use product/message IDs; the live session stream uses the
+    # runtime ID stored in each message's anchor. Read only that exact scoped link.
+    identities = _native_turn_anchors(session_id, list(headers)) if anchors is None else anchors
+    seen_runtime_ids: set[str] = set()
     for turn_id, (_, status) in sorted(headers.items(), key=lambda item: item[1][0], reverse=True):
+        runtime_id = identities.get(turn_id)
+        if runtime_id is None:
+            complete = False
+            continue
+        if not _NAME_RE.fullmatch(runtime_id) or runtime_id in seen_runtime_ids:
+            raise invalid()
+        seen_runtime_ids.add(runtime_id)
         answer = answers.get(turn_id)
         if status != "running" and answer is not None and answer[2] == "streaming":
             complete = False
@@ -231,7 +277,7 @@ def _native_turn_history(session_id: str, page: object) -> dict[str, object]:
         if len(turns) >= 64 or total_bytes + len(encoded) > 64 * 1024:
             complete = False
             break
-        turns.append({"turnId": turn_id, "status": status, "finalText": text})
+        turns.append({"turnId": runtime_id, "status": status, "finalText": text})
         total_bytes += len(encoded)
     return {"version": 1, "sessionId": session_id, "turns": turns, "complete": complete}
 

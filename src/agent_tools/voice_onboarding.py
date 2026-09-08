@@ -993,7 +993,13 @@ def _protect_windows_path(path: Path) -> None:
     token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
     owner_sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
     acl = win32security.ACL()
-    acl.AddAccessAllowedAce(win32security.ACL_REVISION, win32con.GENERIC_ALL, owner_sid)
+    # Re-protecting a storage root must not strip inherited access from its runtime children.
+    inheritance = (
+        win32con.OBJECT_INHERIT_ACE | win32con.CONTAINER_INHERIT_ACE
+    ) if path.is_dir() else 0
+    acl.AddAccessAllowedAceEx(
+        win32security.ACL_REVISION, inheritance, win32con.GENERIC_ALL, owner_sid
+    )
     win32security.SetNamedSecurityInfo(
         str(path),
         win32security.SE_FILE_OBJECT,

@@ -36,6 +36,44 @@ from agent_tools.voice_onboarding import (
     setup_voice,
 )
 
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows inherited private-directory ACLs")
+def test_private_config_write_preserves_owner_access_to_runtime_children(tmp_path: Path) -> None:
+    import win32api
+    import win32con
+    import win32security
+
+    root = tmp_path / "private-runtime-root"
+    root.mkdir()
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        owner = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    finally:
+        token.Close()
+
+    def restore_inheritance() -> None:
+        acl = win32security.ACL()
+        acl.AddAccessAllowedAceEx(win32security.ACL_REVISION,
+            win32con.OBJECT_INHERIT_ACE | win32con.CONTAINER_INHERIT_ACE,
+            win32con.GENERIC_ALL, owner)
+        win32security.SetNamedSecurityInfo(str(root), win32security.SE_FILE_OBJECT,
+            win32security.OWNER_SECURITY_INFORMATION | win32security.DACL_SECURITY_INFORMATION |
+            win32security.PROTECTED_DACL_SECURITY_INFORMATION, owner, None, acl, None)
+
+    restore_inheritance()
+    nested = root / "runtime"
+    nested.mkdir()
+    child = nested / "runtime.bin"
+    child.write_bytes(b"preserve runtime access")
+    try:
+        voice._write_private_bytes(root / "config.json", b"{}", replace=False)
+        assert child.read_bytes() == b"preserve runtime access"
+        voice._verify_owner_only(root)
+        voice._verify_owner_only(child)
+    finally:
+        restore_inheritance()
+
+
 CODEX_TOKEN = "fixture-codex-token-0123456789abcdef"
 TTS_TOKEN = "fixture-tts-token-0123456789abcdef"
 TAILSCALE_IP = "100.64.10.20"

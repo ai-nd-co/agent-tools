@@ -356,6 +356,45 @@ def test_websocket_client_rejects_subprotocol_mismatch(
     assert transport.closed
 
 
+@pytest.mark.parametrize("status, expected", [
+    (408, "websocket_upgrade_retryable_408"),
+    (429, "websocket_upgrade_retryable_429"),
+    (500, "websocket_upgrade_retryable_500"),
+    (502, "websocket_upgrade_retryable_502"),
+    (503, "websocket_upgrade_retryable_503"),
+    (504, "websocket_upgrade_retryable_504"),
+    (401, "websocket_upgrade_rejected_401"),
+    (403, "websocket_upgrade_rejected_403"),
+    (404, "websocket_upgrade_rejected_404"),
+    (302, "websocket_upgrade_rejected_302"),
+])
+def test_websocket_upgrade_preserves_safe_status_and_closes_socket(
+    monkeypatch: pytest.MonkeyPatch, status: int, expected: str,
+) -> None:
+    class SocketFixture:
+        closed = False
+
+        def settimeout(self, _timeout: float) -> None:
+            pass
+
+        def sendall(self, _payload: bytes) -> None:
+            pass
+
+        def recv(self, _size: int) -> bytes:
+            return f"HTTP/1.1 {status} private upstream detail\r\n\r\nsecret body".encode()
+
+        def close(self) -> None:
+            self.closed = True
+
+    transport = SocketFixture()
+    monkeypatch.setattr(relay.socket, "create_connection", lambda *_args: transport)
+    with pytest.raises(ZCodeRelayError) as error:
+        relay.WebSocketConnection.connect("ws://example.invalid/ws")
+    assert error.value.code == expected
+    assert str(error.value) == expected
+    assert transport.closed
+
+
 def test_relay_receiver_normalizes_socket_failure() -> None:
     class BrokenConnection:
         @staticmethod

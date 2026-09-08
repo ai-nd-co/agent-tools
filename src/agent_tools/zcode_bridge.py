@@ -2015,6 +2015,9 @@ class _BridgeRelayController:
                         "websocket_closed", "websocket_io_error", "websocket_upgrade_closed",
                         "relay_closed", "relay_io_error",
                         "relay_auth_timeout", "relay_operation_timeout",
+                        "websocket_upgrade_retryable_408", "websocket_upgrade_retryable_429",
+                        "websocket_upgrade_retryable_500", "websocket_upgrade_retryable_502",
+                        "websocket_upgrade_retryable_503", "websocket_upgrade_retryable_504",
                     }
                 )
                 if not transient:

@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import queue
+import re
 import secrets
 import socket
 import ssl
@@ -1272,6 +1273,13 @@ class WebSocketConnection:
         except ZCodeRelayError:
             transport.close()
             raise
+        http_status = re.fullmatch(r"HTTP/1\.[01] ([1-5][0-9]{2})(?: [^\r\n]*)?", status)
+        if http_status and http_status[1] != "101":
+            transport.close()
+            code = int(http_status[1])
+            # Keep upstream text/body out of diagnostics; only temporary HTTP failures retry.
+            kind = "retryable" if code in {408, 429, 500, 502, 503, 504} else "rejected"
+            raise ZCodeRelayError(f"websocket_upgrade_{kind}_{code}")
         expected = base64.b64encode(hashlib.sha1((key + _GUID).encode("ascii")).digest()).decode(
             "ascii"
         )

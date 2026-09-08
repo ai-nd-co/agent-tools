@@ -1173,8 +1173,14 @@ def test_relay_controller_fails_closed_after_rebind_commit(
     assert controller.fatal.code == "relay_reconnect_commit_failed"
 
 
+@pytest.mark.parametrize("failure_code", [
+    "websocket_io_error", "websocket_upgrade_retryable_408",
+    "websocket_upgrade_retryable_429", "websocket_upgrade_retryable_500",
+    "websocket_upgrade_retryable_502", "websocket_upgrade_retryable_503",
+    "websocket_upgrade_retryable_504",
+])
 def test_relay_network_outage_keeps_server_recoverable_without_replaying_calls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_code: str
 ) -> None:
     controller = bridge._BridgeRelayController(_config(tmp_path, _free_port()))
 
@@ -1195,7 +1201,7 @@ def test_relay_network_outage_keeps_server_recoverable_without_replaying_calls(
         assert reconnect
         attempts.append(1)
         if len(attempts) <= bridge.MAX_RECONNECTS:
-            raise bridge.RelayClosedError("websocket_io_error")
+            raise bridge.RelayClosedError(failure_code)
         controller.last_code = "ready"
 
     monkeypatch.setattr(controller, "_connect", connect)
@@ -1215,8 +1221,13 @@ def test_relay_network_outage_keeps_server_recoverable_without_replaying_calls(
     assert controller.last_code == "ready"
 
 
+@pytest.mark.parametrize("failure_code", [
+    "auth_failed", "websocket_upgrade_rejected_401", "websocket_upgrade_rejected_403",
+    "websocket_upgrade_rejected_404", "websocket_upgrade_rejected_302",
+    "websocket_upgrade_rejected",
+])
 def test_relay_auth_failure_is_not_treated_as_a_network_outage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_code: str
 ) -> None:
     controller = bridge._BridgeRelayController(_config(tmp_path, _free_port()))
 
@@ -1230,11 +1241,11 @@ def test_relay_auth_failure_is_not_treated_as_a_network_outage(
     controller.terminal = FailedTerminal()  # type: ignore[assignment]
     monkeypatch.setattr(bridge.time, "sleep", lambda _delay: None)
     def connect(*, reconnect: bool) -> None:
-        raise bridge.ZCodeRelayError("auth_failed")
+        raise bridge.ZCodeRelayError(failure_code)
     monkeypatch.setattr(controller, "_connect", connect)
     controller.monitor(0)
     assert controller.fatal is not None
-    assert controller.fatal.code == "auth_failed"
+    assert controller.fatal.code == failure_code
     assert controller.reconnect_count == 1
 
 

@@ -12,14 +12,17 @@ that has no GPU and no models.
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
+import re
 import sys
 import wave
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 from urllib import error, request
 
 from agent_tools.codex_config import read_string_env
@@ -44,6 +47,10 @@ DEFAULT_REMOTE_RU_VOICE = "dmitri"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MIN_API_KEY_CHARACTERS = 32
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+_READ_CHUNK_BYTES = 64 * 1024
+# What may travel in an Authorization header. Anything else (a newline above all) would make
+# http.client raise with the header's bytes in the message, which no redaction catches.
+_HEADER_SAFE_KEY = re.compile(r"[A-Za-z0-9._~+/=-]+\Z")
 
 
 class RemoteTtsError(RuntimeError):
@@ -118,14 +125,20 @@ def load_remote_tts_settings() -> RemoteTtsSettings | None:
     Environment wins over the file, as in claude-tools. A key shorter than the server's own
     minimum is treated as absent rather than sent: it cannot be the real one.
     """
-    secrets = _read_speech_secrets()
-    api_key = (read_string_env(ENV_SPEECH_API_KEY) or _as_str(secrets.get("apiKey")) or "").strip()
+    env_key = read_string_env(ENV_SPEECH_API_KEY)
+    env_url = read_string_env(ENV_SPEECH_BASE_URL)
+    # The file is opened only for what the environment did not supply, so a broken file cannot
+    # take the cluster away from a shell that configured it fully.
+    secrets = _read_speech_secrets() if not (env_key and env_url) else {}
+    api_key = (env_key or _as_str(secrets.get("apiKey")) or "").strip()
     if len(api_key) < MIN_API_KEY_CHARACTERS:
         return None
+    if not _HEADER_SAFE_KEY.match(api_key):
+        raise RemoteTtsError(
+            "speech.apiKey contains characters that cannot be sent in an HTTP header"
+        )
     base_url = _canonical_base_url(
-        read_string_env(ENV_SPEECH_BASE_URL)
-        or _as_str(secrets.get("baseUrl"))
-        or DEFAULT_SPEECH_BASE_URL
+        env_url or _as_str(secrets.get("baseUrl")) or DEFAULT_SPEECH_BASE_URL
     )
     timeout_raw = read_string_env(ENV_REMOTE_TTS_TIMEOUT)
     try:
@@ -161,8 +174,10 @@ def _error_detail(exc: error.HTTPError) -> str:
     """The server's own words for a failure, best effort: FastAPI puts them under ``detail``."""
     try:
         raw = exc.read(2048).decode("utf-8", "replace")
-    except OSError:
+    except (OSError, http.client.HTTPException):
         return ""
+    finally:
+        exc.close()
     try:
         parsed = json.loads(raw)
     except ValueError:
@@ -175,6 +190,42 @@ def _error_detail(exc: error.HTTPError) -> str:
 
 def _redact(text: str, api_key: str) -> str:
     return text.replace(api_key, "***") if api_key else text
+
+
+class _NoRedirects(request.HTTPRedirectHandler):
+    """A redirect would re-send the Authorization header to wherever the server points, another
+    host or plain http included. The cluster never redirects; anything that does is refused."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        return None
+
+
+_OPENER = request.build_opener(_NoRedirects)
+
+
+def _open(req: request.Request, *, timeout: float) -> Any:
+    """The one network call, kept separate so tests can stand in for it."""
+    return _OPENER.open(req, timeout=timeout)  # noqa: S310 - https to a configured host
+
+
+def _read_with_deadline(response: Any, *, started: float, deadline_seconds: float) -> bytes:
+    """Read the body in chunks against an overall deadline. The socket timeout only bounds each
+    blocking read, so a server trickling bytes could otherwise hold the call for as long as it
+    liked."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if perf_counter() - started > deadline_seconds:
+            raise TimeoutError("timed out")
+        chunk = response.read(_READ_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise RemoteTtsError("the speech cluster returned more audio than AgentTools accepts")
+        chunks.append(chunk)
 
 
 def synthesize_remote_wav(
@@ -210,8 +261,12 @@ def synthesize_remote_wav(
         },
     )
     try:
-        with request.urlopen(req, timeout=settings.timeout_seconds) as response:  # noqa: S310 - https to a configured host
-            wav = response.read(MAX_RESPONSE_BYTES + 1)
+        with _open(req, timeout=settings.timeout_seconds) as response:
+            wav = _read_with_deadline(
+                response, started=started, deadline_seconds=settings.timeout_seconds
+            )
+    except RemoteTtsError:
+        raise
     except error.HTTPError as exc:
         detail = _error_detail(exc)
         if exc.code in (401, 403):
@@ -221,31 +276,50 @@ def synthesize_remote_wav(
                     settings.api_key,
                 )
             ) from None
+        if 300 <= exc.code < 400:
+            raise RemoteTtsError(
+                f"the speech cluster answered a redirect ({exc.code}), which is refused"
+            ) from None
         raise RemoteTtsError(
             _redact(
                 f"the speech cluster answered {exc.code} for {model}: {detail}", settings.api_key
             )
         ) from None
-    except (error.URLError, TimeoutError, OSError) as exc:
-        reason = getattr(exc, "reason", exc)
+    except (error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        # URLError carries the cause in `reason`; the others are their own message. Any of them
+        # may quote request bytes, so the key is scrubbed from whatever text comes out.
+        reason = (
+            getattr(exc, "reason", None)
+            or (str(exc) if isinstance(exc, TimeoutError) and str(exc) else None)
+            or exc.__class__.__name__ + (f": {exc}" if str(exc) else "")
+        )
         raise RemoteTtsError(
             _redact(f"the speech cluster is unreachable: {reason}", settings.api_key)
         ) from None
+    except ValueError as exc:
+        # http.client raises ValueError for a header or URL it will not send. Its message can
+        # quote the header, so the exception text is not repeated.
+        raise RemoteTtsError(
+            f"the request to the speech cluster could not be built ({exc.__class__.__name__})"
+        ) from None
 
     generation_ms = (perf_counter() - started) * 1000.0
-    if len(wav) > MAX_RESPONSE_BYTES:
-        raise RemoteTtsError("the speech cluster returned more audio than AgentTools accepts")
     try:
         with wave.open(io.BytesIO(wav)) as handle:
             sample_rate = handle.getframerate()
             frames = handle.getnframes()
             channels = handle.getnchannels()
+            sample_width = handle.getsampwidth()
+            # The header declares the frame count; only reading them proves the bytes exist.
+            payload = handle.readframes(frames)
     except (wave.Error, EOFError) as exc:
         raise RemoteTtsError(
             f"the speech cluster returned something that is not a WAV: {exc}"
         ) from None
-    if frames == 0 or channels != 1:
+    if frames == 0 or channels != 1 or sample_rate <= 0:
         raise RemoteTtsError("the speech cluster returned empty or non-mono audio")
+    if len(payload) != frames * channels * sample_width:
+        raise RemoteTtsError("the speech cluster returned a truncated WAV")
 
     total_ms = (perf_counter() - started) * 1000.0
     return TtsResult(

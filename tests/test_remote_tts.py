@@ -64,9 +64,13 @@ def _write_secrets(directory: Path, speech: dict[str, Any] | None) -> None:
 class _FakeResponse:
     def __init__(self, body: bytes) -> None:
         self._body = body
+        self._offset = 0
 
     def read(self, limit: int | None = None) -> bytes:
-        return self._body if limit is None else self._body[:limit]
+        end = len(self._body) if limit is None else min(len(self._body), self._offset + limit)
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
 
     def __enter__(self) -> _FakeResponse:
         return self
@@ -78,11 +82,11 @@ class _FakeResponse:
 def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, body: bytes = b"") -> list[Any]:
     calls: list[Any] = []
 
-    def fake_urlopen(req: Any, timeout: float | None = None) -> _FakeResponse:
+    def fake_urlopen(req: Any, *, timeout: float | None = None) -> _FakeResponse:
         calls.append((req, timeout))
         return _FakeResponse(body or _wav())
 
-    monkeypatch.setattr(remote_tts.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(remote_tts, "_open", fake_urlopen)
     return calls
 
 
@@ -214,7 +218,7 @@ def test_http_errors_never_carry_the_key(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     options = resolve_tts_options("Hello.", engine="auto")
 
-    def forbidden(req: Any, timeout: float | None = None) -> _FakeResponse:
+    def forbidden(req: Any, *, timeout: float | None = None) -> _FakeResponse:
         raise error.HTTPError(
             req.full_url,
             403,
@@ -223,16 +227,16 @@ def test_http_errors_never_carry_the_key(monkeypatch: pytest.MonkeyPatch) -> Non
             io.BytesIO(json.dumps({"detail": f"bad {KEY}"}).encode()),
         )
 
-    monkeypatch.setattr(remote_tts.request, "urlopen", forbidden)
+    monkeypatch.setattr(remote_tts, "_open", forbidden)
     with pytest.raises(RemoteTtsError) as caught:
         synthesize_remote_wav("Hello.", options=options, settings=settings)
     assert "rejected the API key" in str(caught.value)
     assert KEY not in str(caught.value)
 
-    def down(req: Any, timeout: float | None = None) -> _FakeResponse:
+    def down(req: Any, *, timeout: float | None = None) -> _FakeResponse:
         raise error.URLError(f"connection refused {KEY}")
 
-    monkeypatch.setattr(remote_tts.request, "urlopen", down)
+    monkeypatch.setattr(remote_tts, "_open", down)
     with pytest.raises(RemoteTtsError, match="unreachable") as caught:
         synthesize_remote_wav("Hello.", options=options, settings=settings)
     assert KEY not in str(caught.value)
@@ -313,10 +317,10 @@ def test_auto_falls_back_to_local_and_says_why(
     _write_secrets(secrets_dir, {"apiKey": KEY})
     local = _fake_local(monkeypatch)
 
-    def down(req: Any, timeout: float | None = None) -> _FakeResponse:
+    def down(req: Any, *, timeout: float | None = None) -> _FakeResponse:
         raise error.URLError("connection refused")
 
-    monkeypatch.setattr(remote_tts.request, "urlopen", down)
+    monkeypatch.setattr(remote_tts, "_open", down)
     result = synthesize_wav("Привет, это тест.")
 
     assert result.backend == "local"
@@ -334,10 +338,10 @@ def test_remote_only_raises_instead_of_falling_back(
     _write_secrets(secrets_dir, {"apiKey": KEY})
     local = _fake_local(monkeypatch)
 
-    def down(req: Any, timeout: float | None = None) -> _FakeResponse:
+    def down(req: Any, *, timeout: float | None = None) -> _FakeResponse:
         raise error.URLError("connection refused")
 
-    monkeypatch.setattr(remote_tts.request, "urlopen", down)
+    monkeypatch.setattr(remote_tts, "_open", down)
     with pytest.raises(RemoteTtsError, match="unreachable"):
         synthesize_wav("Hello there.", backend="remote")
     assert local == []
@@ -356,3 +360,124 @@ def test_local_only_never_touches_the_network(
     assert result.backend_fallback_reason is None
     assert calls == []
     assert local == ["kokoro"]
+
+
+# --- round 1 audit regressions -------------------------------------------------------------
+
+
+def test_env_settings_do_not_need_a_readable_file(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (secrets_dir / "secrets.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("SPEECH_API_KEY", KEY)
+    monkeypatch.setenv("SPEECH_BASE_URL", "https://s/v1")
+    settings = load_remote_tts_settings()
+    assert settings is not None and settings.api_key == KEY
+
+    monkeypatch.delenv("SPEECH_BASE_URL")
+    with pytest.raises(RemoteTtsError, match="Could not read the secrets file"):
+        load_remote_tts_settings()
+
+
+def test_a_key_that_cannot_travel_in_a_header_is_refused_without_quoting_it(
+    secrets_dir: Path,
+) -> None:
+    bad = KEY[:40] + "\n" + KEY[40:]
+    _write_secrets(secrets_dir, {"apiKey": bad})
+    with pytest.raises(RemoteTtsError) as caught:
+        load_remote_tts_settings()
+    assert "cannot be sent in an HTTP header" in str(caught.value)
+    assert KEY[:40] not in str(caught.value)
+
+
+def test_redirects_are_refused() -> None:
+    handler = remote_tts._NoRedirects()
+    assert (
+        handler.redirect_request(None, None, 302, "Found", {}, "http://elsewhere/v1/audio/speech")
+        is None
+    )
+
+
+def test_redirect_answer_is_an_error_not_a_fallback_leak(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=1,
+    )
+    options = resolve_tts_options("Hello.", engine="auto")
+
+    def redirected(req: Any, *, timeout: float | None = None) -> _FakeResponse:
+        raise error.HTTPError(req.full_url, 302, "Found", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(remote_tts, "_open", redirected)
+    with pytest.raises(RemoteTtsError, match="redirect"):
+        synthesize_remote_wav("Hello.", options=options, settings=settings)
+
+
+def test_truncated_wav_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=1,
+    )
+    options = resolve_tts_options("Hello.", engine="auto")
+    whole = _wav(frames=2_400)
+    _capture_urlopen(monkeypatch, whole[: len(whole) // 2])
+    with pytest.raises(RemoteTtsError, match="truncated|not a WAV"):
+        synthesize_remote_wav("Hello.", options=options, settings=settings)
+
+
+def test_protocol_failures_fall_under_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import http.client
+
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=1,
+    )
+    options = resolve_tts_options("Hello.", engine="auto")
+
+    def broken(req: Any, *, timeout: float | None = None) -> _FakeResponse:
+        raise http.client.BadStatusLine(f"garbage {KEY}")
+
+    monkeypatch.setattr(remote_tts, "_open", broken)
+    with pytest.raises(RemoteTtsError, match="unreachable") as caught:
+        synthesize_remote_wav("Hello.", options=options, settings=settings)
+    assert KEY not in str(caught.value)
+
+
+def test_a_trickling_body_hits_the_overall_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=5,
+    )
+    options = resolve_tts_options("Hello.", engine="auto")
+    clock = iter([0.0, 0.0, 1.0, 2.0, 6.0, 7.0, 8.0])
+    monkeypatch.setattr(remote_tts, "perf_counter", lambda: next(clock))
+
+    class Trickle:
+        def read(self, limit: int | None = None) -> bytes:
+            return b"x"
+
+        def __enter__(self) -> Trickle:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(remote_tts, "_open", lambda req, *, timeout=None: Trickle())
+    with pytest.raises(RemoteTtsError, match="unreachable: timed out"):
+        synthesize_remote_wav("Hello.", options=options, settings=settings)

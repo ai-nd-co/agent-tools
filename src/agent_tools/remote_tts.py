@@ -211,15 +211,20 @@ def _open(req: request.Request, *, timeout: float) -> Any:
 
 
 def _read_with_deadline(response: Any, *, started: float, deadline_seconds: float) -> bytes:
-    """Read the body in chunks against an overall deadline. The socket timeout only bounds each
-    blocking read, so a server trickling bytes could otherwise hold the call for as long as it
-    liked."""
+    """Read the body against an overall deadline.
+
+    The socket timeout only bounds one blocking read, and ``read(n)`` keeps reading until it has
+    ``n`` bytes, so a server trickling bytes could hold the call for as long as it liked. ``read1``
+    returns after at most ONE underlying read; checked between calls, the whole body is bounded by
+    the deadline plus a single socket timeout.
+    """
+    read_once = getattr(response, "read1", None) or response.read
     chunks: list[bytes] = []
     total = 0
     while True:
         if perf_counter() - started > deadline_seconds:
             raise TimeoutError("timed out")
-        chunk = response.read(_READ_CHUNK_BYTES)
+        chunk = read_once(_READ_CHUNK_BYTES)
         if not chunk:
             return b"".join(chunks)
         total += len(chunk)

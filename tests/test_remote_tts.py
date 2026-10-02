@@ -469,8 +469,11 @@ def test_a_trickling_body_hits_the_overall_deadline(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(remote_tts, "perf_counter", lambda: next(clock))
 
     class Trickle:
-        def read(self, limit: int | None = None) -> bytes:
+        def read1(self, limit: int | None = None) -> bytes:
             return b"x"
+
+        def read(self, limit: int | None = None) -> bytes:  # pragma: no cover - read1 must win
+            raise AssertionError("read(n) blocks across socket reads; the reader must use read1")
 
         def __enter__(self) -> Trickle:
             return self
@@ -481,3 +484,22 @@ def test_a_trickling_body_hits_the_overall_deadline(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(remote_tts, "_open", lambda req, *, timeout=None: Trickle())
     with pytest.raises(RemoteTtsError, match="unreachable: timed out"):
         synthesize_remote_wav("Hello.", options=options, settings=settings)
+
+
+def test_reader_prefers_read1_over_read() -> None:
+    """``read(n)`` would block until n bytes arrived; ``read1`` returns after one socket read."""
+
+    class Both:
+        calls: list[str] = []
+
+        def read1(self, limit: int | None = None) -> bytes:
+            self.calls.append("read1")
+            return b"" if len(self.calls) > 1 else b"abc"
+
+        def read(self, limit: int | None = None) -> bytes:
+            self.calls.append("read")
+            return b""
+
+    response = Both()
+    assert remote_tts._read_with_deadline(response, started=0.0, deadline_seconds=10**9) == b"abc"
+    assert response.calls == ["read1", "read1"]

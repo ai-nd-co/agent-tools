@@ -66,6 +66,7 @@ def test_ttsify_uses_repo_defaults_and_env(monkeypatch: object) -> None:
         speed: float,
         device: str,
         engine: str,
+        backend: str | None = None,
     ) -> TtsResult:
         captured["tts_text"] = text
         captured["voice"] = voice
@@ -125,6 +126,7 @@ def test_ttsify_cli_values_override_env(monkeypatch: object) -> None:
         speed: float,
         device: str,
         engine: str,
+        backend: str | None = None,
     ) -> TtsResult:
         captured["voice"] = voice
         captured["language"] = language
@@ -233,6 +235,7 @@ def test_ttsify_no_transform_never_resolves_or_calls_provider(monkeypatch: objec
         speed: float,
         device: str,
         engine: str,
+        backend: str | None = None,
     ) -> TtsResult:
         captured.update(
             text=text,
@@ -303,6 +306,7 @@ def test_ttsify_routes_from_final_transformed_russian_text(monkeypatch: object) 
         speed: float,
         device: str,
         engine: str,
+        backend: str | None = None,
     ) -> TtsResult:
         captured.update(
             text=text,
@@ -481,6 +485,7 @@ def test_ttsify_can_select_claude_code_provider(monkeypatch: object) -> None:
         speed: float,
         device: str,
         engine: str,
+        backend: str | None = None,
     ) -> TtsResult:
         return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
 
@@ -533,6 +538,7 @@ def test_ttsify_uses_preferred_provider_when_not_explicit(monkeypatch: object) -
         speed: float,
         device: str,
         engine: str,
+        backend: str | None = None,
     ) -> TtsResult:
         return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
 

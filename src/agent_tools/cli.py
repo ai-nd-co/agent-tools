@@ -51,6 +51,7 @@ from agent_tools.hook_install import (
 )
 from agent_tools.perf_log import append_perf_event
 from agent_tools.playback_queue import QueuePlaybackRequest, enqueue_for_playback
+from agent_tools.remote_tts import SUPPORTED_TTS_BACKENDS
 from agent_tools.transformer import (
     TransformOptions,
     resolve_effective_transform_provider,
@@ -195,6 +196,11 @@ def build_parser() -> argparse.ArgumentParser:
     tts_parser.add_argument("--language", choices=SUPPORTED_LANGUAGES)
     tts_parser.add_argument("--speed", type=float)
     tts_parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    tts_parser.add_argument(
+        "--backend",
+        choices=SUPPORTED_TTS_BACKENDS,
+        help="auto: the office speech cluster when configured, else local (default); remote; local",
+    )
     tts_parser.add_argument("--input-file", type=Path)
     tts_parser.add_argument("--output-file", default="-")
     tts_parser.add_argument("--output-mode", choices=OUTPUT_MODE_CHOICES, default="write")
@@ -223,6 +229,11 @@ def build_parser() -> argparse.ArgumentParser:
     ttsify_parser.add_argument("--language", choices=SUPPORTED_LANGUAGES)
     ttsify_parser.add_argument("--speed", type=float)
     ttsify_parser.add_argument("--device", choices=SUPPORTED_TTSIFY_DEVICES)
+    ttsify_parser.add_argument(
+        "--backend",
+        choices=SUPPORTED_TTS_BACKENDS,
+        help="auto: the office speech cluster when configured, else local (default); remote; local",
+    )
     ttsify_parser.add_argument("--input-file", type=Path)
     ttsify_parser.add_argument("--output-file", default="-")
     ttsify_parser.add_argument("--output-mode", choices=OUTPUT_MODE_CHOICES, default="write")
@@ -376,6 +387,12 @@ def _run_transform(args: argparse.Namespace) -> int:
     return 0
 
 
+def _report_backend_fallback(reason: str | None) -> None:
+    """Say when audio was made locally although the cluster was wanted: the cluster needs a look."""
+    if reason:
+        print(f"TTS fell back to local synthesis: {reason}", file=sys.stderr)
+
+
 def _run_tts(args: argparse.Namespace) -> int:
     input_text = _read_text_input(args.input_file)
     trace_id = str(uuid.uuid4())
@@ -414,7 +431,9 @@ def _run_tts(args: argparse.Namespace) -> int:
             speed=speed,
             device=args.device,
             engine=requested_tts_engine,
+            backend=getattr(args, "backend", None),
         )
+        _report_backend_fallback(result.backend_fallback_reason)
         output_metrics = _handle_audio_output(
             output_mode=args.output_mode,
             output_file=args.output_file,
@@ -446,6 +465,8 @@ def _run_tts(args: argparse.Namespace) -> int:
             requested_device=args.device,
             resolved_device=result.resolved_device,
             device_fallback_reason=result.device_fallback_reason,
+            backend=result.backend,
+            backend_fallback_reason=result.backend_fallback_reason,
             text_chars=len(input_text),
             chunks=result.chunks,
             tts_total_ms=result.metrics.total_ms,
@@ -508,8 +529,10 @@ def _run_ttsify(args: argparse.Namespace) -> int:
                 claude_bare=getattr(args, "claude_bare", False),
                 timeout_seconds=args.timeout_seconds,
                 no_transform=getattr(args, "no_transform", False),
+                backend=getattr(args, "backend", None),
             ),
         )
+        _report_backend_fallback(result.backend_fallback_reason)
         output_metrics = _handle_audio_output(
             output_mode=args.output_mode,
             output_file=args.output_file,
@@ -557,6 +580,8 @@ def _run_ttsify(args: argparse.Namespace) -> int:
             requested_device=result.device,
             resolved_device=result.resolved_device,
             device_fallback_reason=result.device_fallback_reason,
+            backend=result.backend,
+            backend_fallback_reason=result.backend_fallback_reason,
             total_ms=result.metrics.total_ms,
             transform_ms=result.metrics.transform_ms,
             tts_ms=result.metrics.tts_ms,

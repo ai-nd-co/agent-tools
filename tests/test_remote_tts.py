@@ -1,0 +1,358 @@
+from __future__ import annotations
+
+import io
+import json
+import wave
+from pathlib import Path
+from typing import Any
+from urllib import error
+
+import pytest
+
+from agent_tools import remote_tts, tts
+from agent_tools.remote_tts import (
+    DEFAULT_REMOTE_EN_MODEL,
+    DEFAULT_REMOTE_RU_MODEL,
+    DEFAULT_REMOTE_RU_VOICE,
+    DEFAULT_SPEECH_BASE_URL,
+    RemoteTtsError,
+    RemoteTtsSettings,
+    claude_tools_secrets_path,
+    load_remote_tts_settings,
+    normalize_tts_backend,
+    remote_model_and_voice,
+    synthesize_remote_wav,
+)
+from agent_tools.tts import TtsResult, resolve_tts_options, synthesize_wav
+
+KEY = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+
+
+def _wav(sample_rate: int = 24_000, frames: int = 2_400, channels: int = 1) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(b"\x00\x01" * frames * channels)
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def secrets_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("CLAUDE_TOOLS_CONFIG_DIR", str(tmp_path))
+    for name in (
+        "SPEECH_API_KEY",
+        "SPEECH_BASE_URL",
+        "AGENT_TOOLS_TTS_BACKEND",
+        "AGENT_TOOLS_REMOTE_TTS_EN_MODEL",
+        "AGENT_TOOLS_REMOTE_TTS_RU_MODEL",
+        "AGENT_TOOLS_REMOTE_TTS_RU_VOICE",
+        "AGENT_TOOLS_REMOTE_TTS_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path
+
+
+def _write_secrets(directory: Path, speech: dict[str, Any] | None) -> None:
+    payload: dict[str, Any] = {"groq": {"apiKey": "gsk_x"}}
+    if speech is not None:
+        payload["speech"] = speech
+    (directory / "secrets.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self, limit: int | None = None) -> bytes:
+        return self._body if limit is None else self._body[:limit]
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+def _capture_urlopen(monkeypatch: pytest.MonkeyPatch, body: bytes = b"") -> list[Any]:
+    calls: list[Any] = []
+
+    def fake_urlopen(req: Any, timeout: float | None = None) -> _FakeResponse:
+        calls.append((req, timeout))
+        return _FakeResponse(body or _wav())
+
+    monkeypatch.setattr(remote_tts.request, "urlopen", fake_urlopen)
+    return calls
+
+
+# --- settings ---------------------------------------------------------------------
+
+
+def test_secrets_path_follows_claude_tools(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CLAUDE_TOOLS_CONFIG_DIR", str(tmp_path))
+    assert claude_tools_secrets_path() == tmp_path / "secrets.json"
+
+
+def test_settings_absent_without_a_key(secrets_dir: Path) -> None:
+    _write_secrets(secrets_dir, None)
+    assert load_remote_tts_settings() is None
+
+
+def test_settings_from_the_file_with_cluster_defaults(secrets_dir: Path) -> None:
+    _write_secrets(secrets_dir, {"apiKey": KEY})
+    settings = load_remote_tts_settings()
+    assert settings is not None
+    assert settings.api_key == KEY
+    assert settings.base_url == DEFAULT_SPEECH_BASE_URL
+    assert settings.en_model == DEFAULT_REMOTE_EN_MODEL
+    assert settings.ru_model == DEFAULT_REMOTE_RU_MODEL
+    assert settings.ru_voice == DEFAULT_REMOTE_RU_VOICE
+
+
+def test_settings_env_wins_and_url_is_canonical(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_secrets(secrets_dir, {"apiKey": "x" * 40, "baseUrl": "https://file.example/v1"})
+    monkeypatch.setenv("SPEECH_API_KEY", KEY)
+    monkeypatch.setenv("SPEECH_BASE_URL", "http://127.0.0.1:18000/v1/")
+    monkeypatch.setenv("AGENT_TOOLS_REMOTE_TTS_RU_VOICE", "ruslan")
+    settings = load_remote_tts_settings()
+    assert settings is not None
+    assert settings.api_key == KEY
+    assert settings.base_url == "http://127.0.0.1:18000/v1"
+    assert settings.ru_voice == "ruslan"
+
+
+def test_short_key_counts_as_absent(secrets_dir: Path) -> None:
+    _write_secrets(secrets_dir, {"apiKey": "short"})
+    assert load_remote_tts_settings() is None
+
+
+@pytest.mark.parametrize(
+    "url", ["speech.example/v1", "https://speech.example", "https://speech.example/v1?x=1"]
+)
+def test_bad_base_url_is_refused(secrets_dir: Path, url: str) -> None:
+    _write_secrets(secrets_dir, {"apiKey": KEY, "baseUrl": url})
+    with pytest.raises(RemoteTtsError, match="ending in /v1"):
+        load_remote_tts_settings()
+
+
+def test_backend_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENT_TOOLS_TTS_BACKEND", raising=False)
+    assert normalize_tts_backend(None) == "auto"
+    monkeypatch.setenv("AGENT_TOOLS_TTS_BACKEND", "local")
+    assert normalize_tts_backend(None) == "local"
+    assert normalize_tts_backend("REMOTE") == "remote"
+    with pytest.raises(ValueError, match="Unsupported TTS backend"):
+        normalize_tts_backend("cloud")
+
+
+# --- model mapping --------------------------------------------------------------------
+
+
+def test_russian_goes_to_piper_and_english_keeps_its_kokoro_voice() -> None:
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=1,
+    )
+    ru = resolve_tts_options("Привет, это тест.", engine="auto")
+    assert remote_model_and_voice(ru, settings) == ("p", "dmitri")
+    en = resolve_tts_options("Hello there.", engine="auto", voice="am_adam")
+    assert remote_model_and_voice(en, settings) == ("k", "am_adam")
+
+
+# --- the request ------------------------------------------------------------------------
+
+
+def test_request_shape_and_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _capture_urlopen(monkeypatch, _wav(sample_rate=22_050, frames=1_000))
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=7,
+    )
+    options = resolve_tts_options("Привет.", engine="auto")
+
+    result = synthesize_remote_wav("Привет.", options=options, settings=settings)
+
+    req, timeout = calls[0]
+    assert req.full_url == "https://s/v1/audio/speech"
+    assert req.get_method() == "POST"
+    assert req.get_header("Authorization") == f"Bearer {KEY}"
+    assert json.loads(req.data) == {
+        "model": "p",
+        "voice": "dmitri",
+        "input": "Привет.",
+        "response_format": "wav",
+        "speed": 1.0,
+    }
+    assert timeout == 7
+    assert result.backend == "remote"
+    assert result.resolved_device == "remote"
+    assert result.engine == "silero"
+    assert result.model == "p"
+    assert result.sample_rate == 22_050
+    assert result.wav.startswith(b"RIFF")
+
+
+def test_http_errors_never_carry_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=1,
+    )
+    options = resolve_tts_options("Hello.", engine="auto")
+
+    def forbidden(req: Any, timeout: float | None = None) -> _FakeResponse:
+        raise error.HTTPError(
+            req.full_url,
+            403,
+            "Forbidden",
+            {},
+            io.BytesIO(json.dumps({"detail": f"bad {KEY}"}).encode()),
+        )
+
+    monkeypatch.setattr(remote_tts.request, "urlopen", forbidden)
+    with pytest.raises(RemoteTtsError) as caught:
+        synthesize_remote_wav("Hello.", options=options, settings=settings)
+    assert "rejected the API key" in str(caught.value)
+    assert KEY not in str(caught.value)
+
+    def down(req: Any, timeout: float | None = None) -> _FakeResponse:
+        raise error.URLError(f"connection refused {KEY}")
+
+    monkeypatch.setattr(remote_tts.request, "urlopen", down)
+    with pytest.raises(RemoteTtsError, match="unreachable") as caught:
+        synthesize_remote_wav("Hello.", options=options, settings=settings)
+    assert KEY not in str(caught.value)
+
+
+def test_non_wav_and_empty_audio_are_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="dmitri",
+        timeout_seconds=1,
+    )
+    options = resolve_tts_options("Hello.", engine="auto")
+    _capture_urlopen(monkeypatch, b"<html>not audio</html>")
+    with pytest.raises(RemoteTtsError, match="not a WAV"):
+        synthesize_remote_wav("Hello.", options=options, settings=settings)
+    _capture_urlopen(monkeypatch, _wav(frames=0))
+    with pytest.raises(RemoteTtsError, match="empty"):
+        synthesize_remote_wav("Hello.", options=options, settings=settings)
+
+
+# --- synthesize_wav routing ----------------------------------------------------------------
+
+
+def _fake_local(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    seen: list[str] = []
+
+    class FakeEngine:
+        def synthesize(self, text: str, *, options: Any, device_resolution: Any) -> TtsResult:
+            seen.append(options.engine)
+            return TtsResult(
+                wav=_wav(), sample_rate=24_000, chunks=1, engine=options.engine, model=options.model
+            )
+
+    monkeypatch.setattr(tts, "_SYNTHESIS_ENGINES", {"kokoro": FakeEngine(), "silero": FakeEngine()})
+    monkeypatch.setattr(tts, "resolve_torch_device", lambda device: object())
+    return seen
+
+
+def test_auto_uses_the_cluster_when_configured(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_secrets(secrets_dir, {"apiKey": KEY})
+    local = _fake_local(monkeypatch)
+    calls = _capture_urlopen(monkeypatch)
+
+    result = synthesize_wav("Hello there.")
+
+    assert result.backend == "remote"
+    assert result.backend_fallback_reason is None
+    assert len(calls) == 1
+    assert local == [], "no local model must be loaded when the cluster answered"
+
+
+def test_auto_without_a_key_is_plain_local(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_secrets(secrets_dir, None)
+    local = _fake_local(monkeypatch)
+    calls = _capture_urlopen(monkeypatch)
+
+    result = synthesize_wav("Hello there.")
+
+    assert result.backend == "local"
+    assert (
+        result.backend_fallback_reason is not None
+        and "not configured" in result.backend_fallback_reason
+    )
+    assert calls == []
+    assert local == ["kokoro"]
+
+
+def test_auto_falls_back_to_local_and_says_why(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_secrets(secrets_dir, {"apiKey": KEY})
+    local = _fake_local(monkeypatch)
+
+    def down(req: Any, timeout: float | None = None) -> _FakeResponse:
+        raise error.URLError("connection refused")
+
+    monkeypatch.setattr(remote_tts.request, "urlopen", down)
+    result = synthesize_wav("Привет, это тест.")
+
+    assert result.backend == "local"
+    assert result.engine == "silero"
+    assert (
+        result.backend_fallback_reason is not None
+        and "unreachable" in result.backend_fallback_reason
+    )
+    assert local == ["silero"]
+
+
+def test_remote_only_raises_instead_of_falling_back(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_secrets(secrets_dir, {"apiKey": KEY})
+    local = _fake_local(monkeypatch)
+
+    def down(req: Any, timeout: float | None = None) -> _FakeResponse:
+        raise error.URLError("connection refused")
+
+    monkeypatch.setattr(remote_tts.request, "urlopen", down)
+    with pytest.raises(RemoteTtsError, match="unreachable"):
+        synthesize_wav("Hello there.", backend="remote")
+    assert local == []
+
+
+def test_local_only_never_touches_the_network(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_secrets(secrets_dir, {"apiKey": KEY})
+    local = _fake_local(monkeypatch)
+    calls = _capture_urlopen(monkeypatch)
+
+    result = synthesize_wav("Hello there.", backend="local")
+
+    assert result.backend == "local"
+    assert result.backend_fallback_reason is None
+    assert calls == []
+    assert local == ["kokoro"]

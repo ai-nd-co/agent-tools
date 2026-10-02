@@ -151,6 +151,34 @@ Queue for playback on Windows:
 echo "Turn this note into natural spoken narration." | agent-tools ttsify --output-mode play --source agent-a
 ```
 
+### Synthesis on the office speech cluster
+
+`tts` and `ttsify` synthesize on the office speech cluster when its key is present, and locally
+otherwise. The key is the one claude-tools already keeps in `~/.config/claude-tools/secrets.json`
+(`speech.apiKey`, with `speech.baseUrl` defaulting to `https://speech.k8s.tele-agent.site/v1`), or
+`SPEECH_API_KEY` / `SPEECH_BASE_URL` in the environment. Nothing else is needed: a machine with the
+key never loads a local model it does not use.
+
+```bash
+echo "Read this aloud." | agent-tools tts --backend auto     # the default: cluster when configured, else local
+echo "Read this aloud." | agent-tools tts --backend remote   # the cluster, or an error
+echo "Read this aloud." | agent-tools tts --backend local    # Kokoro/Silero in this process, never the network
+```
+
+`auto` falls back to local synthesis on any cluster failure — unreachable, timeout, a rejected key,
+a missing route — and says why on stderr (`TTS fell back to local synthesis: …`); the perf event
+carries `backend` and `backend_fallback_reason`. The cluster serves Kokoro for English with the same
+voice names as the local engine, and Piper for Russian (Silero is not available there), so a Silero
+voice is replaced by the cluster's Russian voice rather than forwarded.
+
+```bash
+AGENT_TOOLS_TTS_BACKEND=auto                                   # auto | remote | local
+AGENT_TOOLS_REMOTE_TTS_EN_MODEL=speaches-ai/Kokoro-82M-v1.0-ONNX
+AGENT_TOOLS_REMOTE_TTS_RU_MODEL=speaches-ai/piper-ru_RU-dmitri-medium
+AGENT_TOOLS_REMOTE_TTS_RU_VOICE=dmitri
+AGENT_TOOLS_REMOTE_TTS_TIMEOUT_SECONDS=120
+```
+
 ### Optional private TTS service
 
 Serve prepared text as direct WAV responses for a private client such as Vox:

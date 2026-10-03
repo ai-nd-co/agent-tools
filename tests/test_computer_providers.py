@@ -15,10 +15,6 @@ from agent_tools.computer import providers
 from agent_tools.computer.models import ComputerError, available_section
 from agent_tools.computer.providers import ProviderSpec
 
-# Windows desktop control (UI Automation, screenshots, OCR): the code answers `unsupported_platform`
-# anywhere else, and this module exercises the Windows paths. Run it where it can be true.
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
-
 
 class FakeBackend:
     def identity_session(self):
@@ -126,6 +122,7 @@ def test_missing_media_backend_is_normal_unavailable_data(monkeypatch) -> None:
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_readiness_reports_dynamic_winapp_capability(monkeypatch) -> None:
     class FakeWinAppAdapter:
         def __init__(self, _backend) -> None:
@@ -382,6 +379,7 @@ def test_system_executable_does_not_search_caller_directory(
     assert resolved != hostile
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_network_internal_deadlines_fit_inside_provider_timeout(monkeypatch) -> None:
     timeouts: list[float] = []
     monkeypatch.setattr(

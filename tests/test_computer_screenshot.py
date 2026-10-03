@@ -31,10 +31,6 @@ from agent_tools.computer.models import (
 )
 from agent_tools.computer.rendering import render_json, render_windows
 
-# Windows desktop control (UI Automation, screenshots, OCR): the code answers `unsupported_platform`
-# anywhere else, and this module exercises the Windows paths. Run it where it can be true.
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
-
 
 class FakeBackend:
     def __init__(
@@ -145,6 +141,7 @@ def test_parse_region_rejects_invalid_values(value: str, code: str) -> None:
     assert raised.value.code == code
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_resolver_allows_title_change_but_keeps_geometry_fail_closed(
     monkeypatch,
     tmp_path: Path,
@@ -179,6 +176,7 @@ def test_resolver_allows_title_change_but_keeps_geometry_fail_closed(
     assert mapped["coordinate_authority"] == "fresh_capture_bound_native"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_region_capture_is_validated_and_written_atomically(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -262,6 +260,7 @@ def test_singleton_presentation_axis_uses_native_midpoint_half_up(
     assert screenshot.map_presentation_point(transform, 0, 0) == (expected_index, 0)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_standard_capture_emits_bounded_metadata_and_resolves_native_point(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -320,6 +319,7 @@ def test_standard_capture_emits_bounded_metadata_and_resolves_native_point(
     assert mapped["action_revalidation_required"] is True
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_title_change_is_non_authoritative_and_reported_with_safe_hashes(
     monkeypatch,
     tmp_path: Path,
@@ -358,6 +358,7 @@ def test_title_change_is_non_authoritative_and_reported_with_safe_hashes(
     assert "Disposable fixture" not in json.dumps(result)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_geometry_change_discards_frame_and_recaptures_once(
     monkeypatch,
     tmp_path: Path,
@@ -489,6 +490,7 @@ def test_strong_identity_drift_reports_only_bounded_fields(
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_capture_lifetime_starts_when_pixels_are_captured(monkeypatch, tmp_path: Path) -> None:
     captured_ms = 1_800_000_000_000
     clock = ManualClock(captured_ms)
@@ -526,6 +528,7 @@ def test_capture_lifetime_starts_when_pixels_are_captured(monkeypatch, tmp_path:
     assert not list(store.root.glob("cap_*.json"))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_expiry_during_response_construction_cannot_publish_authority(
     monkeypatch,
     tmp_path: Path,
@@ -561,6 +564,7 @@ def test_expiry_during_response_construction_cannot_publish_authority(
     assert not list(store.root.glob("cap_*.json"))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_slow_output_write_cannot_publish_an_expired_record(monkeypatch, tmp_path: Path) -> None:
     captured_ms = 1_800_000_000_000
     clock = ManualClock(captured_ms)
@@ -594,6 +598,7 @@ def test_slow_output_write_cannot_publish_an_expired_record(monkeypatch, tmp_pat
     assert not list(store.root.glob("cap_*.json"))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_final_expiry_check_deletes_already_published_record(monkeypatch, tmp_path: Path) -> None:
     captured_ms = 1_800_000_000_000
     clock = ManualClock(captured_ms)
@@ -625,6 +630,7 @@ def test_final_expiry_check_deletes_already_published_record(monkeypatch, tmp_pa
     assert not list(store.root.glob("cap_*.json"))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_resolver_rechecks_expiry_after_image_and_live_geometry(
     monkeypatch,
     tmp_path: Path,
@@ -673,6 +679,7 @@ def test_resolver_rechecks_expiry_after_image_and_live_geometry(
         ("native", Region(100, 50, 600, 200), (600, 200)),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_crop_profiles_preserve_native_origin_and_do_not_upscale(
     monkeypatch,
     tmp_path: Path,
@@ -703,6 +710,7 @@ def test_crop_profiles_preserve_native_origin_and_do_not_upscale(
     assert screenshot.map_presentation_point(result["transform"], 0, 0) == (100, 50)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_same_pixels_produce_stable_presentation_hashes(monkeypatch, tmp_path: Path) -> None:
     backend = FakeBackend(width=1200, height=900)
     monkeypatch.setattr(
@@ -732,6 +740,7 @@ def test_same_pixels_produce_stable_presentation_hashes(monkeypatch, tmp_path: P
         (192, "native", (1200, 800)),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_profiles_preserve_exact_dpi_metadata_across_settings(
     monkeypatch,
     tmp_path: Path,
@@ -763,6 +772,7 @@ def test_profiles_preserve_exact_dpi_metadata_across_settings(
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_resolver_rejects_expired_missing_and_altered_records(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -832,6 +842,7 @@ def test_resolver_rejects_expired_missing_and_altered_records(
     assert altered.value.code == "capture_record_altered"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_resolver_rejects_altered_image_and_mismatched_dimensions(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -884,6 +895,7 @@ def test_resolver_rejects_altered_image_and_mismatched_dimensions(
     assert dimensions.value.code == "capture_image_dimensions_changed"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_resolver_rejects_signed_but_cross_field_inconsistent_record(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -926,6 +938,7 @@ def test_resolver_rejects_signed_but_cross_field_inconsistent_record(
         ("dpi", "capture_dpi_changed"),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_resolver_rejects_identity_geometry_and_dpi_drift(
     monkeypatch, tmp_path: Path, drift: str, code: str
 ) -> None:
@@ -983,6 +996,7 @@ def test_resolver_rejects_identity_geometry_and_dpi_drift(
     assert raised.value.code == code
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_capture_store_is_owner_only_and_bounded(monkeypatch, tmp_path: Path) -> None:
     backend = FakeBackend()
     monkeypatch.setattr(
@@ -1032,6 +1046,7 @@ def test_capture_store_is_owner_only_and_bounded(monkeypatch, tmp_path: Path) ->
     assert len(list(store.root.glob("cap_*.json"))) <= MAX_CAPTURE_RECORDS
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_capture_store_fails_closed_when_required_evictions_are_denied(
     monkeypatch,
     tmp_path: Path,
@@ -1062,6 +1077,7 @@ def test_capture_store_fails_closed_when_required_evictions_are_denied(
     assert not (store.root / f"{new_capture_id}.json").exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_capture_store_lock_is_cross_process_and_store_local(tmp_path: Path) -> None:
     root = tmp_path / "records"
     script = (
@@ -1089,6 +1105,7 @@ def test_capture_store_lock_is_cross_process_and_store_local(tmp_path: Path) -> 
         process.wait(timeout=5)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_integrity_key_creation_is_exclusive_without_store_lock(tmp_path: Path) -> None:
     root = tmp_path / "records"
     capture_records._prepare_capture_store_root(root)
@@ -1118,6 +1135,7 @@ def test_integrity_key_creation_is_exclusive_without_store_lock(tmp_path: Path) 
     assert not list(root.glob("..integrity-key.*.tmp"))
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_png_is_complete_before_signed_record_publication(monkeypatch, tmp_path: Path) -> None:
     backend = FakeBackend()
     monkeypatch.setattr(
@@ -1149,6 +1167,7 @@ def test_png_is_complete_before_signed_record_publication(monkeypatch, tmp_path:
     assert (store.root / f"{result['capture_id']}.json").is_file()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_record_write_has_no_fallible_post_commit_acl_step(monkeypatch, tmp_path: Path) -> None:
     store = CaptureRecordStore(tmp_path / "records")
     capture_id = store.new_capture_id()
@@ -1166,6 +1185,7 @@ def test_record_write_has_no_fallible_post_commit_acl_step(monkeypatch, tmp_path
     assert record_path.is_file()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_post_commit_lock_exit_failure_rolls_back_record(monkeypatch, tmp_path: Path) -> None:
     store = CaptureRecordStore(tmp_path / "records")
     capture_id = store.new_capture_id()
@@ -1185,6 +1205,7 @@ def test_post_commit_lock_exit_failure_rolls_back_record(monkeypatch, tmp_path: 
     assert not record_path.exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_capture_record_deletion_failures_are_visible(monkeypatch, tmp_path: Path) -> None:
     store = CaptureRecordStore(tmp_path / "records")
     capture_id = store.new_capture_id()
@@ -1205,6 +1226,7 @@ def test_capture_record_deletion_failures_are_visible(monkeypatch, tmp_path: Pat
     assert raised.value.code == "capture_record_cleanup_failed"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_failed_output_write_removes_coordinate_record(monkeypatch, tmp_path: Path) -> None:
     backend = FakeBackend()
     monkeypatch.setattr(
@@ -1315,6 +1337,7 @@ def test_capture_rejects_reparse_output_before_backend_capture(
     assert output.read_bytes() == b"existing"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_out_of_bounds_region_fails_before_capture(monkeypatch, tmp_path: Path) -> None:
     capture_called = False
 
@@ -1338,6 +1361,7 @@ def test_out_of_bounds_region_fails_before_capture(monkeypatch, tmp_path: Path) 
     assert not (tmp_path / "bad.png").exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_minimized_window_fails_closed(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         screenshot,
@@ -1357,6 +1381,7 @@ def test_minimized_window_fails_closed(monkeypatch, tmp_path: Path) -> None:
     assert not (tmp_path / "minimized.png").exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_all_black_capture_is_rejected_without_writing(monkeypatch, tmp_path: Path) -> None:
     uniform = screenshot.CapturedImage(
         image=Image.new("RGB", (80, 60), "black"),
@@ -2763,6 +2788,7 @@ def test_individual_timeout_does_not_claim_whole_chain_timed_out(monkeypatch) ->
     assert "safety deadline" not in raised.value.message
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_unverified_capture_cleanup_is_rejected(monkeypatch, tmp_path: Path) -> None:
     capture = _non_uniform_capture()
     unverified = screenshot.CapturedImage(
@@ -3081,6 +3107,7 @@ def test_capture_worker_termination_failure_precedes_pipe_cleanup(
     ]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_header_cropped_dwm_padding_is_reported_in_final_limitations(
     monkeypatch,
     tmp_path: Path,

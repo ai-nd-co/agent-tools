@@ -15,6 +15,10 @@ from agent_tools.computer import providers
 from agent_tools.computer.models import ComputerError, available_section
 from agent_tools.computer.providers import ProviderSpec
 
+# Windows desktop control (UI Automation, screenshots, OCR): the code answers `unsupported_platform`
+# anywhere else, and this module exercises the Windows paths. Run it where it can be true.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
+
 
 class FakeBackend:
     def identity_session(self):

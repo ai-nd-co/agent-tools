@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,10 @@ from agent_tools.computer.actions import (
 )
 from agent_tools.computer.models import Bounds, ComputerError, WindowIdentity
 from agent_tools.computer.rendering import render_action, render_human_error, render_json_error
+
+# Windows desktop control (UI Automation, screenshots, OCR): the code answers `unsupported_platform`
+# anywhere else, and this module exercises the Windows paths. Run it where it can be true.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 
 
 def _identity() -> WindowIdentity:

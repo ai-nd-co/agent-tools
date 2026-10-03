@@ -24,6 +24,10 @@ from agent_tools.computer.models import (
 )
 from agent_tools.computer.rendering import render_ocr
 
+# Windows desktop control (UI Automation, screenshots, OCR): the code answers `unsupported_platform`
+# anywhere else, and this module exercises the Windows paths. Run it where it can be true.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
+
 
 class ManualClock:
     def __init__(self, now_ms: int) -> None:

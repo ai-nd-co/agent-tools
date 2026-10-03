@@ -31,6 +31,10 @@ from agent_tools.computer.models import (
 )
 from agent_tools.computer.rendering import render_json, render_windows
 
+# Windows desktop control (UI Automation, screenshots, OCR): the code answers `unsupported_platform`
+# anywhere else, and this module exercises the Windows paths. Run it where it can be true.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
+
 
 class FakeBackend:
     def __init__(

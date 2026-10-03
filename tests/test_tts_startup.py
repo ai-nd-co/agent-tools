@@ -37,6 +37,10 @@ from agent_tools.tts_startup import (
     run_owned_runner,
 )
 
+# The startup lifecycle is a Windows Scheduled Task; the code raises `windows_required` anywhere
+# else, and this module exercises that lifecycle. Run it where it can be true.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
+
 TOKEN = "task319-owner-only-token-0123456789abcdef"
 OWNER_SID = "S-1-5-21-319"
 EXECUTABLE_PATH = str(Path(sys.executable).resolve())

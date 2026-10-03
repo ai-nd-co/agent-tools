@@ -218,7 +218,9 @@ def _broadcast_args(
     return args
 
 
-def _run_adb(adb_serial: str, args: list[str], *, error_prefix: str) -> subprocess.CompletedProcess[str]:
+def _run_adb(
+    adb_serial: str, args: list[str], *, error_prefix: str
+) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         ["adb", "-s", adb_serial, *args],
         capture_output=True,

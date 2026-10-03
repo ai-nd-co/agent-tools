@@ -19,6 +19,10 @@ from agent_tools.computer.uia_winapp import (
     WinAppBinding,
 )
 
+# Windows desktop control (UI Automation, screenshots, OCR): the code answers `unsupported_platform`
+# anywhere else, and this module exercises the Windows paths. Run it where it can be true.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
+
 
 def _identity() -> WindowIdentity:
     return WindowIdentity(

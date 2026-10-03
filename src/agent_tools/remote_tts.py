@@ -205,8 +205,18 @@ def _error_detail(exc: error.HTTPError) -> str:
 
 
 def _declares_unknown_length(wav: bytes) -> bool:
-    """A RIFF whose size fields are the streaming placeholder (all ones)."""
-    return len(wav) >= 8 and wav[4:8] == b"\xff\xff\xff\xff"
+    """A RIFF whose size fields — the outer one AND the data chunk's — are the streaming
+    placeholder (all ones). A concrete data length is checked exactly, whatever the outer says."""
+    if len(wav) < 12 or wav[4:8] != b"\xff\xff\xff\xff":
+        return False
+    offset = 12
+    while offset + 8 <= len(wav):
+        chunk_id = wav[offset : offset + 4]
+        size = int.from_bytes(wav[offset + 4 : offset + 8], "little")
+        if chunk_id == b"data":
+            return size == 0xFFFFFFFF
+        offset += 8 + size + (size & 1)
+    return False
 
 
 def _redact(text: str, api_key: str) -> str:

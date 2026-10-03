@@ -556,3 +556,11 @@ def test_streamed_wav_with_unknown_length_is_accepted(monkeypatch: pytest.Monkey
     _capture_urlopen(monkeypatch, _streamed_wav(2_400, cut=1))
     with pytest.raises(RemoteTtsError, match="truncated"):
         synthesize_remote_wav("Hello.", options=options, settings=settings)
+
+    # The outer placeholder alone does not relax the check: a concrete data length that the
+    # body does not fill is truncation, whole frames or not.
+    whole = bytearray(_wav(frames=2_400))
+    whole[4:8] = b"\xff\xff\xff\xff"
+    _capture_urlopen(monkeypatch, bytes(whole[:-200]))
+    with pytest.raises(RemoteTtsError, match="truncated"):
+        synthesize_remote_wav("Hello.", options=options, settings=settings)

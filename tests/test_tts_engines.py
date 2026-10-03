@@ -50,7 +50,7 @@ def test_engine_defaults_remain_truthful() -> None:
     assert (russian.engine, russian.model, russian.voice, russian.language) == (
         "silero",
         SILERO_MODEL_ID,
-        "xenia",
+        "eugene",
         "ru",
     )
 

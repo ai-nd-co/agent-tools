@@ -1,0 +1,103 @@
+# Build, smoke and publish the tts-server container (docker/tts-server/Dockerfile) to GHCR.
+#
+# Delivery follows the org's usual contract: the office cluster pulls this image by DIGEST, and a
+# deploy is a PR in k3s-gpu-cluster changing the pin in terraform/52-speech.tf. The run summary
+# prints the digest to pin. Feature branches publish too, tagged by commit, so a cluster PR can pin
+# an image before the package merge (main republishes the same content under its own commit tag).
+#
+# GitHub-hosted runner on purpose: this is a public repository and the image needs no cluster
+# access to build; keeping it off arc-runner keeps untrusted code out of the cluster network.
+name: tts-server image
+
+on:
+  push:
+    branches: ['main', 'feat/**']
+    paths:
+      - 'docker/tts-server/**'
+      - 'src/**'
+      - 'pyproject.toml'
+      - '.github/workflows/tts-server-image.yml'
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/ai-nd-co/agent-tools-tts-server
+
+concurrency:
+  group: tts-server-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_SHA::12}"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          docker build -f docker/tts-server/Dockerfile -t "$IMAGE:$tag" .
+
+      # The container must come up with no network, refuse a request without the key, and return a
+      # real WAV for Russian: the three properties the cluster relies on.
+      - name: Smoke
+        run: |
+          set -euo pipefail
+          key=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+          name="tts-smoke-$GITHUB_RUN_ID"
+          cleanup() { docker logs "$name" 2>&1 | tail -20 || true; docker rm -f "$name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name "$name" --network none -e API_KEY="$key" "$IMAGE:$TAG" >/dev/null
+          for i in $(seq 1 60); do
+            docker logs "$name" 2>&1 | grep -q "TTS server ready" && break
+            [ "$i" = 60 ] && { echo "::error::the server never became ready"; exit 1; }
+            sleep 2
+          done
+          docker exec "$name" id -u | grep -qx 1000 || { echo "::error::the server does not run as uid 1000"; exit 1; }
+          probe() { docker exec -i "$name" python - "$@" <<'PY'
+          import json, sys, urllib.request, urllib.error
+          method, path, key, body = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+          req = urllib.request.Request("http://127.0.0.1:8081" + path, method=method,
+                                       data=body.encode() if body else None,
+                                       headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + key} if key else {})})
+          try:
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = r.read(); print(r.status, len(data), data[:4] == b"RIFF")
+          except urllib.error.HTTPError as e:
+              print(e.code, 0, False)
+          PY
+          }
+          probe GET /healthz "" "" | grep -q "^401 " || { echo "::error::/healthz answered without a key"; exit 1; }
+          probe GET /healthz "$key" "" | grep -q "^200 " || { echo "::error::/healthz did not answer with the key"; exit 1; }
+          out=$(probe POST /v1/audio/speech-ru "$key" '{"model":"silero-v5-ru","voice":"eugene","input":"Готово.","response_format":"wav"}')
+          echo "speech-ru: $out"
+          echo "$out" | grep -qE "^200 [0-9]{4,} True$" || { echo "::error::no WAV for Russian"; exit 1; }
+          out=$(probe POST /v1/audio/speech-ru "" '{"model":"silero-v5-ru","input":"x"}')
+          echo "$out" | grep -q "^401 " || { echo "::error::speech route answered without a key"; exit 1; }
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$TAG"
+          if [ "$GITHUB_REF_NAME" = main ]; then
+            docker tag "$IMAGE:$TAG" "$IMAGE:main"
+            docker push "$IMAGE:main"
+          fi
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$TAG")
+          {
+            echo "## tts-server image"
+            echo
+            echo "Pin this in k3s-gpu-cluster terraform/52-speech.tf:"
+            echo
+            echo '```'
+            echo "$digest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$digest"

@@ -332,7 +332,7 @@ def test_ttsify_routes_from_final_transformed_russian_text(monkeypatch: object) 
 
     assert captured == {
         "text": final_text,
-        "voice": "xenia",
+        "voice": "eugene",
         "language": None,
         "speed": 1.0,
         "device": "cpu",
@@ -340,7 +340,7 @@ def test_ttsify_routes_from_final_transformed_russian_text(monkeypatch: object) 
     }
     assert result.tts_engine == "silero"
     assert result.tts_model == "snakers4/silero-models:v5_5_ru"
-    assert result.voice == "xenia"
+    assert result.voice == "eugene"
     assert result.language == "ru"
 
 

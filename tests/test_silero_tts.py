@@ -202,7 +202,7 @@ def test_silero_synthesis_reports_truthful_pcm_metadata(
 
     assert result.engine == "silero"
     assert result.model == "snakers4/silero-models:v5_5_ru"
-    assert result.voice == "xenia"
+    assert result.voice == "eugene"
     assert result.language == "ru"
     assert result.sample_rate == 24_000
     assert result.chunks == 1

@@ -110,8 +110,8 @@ def test_settings_from_the_file_with_cluster_defaults(secrets_dir: Path) -> None
     assert settings.api_key == KEY
     assert settings.base_url == DEFAULT_SPEECH_BASE_URL
     assert settings.en_model == DEFAULT_REMOTE_EN_MODEL
-    assert settings.ru_model == DEFAULT_REMOTE_RU_MODEL
-    assert settings.ru_voice == DEFAULT_REMOTE_RU_VOICE
+    assert settings.ru_model == DEFAULT_REMOTE_RU_MODEL == "silero-v5-ru"
+    assert settings.ru_voice == DEFAULT_REMOTE_RU_VOICE == "eugene"
 
 
 def test_settings_env_wins_and_url_is_canonical(
@@ -155,19 +155,24 @@ def test_backend_names(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- model mapping --------------------------------------------------------------------
 
 
-def test_russian_goes_to_piper_and_english_keeps_its_kokoro_voice() -> None:
+def test_russian_goes_to_silero_route_and_english_keeps_its_kokoro_voice() -> None:
     settings = RemoteTtsSettings(
         base_url="https://s/v1",
         api_key=KEY,
         en_model="k",
-        ru_model="p",
-        ru_voice="dmitri",
+        ru_model="silero-v5-ru",
+        ru_voice="eugene",
         timeout_seconds=1,
     )
     ru = resolve_tts_options("Привет, это тест.", engine="auto")
-    assert remote_model_and_voice(ru, settings) == ("p", "dmitri")
+    assert remote_model_and_voice(ru, settings) == ("silero-v5-ru", "eugene")
+    assert remote_tts.remote_path(ru) == "/audio/speech-ru"
+    # An explicit Silero voice is honoured on the cluster: same engine there.
+    ru_voice = resolve_tts_options("Привет, это тест.", engine="auto", voice="aidar")
+    assert remote_model_and_voice(ru_voice, settings) == ("silero-v5-ru", "aidar")
     en = resolve_tts_options("Hello there.", engine="auto", voice="am_adam")
     assert remote_model_and_voice(en, settings) == ("k", "am_adam")
+    assert remote_tts.remote_path(en) == "/audio/speech"
 
 
 # --- the request ------------------------------------------------------------------------
@@ -188,7 +193,7 @@ def test_request_shape_and_result(monkeypatch: pytest.MonkeyPatch) -> None:
     result = synthesize_remote_wav("Привет.", options=options, settings=settings)
 
     req, timeout = calls[0]
-    assert req.full_url == "https://s/v1/audio/speech"
+    assert req.full_url == "https://s/v1/audio/speech-ru"  # Russian goes to the Silero container
     assert req.get_method() == "POST"
     assert req.get_header("Authorization") == f"Bearer {KEY}"
     assert json.loads(req.data) == {

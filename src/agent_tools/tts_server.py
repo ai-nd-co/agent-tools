@@ -13,6 +13,7 @@ import signal
 import stat
 import sys
 import threading
+import uuid
 import warnings
 import wave
 from collections.abc import Callable
@@ -32,8 +33,11 @@ if TYPE_CHECKING:
 # must not be recreated by each credential check in the startup polling loop.
 class _WindowsAcl(ctypes.Structure):
     _fields_ = [
-        ("revision", ctypes.c_ubyte), ("reserved1", ctypes.c_ubyte),
-        ("size", wintypes.WORD), ("ace_count", wintypes.WORD), ("reserved2", wintypes.WORD),
+        ("revision", ctypes.c_ubyte),
+        ("reserved1", ctypes.c_ubyte),
+        ("size", wintypes.WORD),
+        ("ace_count", wintypes.WORD),
+        ("reserved2", wintypes.WORD),
     ]
 
 
@@ -43,6 +47,7 @@ class _WindowsSidAndAttributes(ctypes.Structure):
 
 class _WindowsTokenUser(ctypes.Structure):
     _fields_ = [("user", _WindowsSidAndAttributes)]
+
 
 DEFAULT_TTS_SERVER_HOST = "127.0.0.1"
 DEFAULT_TTS_SERVER_PORT = 4223
@@ -61,6 +66,14 @@ SYNTHESIS_TIMEOUT_SECONDS = 180.0
 _REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
 _TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/=-]+\Z")
 _REQUEST_FIELDS = frozenset({"requestId", "text", "language"})
+# The OpenAI speech request (``POST /v1/audio/speech``), as the agent-tools remote client and the
+# office cluster's other server send it. Only Silero is served on this route: it exists so the
+# Russian voice can live in this container next to a Kokoro server that owns the English route.
+_SPEECH_FIELDS = frozenset({"model", "voice", "input", "response_format", "speed"})
+_SPEECH_MODELS = frozenset({"silero-v5-ru", "silero", "tts-1"})
+SPEECH_ROUTES = ("/v1/audio/speech", "/v1/audio/speech-ru")
+DEFAULT_SPEECH_VOICE = "eugene"
+SUPPORTED_ENGINES = ("kokoro", "silero")
 _API_TO_TTSIFY_LANGUAGE = {
     "auto": None,
     "en-US": "a",
@@ -105,6 +118,8 @@ class TtsRequest:
     request_id: str
     text: str
     language: str
+    # Set only by the speech route; the private /v1/tts contract keeps the engine's default.
+    voice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,7 +132,9 @@ class TtsAudioResponse:
     language: str
 
 
-Synthesizer = Callable[[str, str, str], "TtsifyResult"]
+# (text, language, device) — and (text, language, device, voice) when a voice is requested, so
+# callers and test doubles written for the three-argument form keep working unchanged.
+Synthesizer = Callable[..., "TtsifyResult"]
 
 
 class TtsService:
@@ -129,9 +146,15 @@ class TtsService:
         synthesizer: Synthesizer | None = None,
         prewarm_timeout_seconds: float = PREWARM_TIMEOUT_SECONDS,
         synthesis_timeout_seconds: float = SYNTHESIS_TIMEOUT_SECONDS,
+        engines: tuple[str, ...] = SUPPORTED_ENGINES,
     ) -> None:
+        if not engines or any(engine not in SUPPORTED_ENGINES for engine in engines):
+            raise ValueError(
+                f"TTS server engines must be a non-empty subset of {SUPPORTED_ENGINES}."
+            )
         self.bearer_token = bearer_token
         self.device = device
+        self.engines = tuple(engine for engine in SUPPORTED_ENGINES if engine in engines)
         self._synthesizer = synthesizer or _synthesize_prepared_text
         self._job_lock = threading.Lock()
         self._ready = False
@@ -146,6 +169,8 @@ class TtsService:
         self._ready = False
         probes = (("Ready.", "en-US", "kokoro"), ("Готово.", "ru", "silero"))
         for text, language, expected_engine in probes:
+            if expected_engine not in self.engines:
+                continue
             try:
                 response = self._run_synthesis_job(
                     request_id="prewarm",
@@ -161,6 +186,18 @@ class TtsService:
                 ) from exc
         self._ready = True
 
+    def engine_for(self, language: str) -> str | None:
+        """The engine a request language needs, or None when ``auto`` leaves it to the text."""
+        if language in {"en-US", "en-GB"}:
+            return "kokoro"
+        if language in {"ru", "ru-RU"}:
+            return "silero"
+        return None
+
+    def serves(self, language: str) -> bool:
+        engine = self.engine_for(language)
+        return engine is None or engine in self.engines
+
     def synthesize(self, request: TtsRequest) -> TtsAudioResponse:
         if not self._ready:
             raise TtsServiceUnavailable("The TTS service is not ready.")
@@ -169,6 +206,7 @@ class TtsService:
             text=request.text,
             requested_language=request.language,
             timeout_seconds=self._synthesis_timeout_seconds,
+            voice=request.voice,
         )
 
     def _run_synthesis_job(
@@ -178,6 +216,7 @@ class TtsService:
         text: str,
         requested_language: str,
         timeout_seconds: float,
+        voice: str | None = None,
     ) -> TtsAudioResponse:
         if timeout_seconds <= 0:
             raise ValueError("TTS synthesis timeout must be positive.")
@@ -188,7 +227,11 @@ class TtsService:
 
         def synthesize() -> None:
             try:
-                result = self._synthesizer(text, requested_language, self.device)
+                result = (
+                    self._synthesizer(text, requested_language, self.device)
+                    if voice is None
+                    else self._synthesizer(text, requested_language, self.device, voice)
+                )
                 outcome.append(
                     _validate_synthesized_result(
                         request_id=request_id,
@@ -262,16 +305,24 @@ class TtsRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(
             HTTPStatus.OK,
-            {"status": "ready", "engines": ["kokoro", "silero"]},
+            {"status": "ready", "engines": list(self.tts_server.service.engines)},
         )
 
     def do_POST(self) -> None:
-        if not self._route_is("/v1/tts"):
+        route = self._route_in(("/v1/tts", *SPEECH_ROUTES))
+        if route is None:
             return
         if not self._authorize():
             return
-        request = self._read_request()
+        request = self._read_request(speech=route != "/v1/tts")
         if request is None:
+            return
+        if not self.tts_server.service.serves(request.language):
+            self._send_json_error(
+                HTTPStatus.BAD_REQUEST,
+                "language_unavailable",
+                "This server does not serve that language.",
+            )
             return
         try:
             response = self.tts_server.service.synthesize(request)
@@ -354,6 +405,9 @@ class TtsRequestHandler(BaseHTTPRequestHandler):
         del format, args
 
     def _route_is(self, expected_path: str) -> bool:
+        return self._route_in((expected_path,)) is not None
+
+    def _route_in(self, expected_paths: tuple[str, ...]) -> str | None:
         parsed = urlsplit(self.path)
         if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
             self._send_json_error(
@@ -361,15 +415,15 @@ class TtsRequestHandler(BaseHTTPRequestHandler):
                 "query_not_allowed",
                 "Query strings and absolute request targets are not allowed.",
             )
-            return False
-        if parsed.path != expected_path:
+            return None
+        if parsed.path not in expected_paths:
             self._send_json_error(
                 HTTPStatus.NOT_FOUND,
                 "not_found",
                 "The requested endpoint does not exist.",
             )
-            return False
-        return True
+            return None
+        return parsed.path
 
     def _authorize(self) -> bool:
         values = self.headers.get_all("Authorization", failobj=[])
@@ -393,7 +447,7 @@ class TtsRequestHandler(BaseHTTPRequestHandler):
             extra_headers={"WWW-Authenticate": "Bearer"},
         )
 
-    def _read_request(self) -> TtsRequest | None:
+    def _read_request(self, *, speech: bool = False) -> TtsRequest | None:
         transfer_encoding = self.headers.get("Transfer-Encoding")
         if transfer_encoding:
             self._send_json_error(
@@ -460,7 +514,9 @@ class TtsRequestHandler(BaseHTTPRequestHandler):
             )
             return None
         try:
-            return _validate_request_payload(payload)
+            return (
+                _validate_speech_payload(payload) if speech else _validate_request_payload(payload)
+            )
         except ValueError as exc:
             code = str(exc)
             messages = {
@@ -469,6 +525,10 @@ class TtsRequestHandler(BaseHTTPRequestHandler):
                 "invalid_text": "The speech text is invalid.",
                 "text_too_long": "The speech text is too long.",
                 "invalid_language": "The speech language is invalid.",
+                "invalid_model": "The model is not served here; use silero-v5-ru.",
+                "invalid_voice": "The voice is not a Silero voice.",
+                "invalid_response_format": "Only response_format wav is served.",
+                "invalid_speed": "Silero serves speed 1.0 only.",
             }
             self._send_json_error(
                 HTTPStatus.BAD_REQUEST,
@@ -551,12 +611,21 @@ def run_tts_server(
     *,
     host: str,
     port: int,
-    token_file: Path,
+    token_file: Path | None,
     device: str,
+    token_env: str | None = None,
+    bind_any: bool = False,
+    engines: tuple[str, ...] = SUPPORTED_ENGINES,
 ) -> int:
-    validate_tts_server_bind(host, port)
-    token = load_owner_only_bearer_token(token_file)
-    service = TtsService(bearer_token=token, device=device)
+    validate_tts_server_bind(host, port, bind_any=bind_any)
+    if (token_file is None) == (token_env is None):
+        raise ValueError("Give exactly one of --token-file and --token-env.")
+    token = (
+        load_owner_only_bearer_token(token_file)
+        if token_file is not None
+        else load_bearer_token_from_env(token_env or "")
+    )
+    service = TtsService(bearer_token=token, device=device, engines=engines)
     service.prewarm()
     try:
         server = TtsHttpServer((host, port), service)
@@ -571,7 +640,7 @@ def run_tts_server(
         previous_sigbreak = signal.getsignal(sigbreak)
         signal.signal(sigbreak, _raise_keyboard_interrupt)
     try:
-        print(f"TTS server ready on {host}:{port} (kokoro, silero; device={device}).")
+        print(f"TTS server ready on {host}:{port} ({', '.join(service.engines)}; device={device}).")
         try:
             server.serve_forever(poll_interval=0.2)
         except KeyboardInterrupt:
@@ -583,13 +652,24 @@ def run_tts_server(
     return 0
 
 
-def validate_tts_server_bind(host: str, port: int) -> None:
+def validate_tts_server_bind(host: str, port: int, *, bind_any: bool = False) -> None:
     try:
         address = ipaddress.IPv4Address(host)
     except ipaddress.AddressValueError as exc:
         raise ValueError(
             "TTS server host must be exact loopback, Tailscale IPv4, or RFC1918 IPv4."
         ) from exc
+    if address == ipaddress.IPv4Address("0.0.0.0"):
+        # Only a container, where the pod's network is the boundary and the ingress in front
+        # does the exposing. On a desktop this would put the service on every interface.
+        if not bind_any:
+            raise ValueError(
+                "TTS server host must be exact loopback, Tailscale IPv4, or RFC1918 IPv4; "
+                "0.0.0.0 only with --bind-any (container use)."
+            )
+        if isinstance(port, bool) or not 1 <= port <= 65_535:
+            raise ValueError("TTS server port must be between 1 and 65535.")
+        return
     private_lan = any(
         address in network
         for network in (
@@ -645,7 +725,29 @@ def load_owner_only_bearer_token(path: Path) -> str:
         ) from exc
 
 
-def _synthesize_prepared_text(text: str, language: str, device: str) -> TtsifyResult:
+def load_bearer_token_from_env(name: str) -> str:
+    """The token from an environment variable — how a container gets a Kubernetes Secret.
+
+    The same shape rules as the file: one strong token, nothing that could not go in a header.
+    The variable is not unset afterwards: the process is alone in its container.
+    """
+    raw = os.environ.get(name) if name else None
+    token = (raw or "").strip()
+    if (
+        len(token) < MIN_TOKEN_CHARACTERS
+        or len(token.encode("ascii", "replace")) > MAX_TOKEN_BYTES
+        or _TOKEN_PATTERN.fullmatch(token) is None
+    ):
+        raise TtsServerError(
+            "TTS server token must be one strong bearer token in the environment "
+            f"variable {name!r}."
+        )
+    return token
+
+
+def _synthesize_prepared_text(
+    text: str, language: str, device: str, voice: str | None = None
+) -> TtsifyResult:
     from agent_tools.ttsify import TtsifyOptions, ttsify_text
 
     with warnings.catch_warnings():
@@ -656,6 +758,9 @@ def _synthesize_prepared_text(text: str, language: str, device: str) -> TtsifyRe
                 no_transform=True,
                 language=_API_TO_TTSIFY_LANGUAGE[language],
                 device=device,
+                voice=voice,
+                # This process IS the server: synthesis happens here, never on the cluster.
+                backend="local",
             ),
         )
 
@@ -744,6 +849,37 @@ def _validate_request_payload(payload: object) -> TtsRequest:
     if not isinstance(language, str) or language not in ALLOWED_API_LANGUAGES:
         raise ValueError("invalid_language")
     return TtsRequest(request_id=request_id, text=text, language=language)
+
+
+def _validate_speech_payload(payload: object) -> TtsRequest:
+    """The OpenAI speech body, narrowed to what this server can honour: Silero, Russian, WAV."""
+    from agent_tools.tts import SILERO_VOICES
+
+    if not isinstance(payload, dict) or not set(payload) <= _SPEECH_FIELDS:
+        raise ValueError("invalid_fields")
+    model = payload.get("model")
+    text = payload.get("input")
+    voice = payload.get("voice", DEFAULT_SPEECH_VOICE)
+    response_format = payload.get("response_format", "wav")
+    speed = payload.get("speed", 1.0)
+    if not isinstance(model, str) or model.strip().lower() not in _SPEECH_MODELS:
+        raise ValueError("invalid_model")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("invalid_text")
+    if len(text) > MAX_TEXT_CHARACTERS:
+        raise ValueError("text_too_long")
+    if not isinstance(voice, str) or voice.strip().lower() not in SILERO_VOICES:
+        raise ValueError("invalid_voice")
+    if not isinstance(response_format, str) or response_format.strip().lower() != "wav":
+        raise ValueError("invalid_response_format")
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or float(speed) != 1.0:
+        raise ValueError("invalid_speed")
+    return TtsRequest(
+        request_id=f"speech-{uuid.uuid4().hex}",
+        text=text,
+        language="ru-RU",
+        voice=voice.strip().lower(),
+    )
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:

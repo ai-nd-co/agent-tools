@@ -251,7 +251,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tts_server_parser.add_argument("--host", default=DEFAULT_TTS_SERVER_HOST)
     tts_server_parser.add_argument("--port", type=int, default=DEFAULT_TTS_SERVER_PORT)
-    tts_server_parser.add_argument("--token-file", type=Path, required=True)
+    tts_server_token = tts_server_parser.add_mutually_exclusive_group(required=True)
+    tts_server_token.add_argument("--token-file", type=Path)
+    tts_server_token.add_argument(
+        "--token-env",
+        metavar="NAME",
+        help="Read the bearer token from this environment variable (containers).",
+    )
+    tts_server_parser.add_argument(
+        "--bind-any",
+        action="store_true",
+        help="Allow --host 0.0.0.0 (container use only).",
+    )
+    tts_server_parser.add_argument(
+        "--engines",
+        default="kokoro,silero",
+        help="Comma-separated subset of kokoro,silero to load and serve (default: both).",
+    )
     tts_server_parser.add_argument(
         "--device",
         choices=SUPPORTED_TTSIFY_DEVICES,
@@ -610,10 +626,14 @@ def _run_ttsify(args: argparse.Namespace) -> int:
 
 
 def _run_tts_server(args: argparse.Namespace) -> int:
+    engines = tuple(part.strip() for part in str(args.engines).split(",") if part.strip())
     return run_tts_server(
         host=args.host,
         port=args.port,
         token_file=args.token_file,
+        token_env=getattr(args, "token_env", None),
+        bind_any=getattr(args, "bind_any", False),
+        engines=engines,
         device=args.device,
     )
 

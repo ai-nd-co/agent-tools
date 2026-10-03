@@ -26,7 +26,7 @@ from typing import Any
 from urllib import error, request
 
 from agent_tools.codex_config import read_string_env
-from agent_tools.tts import ResolvedTtsOptions, TtsMetrics, TtsResult
+from agent_tools.tts import DEFAULT_SILERO_VOICE, ResolvedTtsOptions, TtsMetrics, TtsResult
 
 ENV_TTS_BACKEND = "AGENT_TOOLS_TTS_BACKEND"
 ENV_SPEECH_API_KEY = "SPEECH_API_KEY"
@@ -38,12 +38,15 @@ ENV_REMOTE_TTS_TIMEOUT = "AGENT_TOOLS_REMOTE_TTS_TIMEOUT_SECONDS"
 
 SUPPORTED_TTS_BACKENDS = ("auto", "remote", "local")
 DEFAULT_SPEECH_BASE_URL = "https://speech.k8s.tele-agent.site/v1"
-# What the cluster hosts. Kokoro keeps the local voice names (af_heart and friends), so the
-# resolved Kokoro voice is sent as-is. Silero does not exist on the cluster; Russian goes to
-# Piper, whose voice is named per model, so the local Silero voice is replaced, not forwarded.
+# What the cluster hosts. English is Kokoro in Speaches at /audio/speech, with the same voice
+# names as the local engine, so the resolved Kokoro voice is sent as-is. Russian is Silero in
+# agent-tools' own tts-server container at /audio/speech-ru (model id `silero-v5-ru`), the same
+# engine as locally, so the resolved Silero voice is forwarded too; the owner's pick is eugene.
 DEFAULT_REMOTE_EN_MODEL = "speaches-ai/Kokoro-82M-v1.0-ONNX"
-DEFAULT_REMOTE_RU_MODEL = "speaches-ai/piper-ru_RU-dmitri-medium"
-DEFAULT_REMOTE_RU_VOICE = "dmitri"
+DEFAULT_REMOTE_RU_MODEL = "silero-v5-ru"
+DEFAULT_REMOTE_RU_VOICE = "eugene"
+REMOTE_EN_PATH = "/audio/speech"
+REMOTE_RU_PATH = "/audio/speech-ru"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 MIN_API_KEY_CHARACTERS = 32
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
@@ -164,10 +167,20 @@ def _as_str(value: object) -> str | None:
 def remote_model_and_voice(
     options: ResolvedTtsOptions, settings: RemoteTtsSettings
 ) -> tuple[str, str]:
-    """The cluster model and voice for a locally resolved engine choice."""
+    """The cluster model and voice for a locally resolved engine choice.
+
+    A Silero voice chosen locally is honoured remotely (same engine); the configured Russian
+    voice is the default when the request named none, which is how the owner's pick applies.
+    """
     if options.engine == "silero":
-        return settings.ru_model, settings.ru_voice
+        voice = options.voice if options.voice != DEFAULT_SILERO_VOICE else settings.ru_voice
+        return settings.ru_model, voice
     return settings.en_model, options.voice
+
+
+def remote_path(options: ResolvedTtsOptions) -> str:
+    """Russian and English live on different containers behind the same host."""
+    return REMOTE_RU_PATH if options.engine == "silero" else REMOTE_EN_PATH
 
 
 def _error_detail(exc: error.HTTPError) -> str:
@@ -256,7 +269,7 @@ def synthesize_remote_wav(
         }
     ).encode("utf-8")
     req = request.Request(
-        f"{settings.base_url}/audio/speech",
+        f"{settings.base_url}{remote_path(options)}",
         data=body,
         method="POST",
         headers={

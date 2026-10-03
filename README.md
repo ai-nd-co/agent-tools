@@ -116,7 +116,7 @@ Default `ttsify` settings:
 - reasoning effort: `medium`
 - TTS engine: `auto`
 - English voice: `af_heart`
-- Russian voice: `xenia`
+- Russian voice: `eugene`
 
 Configurable via env vars:
 
@@ -128,7 +128,7 @@ AGENT_TOOLS_KOKORO_LANGUAGE=a
 AGENT_TOOLS_KOKORO_SPEED=1.0
 AGENT_TOOLS_KOKORO_DEVICE=auto
 AGENT_TOOLS_TTS_ENGINE=auto
-AGENT_TOOLS_SILERO_VOICE=xenia
+AGENT_TOOLS_SILERO_VOICE=eugene
 AGENT_TOOLS_SILERO_CACHE_DIR=/path/to/model-cache
 AGENT_TOOLS_TRANSFORM_PROVIDER=codex
 AGENT_TOOLS_CLAUDE_CODE_MODEL=haiku
@@ -178,6 +178,28 @@ AGENT_TOOLS_REMOTE_TTS_RU_MODEL=speaches-ai/piper-ru_RU-dmitri-medium
 AGENT_TOOLS_REMOTE_TTS_RU_VOICE=dmitri
 AGENT_TOOLS_REMOTE_TTS_TIMEOUT_SECONDS=120
 ```
+
+### tts-server as a container (the office cluster's Russian voice)
+
+`docker/tts-server/Dockerfile` packages `tts-server` with CPU torch and the Silero model baked in
+(no network, no volume at start; ~0.4 GB; ready in 2 s; ~0.2 s per sentence on two cores).
+`.github/workflows/tts-server-image.yml` builds, smokes and pushes it to
+`ghcr.io/ai-nd-co/agent-tools-tts-server:<commit>` on every push to `main` and `feat/**`; the run
+summary prints the digest the cluster pins. The container form of the server:
+
+```bash
+agent-tools tts-server --host 0.0.0.0 --bind-any --port 8081 --token-env API_KEY --engines silero --device cpu
+```
+
+- `--token-env NAME` reads the bearer token from the environment (how a Kubernetes Secret arrives)
+  instead of `--token-file`; `--bind-any` is required for `0.0.0.0` and meant for containers only;
+  `--engines silero` loads and prewarms Silero alone, and `/v1/tts` answers `language_unavailable`
+  for English.
+- Besides `/v1/tts`, the server accepts the OpenAI speech body on `/v1/audio/speech` and
+  `/v1/audio/speech-ru`: `{"model": "silero-v5-ru", "voice": "eugene", "input": "…",
+  "response_format": "wav"}` → `audio/wav`. Only Silero models, Silero voices, `wav` and speed 1.0
+  are served there; the two paths exist so the cluster's ingress can send Russian to this
+  container and English to the Kokoro server on the same host.
 
 ### Optional private TTS service
 

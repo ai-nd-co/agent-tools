@@ -21,7 +21,8 @@ SILERO_VOICES = ("aidar", "baya", "kseniya", "xenia", "eugene")
 KOKORO_REPO_ID = "hexgrad/Kokoro-82M"
 SILERO_MODEL_ID = "snakers4/silero-models:v5_5_ru"
 DEFAULT_KOKORO_VOICE = "af_heart"
-DEFAULT_SILERO_VOICE = "xenia"
+# Davron's pick after listening to all five (2026-10-03, #1885); the cluster's Russian voice too.
+DEFAULT_SILERO_VOICE = "eugene"
 RUSSIAN_LANGUAGE = "ru"
 _RUSSIAN_CYRILLIC = frozenset("абвгдеёжзийклмнопрстуфхцчшщъыьэюя")
 
@@ -279,9 +280,7 @@ def is_clearly_russian(text: str) -> bool:
     if not letters:
         return False
     russian_letters = [character for character in letters if character in _RUSSIAN_CYRILLIC]
-    cyrillic_letters = [
-        character for character in letters if "\u0400" <= character <= "\u052f"
-    ]
+    cyrillic_letters = [character for character in letters if "\u0400" <= character <= "\u052f"]
     if len(russian_letters) < 4 or len(russian_letters) / len(letters) < 0.5:
         return False
     return len(russian_letters) == len(cyrillic_letters)

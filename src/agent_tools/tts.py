@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import platform
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from importlib import metadata as importlib_metadata
 from math import isfinite
@@ -21,7 +21,8 @@ SILERO_VOICES = ("aidar", "baya", "kseniya", "xenia", "eugene")
 KOKORO_REPO_ID = "hexgrad/Kokoro-82M"
 SILERO_MODEL_ID = "snakers4/silero-models:v5_5_ru"
 DEFAULT_KOKORO_VOICE = "af_heart"
-DEFAULT_SILERO_VOICE = "xenia"
+# Davron's pick after listening to all five (2026-10-03, #1885); the cluster's Russian voice too.
+DEFAULT_SILERO_VOICE = "eugene"
 RUSSIAN_LANGUAGE = "ru"
 _RUSSIAN_CYRILLIC = frozenset("абвгдеёжзийклмнопрстуфхцчшщъыьэюя")
 
@@ -39,6 +40,10 @@ class TtsResult:
     model: str | None = KOKORO_REPO_ID
     voice: str | None = None
     language: str | None = None
+    # "local" (Kokoro/Silero in this process) or "remote" (the office speech cluster).
+    backend: str = "local"
+    # Set on a local result that was meant to be remote: why the cluster was not used.
+    backend_fallback_reason: str | None = None
     metrics: TtsMetrics = field(default_factory=lambda: TtsMetrics())
 
 
@@ -119,7 +124,16 @@ def synthesize_wav(
     speed: float = 1.0,
     device: str = "auto",
     engine: str = "auto",
+    backend: str | None = None,
 ) -> TtsResult:
+    """Synthesize ``text``; on the office speech cluster when it is configured, else locally.
+
+    ``backend`` is ``auto`` (the cluster when a key is configured and it answers, otherwise
+    local — the default, so a machine with the key never loads a model it does not need),
+    ``remote`` (the cluster or an error) or ``local`` (never the cluster). ``auto`` falls back
+    to local on any cluster failure and records why in ``backend_fallback_reason``; a rejected
+    key is a failure like any other here, because the local engines are a complete answer.
+    """
     if not text.strip():
         raise ValueError("Input text is empty.")
     options = resolve_tts_options(
@@ -129,12 +143,40 @@ def synthesize_wav(
         language=language,
         speed=speed,
     )
+
+    from agent_tools.remote_tts import (
+        RemoteTtsError,
+        load_remote_tts_settings,
+        normalize_tts_backend,
+        synthesize_remote_wav,
+    )
+
+    effective_backend = normalize_tts_backend(backend)
+    fallback_reason: str | None = None
+    if effective_backend in {"auto", "remote"}:
+        try:
+            settings = load_remote_tts_settings()
+            if settings is None:
+                raise RemoteTtsError(
+                    "the speech cluster is not configured (no speech.apiKey in the secrets file)"
+                )
+            return synthesize_remote_wav(
+                text, options=options, settings=settings, explicit_voice=voice
+            )
+        except RemoteTtsError as exc:
+            if effective_backend == "remote":
+                raise
+            fallback_reason = str(exc)
+
     device_resolution = resolve_torch_device(device)
-    return _SYNTHESIS_ENGINES[options.engine].synthesize(
+    result = _SYNTHESIS_ENGINES[options.engine].synthesize(
         text,
         options=options,
         device_resolution=device_resolution,
     )
+    if fallback_reason is None:
+        return result
+    return replace(result, backend_fallback_reason=fallback_reason)
 
 
 def resolve_tts_engine(text: str, *, engine: str = "auto", language: str | None = None) -> str:
@@ -240,9 +282,7 @@ def is_clearly_russian(text: str) -> bool:
     if not letters:
         return False
     russian_letters = [character for character in letters if character in _RUSSIAN_CYRILLIC]
-    cyrillic_letters = [
-        character for character in letters if "\u0400" <= character <= "\u052f"
-    ]
+    cyrillic_letters = [character for character in letters if "\u0400" <= character <= "\u052f"]
     if len(russian_letters) < 4 or len(russian_letters) / len(letters) < 0.5:
         return False
     return len(russian_letters) == len(cyrillic_letters)

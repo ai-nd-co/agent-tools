@@ -765,8 +765,46 @@ def test_cli_contract_defaults_to_loopback_port_4223_and_cpu(monkeypatch: Any) -
         "host": "127.0.0.1",
         "port": 4223,
         "token_file": Path("private-token-file"),
+        "token_env": None,
+        "bind_any": False,
+        "engines": ("kokoro", "silero"),
         "device": "cpu",
     }
+
+
+def test_cli_contract_container_form(monkeypatch: Any) -> None:
+    """The sidecar form: token from the environment, wildcard bind, Silero only."""
+    import agent_tools.cli as cli_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "run_tts_server",
+        lambda **values: captured.update(values) or 0,
+    )
+
+    assert (
+        cli_module.main(
+            [
+                "tts-server",
+                "--host",
+                "0.0.0.0",
+                "--bind-any",
+                "--port",
+                "8081",
+                "--token-env",
+                "API_KEY",
+                "--engines",
+                "silero",
+            ]
+        )
+        == 0
+    )
+    assert captured["host"] == "0.0.0.0"
+    assert captured["bind_any"] is True
+    assert captured["token_file"] is None
+    assert captured["token_env"] == "API_KEY"
+    assert captured["engines"] == ("silero",)
 
 
 def test_owner_only_token_file_is_read_without_exposure(tmp_path: Path) -> None:
@@ -897,3 +935,146 @@ def _grant_another_principal_read_access(path: Path) -> None:
         acl,
         None,
     )
+
+
+# --- the OpenAI speech route (Silero sidecar) --------------------------------------------------
+
+
+def _speech_service(calls: list[tuple[str, str, str, str | None]]) -> TtsService:
+    from agent_tools.tts_server import TtsService
+
+    def fake_synthesizer(text: str, language: str, device: str, voice: str | None = None) -> Any:
+        calls.append((text, language, device, voice))
+        return _result(language)
+
+    service = TtsService(
+        bearer_token="t" * 40, device="cpu", synthesizer=fake_synthesizer, engines=("silero",)
+    )
+    service.prewarm()
+    return service
+
+
+def test_silero_only_service_prewarms_silero_alone_and_refuses_english() -> None:
+    from agent_tools.tts_server import TtsRequest
+
+    calls: list[tuple[str, str, str, str | None]] = []
+    service = _speech_service(calls)
+    assert [c[1] for c in calls] == ["ru"], "only the Russian probe runs"
+    assert service.engines == ("silero",)
+    assert service.serves("ru") and service.serves("auto", "Привет") and not service.serves("en-US")
+    response = service.synthesize(
+        TtsRequest(request_id="r1", text="Привет.", language="ru-RU", voice="eugene")
+    )
+    assert calls[-1] == ("Привет.", "ru-RU", "cpu", "eugene")
+    assert response.engine == "silero"
+
+
+def test_speech_payload_validation() -> None:
+    from agent_tools.tts_server import _validate_speech_payload
+
+    request = _validate_speech_payload(
+        {"model": "silero-v5-ru", "input": "Привет.", "response_format": "wav"}
+    )
+    assert request.language == "ru-RU" and request.voice == "eugene"
+    assert request.request_id.startswith("speech-")
+    assert (
+        _validate_speech_payload({"model": "tts-1", "voice": "Aidar", "input": "x"}).voice
+        == "aidar"
+    )
+    for payload, code in (
+        ({"model": "kokoro", "input": "x"}, "invalid_model"),
+        ({"model": "silero-v5-ru", "input": "x", "voice": "af_heart"}, "invalid_voice"),
+        (
+            {"model": "silero-v5-ru", "input": "x", "response_format": "mp3"},
+            "invalid_response_format",
+        ),
+        ({"model": "silero-v5-ru", "input": "x", "speed": 1.5}, "invalid_speed"),
+        ({"model": "silero-v5-ru", "input": " "}, "invalid_text"),
+        ({"model": "silero-v5-ru", "input": "x", "extra": 1}, "invalid_fields"),
+        ({"model": "silero-v5-ru", "input": "x" * 4_001}, "text_too_long"),
+    ):
+        with pytest.raises(ValueError, match=code):
+            _validate_speech_payload(payload)
+
+
+def test_token_from_env(monkeypatch: Any) -> None:
+    from agent_tools.tts_server import TtsServerError, load_bearer_token_from_env
+
+    monkeypatch.setenv("API_KEY", "k" * 64)
+    assert load_bearer_token_from_env("API_KEY") == "k" * 64
+    monkeypatch.setenv("API_KEY", "short")
+    with pytest.raises(TtsServerError, match="environment variable 'API_KEY'"):
+        load_bearer_token_from_env("API_KEY")
+    monkeypatch.delenv("API_KEY")
+    with pytest.raises(TtsServerError):
+        load_bearer_token_from_env("API_KEY")
+
+
+def test_bind_any_allows_wildcard_only_when_asked() -> None:
+    from agent_tools.tts_server import validate_tts_server_bind
+
+    validate_tts_server_bind("0.0.0.0", 8081, bind_any=True)
+    with pytest.raises(ValueError, match="bind-any"):
+        validate_tts_server_bind("0.0.0.0", 8081)
+    with pytest.raises(ValueError, match="exact loopback"):
+        validate_tts_server_bind("8.8.8.8", 8081, bind_any=True)
+
+
+def test_speech_route_over_http_serves_russian_wav_and_refuses_the_rest() -> None:
+    calls: list[tuple[str, str, str, str | None]] = []
+    service = TtsService(
+        bearer_token=TOKEN,
+        synthesizer=lambda text, language, device, voice=None: (
+            calls.append((text, language, device, voice)) or _result(language)
+        ),
+        engines=("silero",),
+    )
+    service.prewarm()
+    body = json.dumps(
+        {"model": "silero-v5-ru", "voice": "eugene", "input": "Привет.", "response_format": "wav"}
+    ).encode("utf-8")
+    with _running_server(service) as address:
+        for path in ("/v1/audio/speech", "/v1/audio/speech-ru"):
+            status, headers, payload = _request(address, "POST", path, body=body)
+            assert status == 200, (path, payload)
+            assert headers["Content-Type"] == "audio/wav"
+            assert headers["X-TTS-Engine"] == "silero"
+            assert payload[:4] == b"RIFF"
+        assert calls[-1][1:] == ("ru-RU", "cpu", "eugene")
+
+        status, _, payload = _request(address, "POST", "/v1/audio/speech", token=None, body=body)
+        assert status == 401
+
+        status, _, payload = _request(
+            address,
+            "POST",
+            "/v1/audio/speech",
+            body=json.dumps({"model": "silero-v5-ru", "input": "x", "voice": "af_heart"}).encode(),
+        )
+        assert status == 400 and b"invalid_voice" in payload
+
+        status, _, payload = _post_payload(
+            address, {"requestId": "r", "text": "Hello.", "language": "en-US"}
+        )
+        assert status == 400 and b"language_unavailable" in payload, payload
+
+        status, _, _ = _request(address, "GET", "/healthz", content_type=None)
+        assert status == 200
+
+
+def test_silero_only_service_refuses_english_text_under_auto() -> None:
+    service = TtsService(
+        bearer_token=TOKEN,
+        synthesizer=lambda _t, language, _d, voice=None: _result(language),
+        engines=("silero",),
+    )
+    assert service.serves("auto", "Привет, как дела?")
+    assert not service.serves("auto", "Hello, how are you?")
+    assert service.engine_for("auto", "Hello") == "kokoro"
+
+
+def test_speech_payload_huge_integer_speed_is_invalid_speed() -> None:
+    from agent_tools.tts_server import _validate_speech_payload
+
+    with pytest.raises(ValueError, match="invalid_speed"):
+        _validate_speech_payload({"model": "silero-v5-ru", "input": "x", "speed": 10**400})

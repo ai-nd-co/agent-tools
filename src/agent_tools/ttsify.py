@@ -67,6 +67,7 @@ class TtsifyOptions:
     claude_bare: bool | None = None
     timeout_seconds: float | None = None
     no_transform: bool = False
+    backend: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,8 @@ class TtsifyResult:
     device_fallback_reason: str | None = None
     tts_engine: str = "kokoro"
     tts_model: str | None = None
+    backend: str = "local"
+    backend_fallback_reason: str | None = None
     metrics: TtsifyMetrics = field(default_factory=lambda: TtsifyMetrics())
 
 
@@ -204,6 +207,7 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         speed=speed,
         device=device,
         engine=requested_tts_engine,
+        backend=options.backend,
     )
     tts_ms = (perf_counter() - tts_started) * 1000.0
     total_ms = (perf_counter() - total_started) * 1000.0
@@ -221,6 +225,8 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         device_fallback_reason=tts_result.device_fallback_reason,
         tts_engine=tts_result.engine,
         tts_model=tts_result.model,
+        backend=tts_result.backend,
+        backend_fallback_reason=tts_result.backend_fallback_reason,
         metrics=TtsifyMetrics(
             transform_ms=transform_ms,
             tts_ms=tts_ms,

@@ -160,7 +160,9 @@ def synthesize_wav(
                 raise RemoteTtsError(
                     "the speech cluster is not configured (no speech.apiKey in the secrets file)"
                 )
-            return synthesize_remote_wav(text, options=options, settings=settings)
+            return synthesize_remote_wav(
+                text, options=options, settings=settings, explicit_voice=voice
+            )
         except RemoteTtsError as exc:
             if effective_backend == "remote":
                 raise

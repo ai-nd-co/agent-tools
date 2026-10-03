@@ -167,15 +167,16 @@ echo "Read this aloud." | agent-tools tts --backend local    # Kokoro/Silero in 
 
 `auto` falls back to local synthesis on any cluster failure — unreachable, timeout, a rejected key,
 a missing route — and says why on stderr (`TTS fell back to local synthesis: …`); the perf event
-carries `backend` and `backend_fallback_reason`. The cluster serves Kokoro for English with the same
-voice names as the local engine, and Piper for Russian (Silero is not available there), so a Silero
-voice is replaced by the cluster's Russian voice rather than forwarded.
+carries `backend` and `backend_fallback_reason`. The cluster serves Kokoro for English at
+`/v1/audio/speech` with the same voice names as the local engine, and Silero for Russian at
+`/v1/audio/speech-ru` (this repo's own `tts-server` container, below), so a Silero voice you name is
+honoured there too; unnamed, the cluster's configured Russian voice (`eugene`) applies.
 
 ```bash
 AGENT_TOOLS_TTS_BACKEND=auto                                   # auto | remote | local
 AGENT_TOOLS_REMOTE_TTS_EN_MODEL=speaches-ai/Kokoro-82M-v1.0-ONNX
-AGENT_TOOLS_REMOTE_TTS_RU_MODEL=speaches-ai/piper-ru_RU-dmitri-medium
-AGENT_TOOLS_REMOTE_TTS_RU_VOICE=dmitri
+AGENT_TOOLS_REMOTE_TTS_RU_MODEL=silero-v5-ru
+AGENT_TOOLS_REMOTE_TTS_RU_VOICE=eugene
 AGENT_TOOLS_REMOTE_TTS_TIMEOUT_SECONDS=120
 ```
 

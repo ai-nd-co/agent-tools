@@ -26,7 +26,7 @@ from typing import Any
 from urllib import error, request
 
 from agent_tools.codex_config import read_string_env
-from agent_tools.tts import DEFAULT_SILERO_VOICE, ResolvedTtsOptions, TtsMetrics, TtsResult
+from agent_tools.tts import ResolvedTtsOptions, TtsMetrics, TtsResult
 
 ENV_TTS_BACKEND = "AGENT_TOOLS_TTS_BACKEND"
 ENV_SPEECH_API_KEY = "SPEECH_API_KEY"
@@ -165,15 +165,18 @@ def _as_str(value: object) -> str | None:
 
 
 def remote_model_and_voice(
-    options: ResolvedTtsOptions, settings: RemoteTtsSettings
+    options: ResolvedTtsOptions,
+    settings: RemoteTtsSettings,
+    *,
+    explicit_voice: str | None = None,
 ) -> tuple[str, str]:
     """The cluster model and voice for a locally resolved engine choice.
 
-    A Silero voice chosen locally is honoured remotely (same engine); the configured Russian
-    voice is the default when the request named none, which is how the owner's pick applies.
+    A Silero voice the caller named is honoured remotely (same engine); when none was named, the
+    configured Russian voice applies — that is how the owner's pick reaches every client.
     """
     if options.engine == "silero":
-        voice = options.voice if options.voice != DEFAULT_SILERO_VOICE else settings.ru_voice
+        voice = explicit_voice.strip().lower() if explicit_voice else settings.ru_voice
         return settings.ru_model, voice
     return settings.en_model, options.voice
 
@@ -251,6 +254,7 @@ def synthesize_remote_wav(
     *,
     options: ResolvedTtsOptions,
     settings: RemoteTtsSettings,
+    explicit_voice: str | None = None,
 ) -> TtsResult:
     """One ``POST /v1/audio/speech``; a validated WAV back, or ``RemoteTtsError``.
 
@@ -258,7 +262,7 @@ def synthesize_remote_wav(
     terminal or a log, and an upstream body is arbitrary text.
     """
     started = perf_counter()
-    model, voice = remote_model_and_voice(options, settings)
+    model, voice = remote_model_and_voice(options, settings, explicit_voice=explicit_voice)
     body = json.dumps(
         {
             "model": model,

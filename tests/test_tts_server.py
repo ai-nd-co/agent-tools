@@ -961,7 +961,7 @@ def test_silero_only_service_prewarms_silero_alone_and_refuses_english() -> None
     service = _speech_service(calls)
     assert [c[1] for c in calls] == ["ru"], "only the Russian probe runs"
     assert service.engines == ("silero",)
-    assert service.serves("ru") and service.serves("auto") and not service.serves("en-US")
+    assert service.serves("ru") and service.serves("auto", "Привет") and not service.serves("en-US")
     response = service.synthesize(
         TtsRequest(request_id="r1", text="Привет.", language="ru-RU", voice="eugene")
     )
@@ -1060,3 +1060,21 @@ def test_speech_route_over_http_serves_russian_wav_and_refuses_the_rest() -> Non
 
         status, _, _ = _request(address, "GET", "/healthz", content_type=None)
         assert status == 200
+
+
+def test_silero_only_service_refuses_english_text_under_auto() -> None:
+    service = TtsService(
+        bearer_token=TOKEN,
+        synthesizer=lambda _t, language, _d, voice=None: _result(language),
+        engines=("silero",),
+    )
+    assert service.serves("auto", "Привет, как дела?")
+    assert not service.serves("auto", "Hello, how are you?")
+    assert service.engine_for("auto", "Hello") == "kokoro"
+
+
+def test_speech_payload_huge_integer_speed_is_invalid_speed() -> None:
+    from agent_tools.tts_server import _validate_speech_payload
+
+    with pytest.raises(ValueError, match="invalid_speed"):
+        _validate_speech_payload({"model": "silero-v5-ru", "input": "x", "speed": 10**400})

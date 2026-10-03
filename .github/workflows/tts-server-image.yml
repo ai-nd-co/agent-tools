@@ -16,6 +16,8 @@ on:
       - 'docker/tts-server/**'
       - 'src/**'
       - 'pyproject.toml'
+      - 'README.md'
+      - '.dockerignore'
       - '.github/workflows/tts-server-image.yml'
   workflow_dispatch:
 
@@ -59,23 +61,29 @@ jobs:
           done
           docker exec "$name" id -u | grep -qx 1000 || { echo "::error::the server does not run as uid 1000"; exit 1; }
           probe() { docker exec -i "$name" python - "$@" <<'PY'
-          import json, sys, urllib.request, urllib.error
+          import io, sys, urllib.request, urllib.error, wave
           method, path, key, body = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
           req = urllib.request.Request("http://127.0.0.1:8081" + path, method=method,
                                        data=body.encode() if body else None,
                                        headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + key} if key else {})})
           try:
               with urllib.request.urlopen(req, timeout=60) as r:
-                  data = r.read(); print(r.status, len(data), data[:4] == b"RIFF")
+                  data = r.read()
+              frames = 0
+              if data[:4] == b"RIFF":
+                  with wave.open(io.BytesIO(data)) as w:
+                      n = w.getnframes()
+                      frames = n if len(w.readframes(n)) == n * w.getnchannels() * w.getsampwidth() else 0
+              print(r.status, len(data), frames)
           except urllib.error.HTTPError as e:
-              print(e.code, 0, False)
+              print(e.code, 0, 0)
           PY
           }
           probe GET /healthz "" "" | grep -q "^401 " || { echo "::error::/healthz answered without a key"; exit 1; }
           probe GET /healthz "$key" "" | grep -q "^200 " || { echo "::error::/healthz did not answer with the key"; exit 1; }
           out=$(probe POST /v1/audio/speech-ru "$key" '{"model":"silero-v5-ru","voice":"eugene","input":"Готово.","response_format":"wav"}')
           echo "speech-ru: $out"
-          echo "$out" | grep -qE "^200 [0-9]{4,} True$" || { echo "::error::no WAV for Russian"; exit 1; }
+          echo "$out" | grep -qE "^200 [0-9]{4,} [1-9][0-9]+$" || { echo "::error::no complete WAV for Russian"; exit 1; }
           out=$(probe POST /v1/audio/speech-ru "" '{"model":"silero-v5-ru","input":"x"}')
           echo "$out" | grep -q "^401 " || { echo "::error::speech route answered without a key"; exit 1; }
 

@@ -169,7 +169,10 @@ def test_russian_goes_to_silero_route_and_english_keeps_its_kokoro_voice() -> No
     assert remote_tts.remote_path(ru) == "/audio/speech-ru"
     # An explicit Silero voice is honoured on the cluster: same engine there.
     ru_voice = resolve_tts_options("Привет, это тест.", engine="auto", voice="aidar")
-    assert remote_model_and_voice(ru_voice, settings) == ("silero-v5-ru", "aidar")
+    assert remote_model_and_voice(ru_voice, settings, explicit_voice="aidar") == (
+        "silero-v5-ru",
+        "aidar",
+    )
     en = resolve_tts_options("Hello there.", engine="auto", voice="am_adam")
     assert remote_model_and_voice(en, settings) == ("k", "am_adam")
     assert remote_tts.remote_path(en) == "/audio/speech"
@@ -508,3 +511,18 @@ def test_reader_prefers_read1_over_read() -> None:
     response = Both()
     assert remote_tts._read_with_deadline(response, started=0.0, deadline_seconds=10**9) == b"abc"
     assert response.calls == ["read1", "read1"]
+
+
+def test_an_explicit_eugene_stays_eugene_when_the_configured_voice_differs(
+    secrets_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_secrets(secrets_dir, {"apiKey": KEY})
+    monkeypatch.setenv("AGENT_TOOLS_REMOTE_TTS_RU_VOICE", "aidar")
+    _fake_local(monkeypatch)
+    calls = _capture_urlopen(monkeypatch, _wav(sample_rate=48_000))
+
+    synthesize_wav("Привет, это тест.", voice="eugene")
+    assert json.loads(calls[0][0].data)["voice"] == "eugene"
+
+    synthesize_wav("Привет, это тест.")
+    assert json.loads(calls[1][0].data)["voice"] == "aidar", "unnamed → the configured voice"

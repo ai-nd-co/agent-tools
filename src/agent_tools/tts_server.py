@@ -186,17 +186,18 @@ class TtsService:
                 ) from exc
         self._ready = True
 
-    def engine_for(self, language: str) -> str | None:
-        """The engine a request language needs, or None when ``auto`` leaves it to the text."""
+    def engine_for(self, language: str, text: str = "") -> str:
+        """The engine a request will use: by language, or by the text when the language is auto."""
         if language in {"en-US", "en-GB"}:
             return "kokoro"
         if language in {"ru", "ru-RU"}:
             return "silero"
-        return None
+        from agent_tools.tts import is_clearly_russian
 
-    def serves(self, language: str) -> bool:
-        engine = self.engine_for(language)
-        return engine is None or engine in self.engines
+        return "silero" if is_clearly_russian(text) else "kokoro"
+
+    def serves(self, language: str, text: str = "") -> bool:
+        return self.engine_for(language, text) in self.engines
 
     def synthesize(self, request: TtsRequest) -> TtsAudioResponse:
         if not self._ready:
@@ -317,7 +318,7 @@ class TtsRequestHandler(BaseHTTPRequestHandler):
         request = self._read_request(speech=route != "/v1/tts")
         if request is None:
             return
-        if not self.tts_server.service.serves(request.language):
+        if not self.tts_server.service.serves(request.language, request.text):
             self._send_json_error(
                 HTTPStatus.BAD_REQUEST,
                 "language_unavailable",
@@ -759,7 +760,8 @@ def _synthesize_prepared_text(
                 language=_API_TO_TTSIFY_LANGUAGE[language],
                 device=device,
                 voice=voice,
-                # This process IS the server: synthesis happens here, never on the cluster.
+                # This process IS a server: it synthesizes here, never by forwarding to another
+                # server — on the cluster that other server would be itself.
                 backend="local",
             ),
         )
@@ -872,8 +874,13 @@ def _validate_speech_payload(payload: object) -> TtsRequest:
         raise ValueError("invalid_voice")
     if not isinstance(response_format, str) or response_format.strip().lower() != "wav":
         raise ValueError("invalid_response_format")
-    if isinstance(speed, bool) or not isinstance(speed, (int, float)) or float(speed) != 1.0:
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)):
         raise ValueError("invalid_speed")
+    try:
+        if float(speed) != 1.0:
+            raise ValueError("invalid_speed")
+    except OverflowError:  # a JSON integer too large for a float is not 1.0 either
+        raise ValueError("invalid_speed") from None
     return TtsRequest(
         request_id=f"speech-{uuid.uuid4().hex}",
         text=text,

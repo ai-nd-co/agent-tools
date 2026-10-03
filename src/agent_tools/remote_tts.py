@@ -204,6 +204,11 @@ def _error_detail(exc: error.HTTPError) -> str:
     return raw
 
 
+def _declares_unknown_length(wav: bytes) -> bool:
+    """A RIFF whose size fields are the streaming placeholder (all ones)."""
+    return len(wav) >= 8 and wav[4:8] == b"\xff\xff\xff\xff"
+
+
 def _redact(text: str, api_key: str) -> str:
     return text.replace(api_key, "***") if api_key else text
 
@@ -338,10 +343,19 @@ def synthesize_remote_wav(
         raise RemoteTtsError(
             f"the speech cluster returned something that is not a WAV: {exc}"
         ) from None
-    if frames == 0 or channels != 1 or sample_rate <= 0:
-        raise RemoteTtsError("the speech cluster returned empty or non-mono audio")
-    if len(payload) != frames * channels * sample_width:
-        raise RemoteTtsError("the speech cluster returned a truncated WAV")
+    if channels != 1 or sample_rate <= 0 or sample_width <= 0:
+        raise RemoteTtsError("the speech cluster returned non-mono or malformed audio")
+    frame_bytes = channels * sample_width
+    if _declares_unknown_length(wav):
+        # A streamed WAV: the server wrote the header before it knew the length, so the
+        # declared sizes are the 0xFFFFFFFF placeholder and the data chunk runs to the end of
+        # the body (Speaches/Kokoro does this). Whole frames and at least one of them is the
+        # most that can be checked; a cut-off body shows as a partial frame.
+        if len(payload) < frame_bytes or len(payload) % frame_bytes:
+            raise RemoteTtsError("the speech cluster returned a truncated WAV")
+        frames = len(payload) // frame_bytes
+    elif frames == 0 or len(payload) != frames * frame_bytes:
+        raise RemoteTtsError("the speech cluster returned a truncated or empty WAV")
 
     total_ms = (perf_counter() - started) * 1000.0
     return TtsResult(

@@ -526,3 +526,33 @@ def test_an_explicit_eugene_stays_eugene_when_the_configured_voice_differs(
 
     synthesize_wav("Привет, это тест.")
     assert json.loads(calls[1][0].data)["voice"] == "aidar", "unnamed → the configured voice"
+
+
+def _streamed_wav(frames: int, *, cut: int = 0) -> bytes:
+    """A WAV as Speaches streams it: 0xFFFFFFFF in both size fields, data to the end."""
+    whole = _wav(frames=frames)
+    body = bytearray(whole)
+    body[4:8] = b"\xff\xff\xff\xff"
+    data_at = whole.index(b"data")
+    body[data_at + 4 : data_at + 8] = b"\xff\xff\xff\xff"
+    return bytes(body[: len(body) - cut] if cut else body)
+
+
+def test_streamed_wav_with_unknown_length_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = RemoteTtsSettings(
+        base_url="https://s/v1",
+        api_key=KEY,
+        en_model="k",
+        ru_model="p",
+        ru_voice="eugene",
+        timeout_seconds=1,
+    )
+    options = resolve_tts_options("Hello.", engine="auto")
+    _capture_urlopen(monkeypatch, _streamed_wav(2_400))
+    result = synthesize_remote_wav("Hello.", options=options, settings=settings)
+    assert result.sample_rate == 24_000 and result.backend == "remote"
+
+    # A body cut mid-frame is still refused.
+    _capture_urlopen(monkeypatch, _streamed_wav(2_400, cut=1))
+    with pytest.raises(RemoteTtsError, match="truncated"):
+        synthesize_remote_wav("Hello.", options=options, settings=settings)

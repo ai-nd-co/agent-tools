@@ -1460,6 +1460,7 @@ def test_value_fingerprint_rejects_unpaired_surrogate_input() -> None:
     assert raised.value.code == "invalid_value"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_uia_helper_reports_emergency_disable_without_delivery(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -1625,6 +1626,7 @@ def test_native_uia_helper_reports_emergency_disable_without_delivery(
         (8, "target_not_foreground"),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_legacy_safety_failure_never_reports_pattern_fallback(
     monkeypatch,
     returncode: int,
@@ -1675,6 +1677,7 @@ def test_native_legacy_safety_failure_never_reports_pattern_fallback(
         ("uia.ScrollPattern.SetScrollPercent", "scroll_pattern_unavailable"),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_final_pattern_loss_reports_phase_a_fallback(
     monkeypatch,
     method: str,
@@ -2070,6 +2073,7 @@ def test_native_uia_zero_match_is_stale_not_ambiguous(monkeypatch) -> None:
     assert raised.value.code == "stale_element"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_uia_launch_failure_is_definitely_not_delivered(monkeypatch) -> None:
     backend = ActionBackend()
     adapter = WinAppAdapter(backend)  # type: ignore[arg-type]
@@ -2099,6 +2103,7 @@ def test_native_uia_launch_failure_is_definitely_not_delivered(monkeypatch) -> N
     ("process_started", "expected_outcome"),
     [(False, "failed"), (True, "delivery_only")],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_uia_cleanup_failure_uses_process_lifecycle_for_delivery_state(
     monkeypatch,
     process_started: bool,
@@ -2135,6 +2140,7 @@ def test_native_uia_cleanup_failure_uses_process_lifecycle_for_delivery_state(
     assert raised.value.details["outcome"] == expected_outcome
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_uia_post_spawn_pipe_failure_is_delivery_only(monkeypatch) -> None:
     backend = ActionBackend()
     adapter = WinAppAdapter(backend)  # type: ignore[arg-type]

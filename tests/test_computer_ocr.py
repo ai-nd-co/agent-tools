@@ -152,6 +152,7 @@ def _capture(
     return result, resolved_store
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_ocr_preserves_native_capture_provenance_and_region(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -193,6 +194,7 @@ def test_ocr_preserves_native_capture_provenance_and_region(
     assert image_path.stat().st_mtime_ns == before_stat.st_mtime_ns
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_2576_capture_is_eligible_and_720_profile_is_rejected_before_ocr(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -235,6 +237,7 @@ def test_native_2576_capture_is_eligible_and_720_profile_is_rejected_before_ocr(
     assert len(backend.calls) == 1
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 @pytest.mark.parametrize("mutation", ["missing", "tampered", "resized"])
 def test_ocr_rejects_missing_tampered_or_resized_native_source_before_engine(
     monkeypatch: pytest.MonkeyPatch,
@@ -266,6 +269,7 @@ def test_ocr_rejects_missing_tampered_or_resized_native_source_before_engine(
     assert backend.calls == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_ocr_rejects_expired_capture_before_engine(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -287,6 +291,7 @@ def test_ocr_rejects_expired_capture_before_engine(
     assert backend.calls == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_ocr_accepts_capture_time_identity_without_live_window_revalidation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -307,6 +312,7 @@ def test_ocr_accepts_capture_time_identity_without_live_window_revalidation(
     assert recognized["text"] == "title may have changed later"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_last_lines_max_lines_and_max_chars_are_reported(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -394,6 +400,7 @@ def test_last_lines_reports_omitted_lines_when_head_and_tail_windows_overlap() -
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_empty_ocr_is_truthful_success_with_uncertainty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

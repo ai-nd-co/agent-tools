@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,6 +94,7 @@ def action_state(monkeypatch, tmp_path: Path) -> Path:
     return state
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_coordinator_journal_is_redacted_and_releases_lock(action_state: Path) -> None:
     mutex = FakeMutex()
     coordinator = ActionCoordinator(mutex)  # type: ignore[arg-type]
@@ -129,6 +131,7 @@ def test_coordinator_journal_is_redacted_and_releases_lock(action_state: Path) -
     assert list(action_state.glob(f"{actions.OWNER_FILE}.*.json")) == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_before_input_generation_failure_preserves_generation_and_skips_action(
     monkeypatch,
     action_state: Path,
@@ -159,6 +162,7 @@ def test_before_input_generation_failure_preserves_generation_and_skips_action(
     assert actions._read_input_generation() == generation_before
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_staged_enter_notification_busy_preserves_authority(
     monkeypatch,
     action_state: Path,
@@ -225,6 +229,7 @@ def test_phase_timings_are_additive_and_exclude_nested_totals(monkeypatch) -> No
     assert abs(leaf_sum - public["total"]) <= 0.001
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_release_failure_preserves_verified_result(action_state: Path) -> None:
     class ReleaseFailMutex(FakeMutex):
         def release(self, lease: NativeMutexLease) -> None:
@@ -249,6 +254,7 @@ def test_release_failure_preserves_verified_result(action_state: Path) -> None:
     assert "computer_action_lock_release_failed" in result["warnings"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_final_cleanup_warnings_remain_bounded_and_prioritized_on_success(
     monkeypatch,
     action_state: Path,
@@ -283,6 +289,7 @@ def test_final_cleanup_warnings_remain_bounded_and_prioritized_on_success(
     assert result["lock"] == {"status": "release_failed"}
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_final_cleanup_warnings_remain_bounded_and_prioritized_on_error(
     monkeypatch,
     action_state: Path,
@@ -319,6 +326,7 @@ def test_final_cleanup_warnings_remain_bounded_and_prioritized_on_error(
     assert raised.value.details["lock"] == {"status": "release_failed"}
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_success_journal_warning_is_bounded_and_backend_cannot_replace_envelope(
     monkeypatch,
     action_state: Path,
@@ -370,6 +378,7 @@ def test_success_journal_warning_is_bounded_and_backend_cannot_replace_envelope(
     assert result["journal"] == {"status": "completion_write_failed"}
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_unexpected_backend_exception_has_safe_action_envelope(action_state: Path) -> None:
     def fail(_execution):
         raise ValueError("private backend detail")
@@ -454,6 +463,7 @@ def test_busy_owner_retry_selects_newest_publication(monkeypatch) -> None:
     assert "_published_at_unix_ns" not in owner
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_dead_owner_process_identity_is_never_reported(action_state: Path) -> None:
     action_state.mkdir(parents=True)
     actions._owner_path("dead-operation").write_text(
@@ -474,6 +484,7 @@ def test_dead_owner_process_identity_is_never_reported(action_state: Path) -> No
     assert actions._read_owner_metadata() is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_failed_owner_publication_removes_temporary_record(monkeypatch, action_state: Path) -> None:
     action_state.mkdir(parents=True)
 
@@ -510,6 +521,7 @@ def test_environment_and_config_marker_emergency_disable_are_fail_closed(
     assert actions.action_capabilities()["disable_sources"] == ["config_marker"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_emergency_disable_after_notification_rejects_before_backend_mutation(
     monkeypatch, action_state: Path
 ) -> None:
@@ -534,6 +546,7 @@ def test_emergency_disable_after_notification_rejects_before_backend_mutation(
     assert backend.events == ["capture", "security"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_stale_window_rejects_before_backend_mutation(action_state: Path) -> None:
     backend = FakeActionBackend()
 
@@ -556,6 +569,7 @@ def test_stale_window_rejects_before_backend_mutation(action_state: Path) -> Non
     assert backend.events == ["capture", "stale"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_public_focus_preserves_backend_cleanup_warning_and_renders_status(
     monkeypatch,
     action_state: Path,
@@ -607,6 +621,7 @@ def test_public_focus_preserves_backend_cleanup_warning_and_renders_status(
     assert "Input attachment cleanup: status=failed count=1" in human
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_ambiguous_element_pre_delivery_maps_to_rejected(action_state: Path) -> None:
     with pytest.raises(ComputerError) as raised:
         ActionCoordinator(FakeMutex()).run(  # type: ignore[arg-type]
@@ -622,6 +637,7 @@ def test_ambiguous_element_pre_delivery_maps_to_rejected(action_state: Path) -> 
     assert raised.value.details["outcome"] == "rejected"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_standalone_notification_reports_truthful_delivery_only(
     monkeypatch, action_state: Path
 ) -> None:
@@ -649,6 +665,7 @@ def test_standalone_notification_reports_truthful_delivery_only(
     assert desktop_checks == [True]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_standalone_notification_rejects_unusable_desktop_before_delivery(
     monkeypatch,
     action_state: Path,
@@ -683,6 +700,7 @@ def test_standalone_notification_rejects_unusable_desktop_before_delivery(
     assert deliveries == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_verified_action_survives_completion_journal_failure(
     monkeypatch, action_state: Path
 ) -> None:
@@ -714,6 +732,7 @@ def test_verified_action_survives_completion_journal_failure(
     assert "journal_completion_write_failed" in result["warnings"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_pre_delivery_element_failures_are_rejected(action_state: Path) -> None:
     with pytest.raises(ComputerError) as raised:
         ActionCoordinator(FakeMutex()).run(  # type: ignore[arg-type]
@@ -739,6 +758,7 @@ def test_pre_delivery_element_failures_are_rejected(action_state: Path) -> None:
         "semantic_provider_action_unsupported",
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_pre_delivery_reference_and_provider_failures_are_rejected(
     code: str,
     action_state: Path,
@@ -940,6 +960,7 @@ def test_human_semantic_output_renders_nested_focus_and_partial_error() -> None:
     assert "restored-first" not in direct_focus_error
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_notification_failure_is_warning_not_action_permission_gate(
     monkeypatch, action_state: Path
 ) -> None:
@@ -975,6 +996,7 @@ def test_notification_failure_is_warning_not_action_permission_gate(
     ]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_semantic_action_focus_and_native_delivery_share_one_atomic_operation(
     action_state: Path,
 ) -> None:
@@ -1043,6 +1065,7 @@ def test_semantic_action_focus_and_native_delivery_share_one_atomic_operation(
     ]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_navigation_reference_skips_winapp_preflight_and_keeps_atomic_focus(
     action_state: Path,
 ) -> None:
@@ -1117,6 +1140,7 @@ def test_native_navigation_reference_skips_winapp_preflight_and_keeps_atomic_foc
     ]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 @pytest.mark.parametrize("operation", ["invoke", "set-value", "scroll"])
 def test_semantic_rejection_after_focus_reports_verified_partial_mutation(
     action_state: Path,
@@ -1228,6 +1252,7 @@ def test_semantic_element_focus_side_effect_is_preserved_when_window_focus_is_no
     assert error.details["focus"]["changed"] is False
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 @pytest.mark.parametrize("operation", ["invoke", "set-value", "scroll"])
 def test_semantic_backend_preflight_rejects_before_focus_with_fallback(
     action_state: Path,
@@ -1277,6 +1302,7 @@ def test_semantic_backend_preflight_rejects_before_focus_with_fallback(
     assert backend.events == ["capture", "security"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 @pytest.mark.parametrize("operation", ["invoke", "set-value", "scroll"])
 def test_post_focus_security_rejection_preserves_verified_focus_side_effect(
     action_state: Path,
@@ -1344,6 +1370,7 @@ def test_post_focus_security_rejection_preserves_verified_focus_side_effect(
     assert raised.value.details["focus"]["restore_performed"] is True
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_successful_semantic_action_preserves_complete_focus_summary(
     action_state: Path,
 ) -> None:
@@ -1410,6 +1437,7 @@ def test_successful_semantic_action_preserves_complete_focus_summary(
         ("scroll", "uia.ScrollPattern"),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_wrapper_identity_drift_after_success_is_delivery_only(
     action_state: Path,
     operation: str,
@@ -1554,6 +1582,7 @@ def test_short_explanation_rejects_empty_long_and_control_text(value: str) -> No
     assert raised.value.code == "invalid_explanation"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_notification_worker_rechecks_emergency_disable_marker(tmp_path: Path) -> None:
     marker = tmp_path / actions.DISABLE_MARKER
     payload = {"disableMarker": str(marker)}

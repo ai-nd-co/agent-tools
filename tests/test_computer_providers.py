@@ -122,6 +122,7 @@ def test_missing_media_backend_is_normal_unavailable_data(monkeypatch) -> None:
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_readiness_reports_dynamic_winapp_capability(monkeypatch) -> None:
     class FakeWinAppAdapter:
         def __init__(self, _backend) -> None:
@@ -378,6 +379,7 @@ def test_system_executable_does_not_search_caller_directory(
     assert resolved != hostile
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_network_internal_deadlines_fit_inside_provider_timeout(monkeypatch) -> None:
     timeouts: list[float] = []
     monkeypatch.setattr(

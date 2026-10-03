@@ -424,6 +424,7 @@ def test_config_rejects_protected_file_collision_with_reserved_artifact(
     assert error.value.code == "protected_path_collision"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_task_definition_is_exact_hidden_current_user_logon(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -592,6 +593,7 @@ def test_lifecycle_plans_are_idempotent_and_fail_closed(
     assert (plan.code, plan.allowed, plan.changed) == (expected_code, allowed, changed)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_install_execution_writes_exact_definition_only(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -605,6 +607,7 @@ def test_install_execution_writes_exact_definition_only(tmp_path: Path) -> None:
     assert (config.state_directory / startup.TASK_XML_FILENAME).exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_duplicate_install_and_start_do_not_mutate(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -633,6 +636,7 @@ def test_duplicate_install_and_start_do_not_mutate(tmp_path: Path) -> None:
     assert scheduler.calls == ["query", "query"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_stop_terminates_exact_task_during_pre_state_startup_window(
     tmp_path: Path,
 ) -> None:
@@ -658,6 +662,7 @@ def test_stop_terminates_exact_task_during_pre_state_startup_window(
     assert scheduler.calls == ["query", "disable", "stop", "query", "query", "start"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 @pytest.mark.parametrize("state_kind", ["invalid", "stale"])
 def test_stop_never_reports_stopped_for_running_task_with_untrusted_state(
     tmp_path: Path,
@@ -686,6 +691,7 @@ def test_stop_never_reports_stopped_for_running_task_with_untrusted_state(
     assert "stop" in scheduler.calls
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_stop_release_proof_rejects_live_recorded_runner_generation(
     tmp_path: Path,
 ) -> None:
@@ -710,6 +716,7 @@ def test_stop_release_proof_rejects_live_recorded_runner_generation(
     assert error.value.code == "stop_timeout"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_status_refuses_pid_reuse_and_foreign_listener(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -731,6 +738,7 @@ def test_status_refuses_pid_reuse_and_foreign_listener(tmp_path: Path) -> None:
     assert status.listener_owned is False
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_status_distinguishes_stale_config_and_credential_drift(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -756,6 +764,7 @@ def test_status_distinguishes_stale_config_and_credential_drift(tmp_path: Path) 
     assert inspect_lifecycle(config, definition, task, runtime).code == "stale_state"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_status_distinguishes_invalid_state_and_owned_task_drift(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -773,6 +782,7 @@ def test_status_distinguishes_invalid_state_and_owned_task_drift(tmp_path: Path)
     assert inspect_lifecycle(config, definition, foreign, runtime).code == "foreign_task"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_invalid_state_cannot_hide_existing_listener_as_stopped(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -792,6 +802,7 @@ def test_invalid_state_cannot_hide_existing_listener_as_stopped(tmp_path: Path) 
     assert runtime.listeners(config.host, config.port) == (listener,)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_status_recognizes_running_task_before_state_publication(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -825,6 +836,7 @@ def test_status_recognizes_running_task_before_state_publication(tmp_path: Path)
         {"child_pid": startup.MAX_WINDOWS_PID + 1},
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runtime_state_schema_is_strict(tmp_path: Path, mutation: dict[str, object]) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -859,6 +871,7 @@ def _request_stop_after_ready(
         runtime.on_sleep = None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_starts_exact_child_and_intentional_stop_does_not_respawn(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -882,6 +895,7 @@ def test_runner_starts_exact_child_and_intentional_stop_does_not_respawn(tmp_pat
     assert state is not None and state.phase == "stopped"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_restarts_one_crash_then_becomes_ready(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -902,6 +916,7 @@ def test_runner_restarts_one_crash_then_becomes_ready(tmp_path: Path) -> None:
     assert len(runtime.children) == 2
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_crash_recovery_is_bounded(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -923,6 +938,7 @@ def test_runner_crash_recovery_is_bounded(tmp_path: Path) -> None:
     assert state is not None and state.phase == "restart_exhausted"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_intentional_stop_interrupts_restart_delay(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -949,6 +965,7 @@ def test_runner_intentional_stop_interrupts_restart_delay(tmp_path: Path) -> Non
     assert len(runtime.children) == 1
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_refuses_foreign_listener_before_spawning(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -968,6 +985,7 @@ def test_runner_refuses_foreign_listener_before_spawning(tmp_path: Path) -> None
     assert runtime.children == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_rechecks_listener_generation_before_bearer_use(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -998,6 +1016,7 @@ def test_runner_rechecks_listener_generation_before_bearer_use(tmp_path: Path) -
     assert runtime.health_calls == 0
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_readiness_failure_terminates_and_exhausts(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -1043,6 +1062,7 @@ class _HangingHealthRuntime(FakeRuntime):
         )
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_recovers_ready_child_whose_authenticated_health_hangs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1099,6 +1119,7 @@ def test_runner_recovers_ready_child_whose_authenticated_health_hangs(
     assert ("health_failed", False) in published
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_tolerates_single_transient_health_failure_in_ready_monitor(
     tmp_path: Path,
 ) -> None:
@@ -1129,6 +1150,7 @@ def test_runner_tolerates_single_transient_health_failure_in_ready_monitor(
     assert runtime.health_calls >= 4
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_hung_ready_child_recovery_is_bounded(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -1186,6 +1208,7 @@ class _ScriptedMonitorHealthRuntime(FakeRuntime):
         )
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_resets_health_failure_counter_on_interleaved_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1260,6 +1283,7 @@ def test_runner_policy_defaults_reprobe_health_with_consecutive_failure_budget()
         ("bootstrap", 26, "bootstrap_drift"),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_stops_owned_child_on_live_input_drift(
     tmp_path: Path,
     target: str,
@@ -1300,6 +1324,7 @@ def test_runner_stops_owned_child_on_live_input_drift(
     assert state is not None and state.phase == expected_phase
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_rejects_wrong_child_executable_before_bearer_use(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -1347,6 +1372,7 @@ def test_runner_rejects_wrong_child_executable_before_bearer_use(tmp_path: Path)
     assert runtime.health_calls == 0
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_terminates_exact_child_when_post_spawn_publication_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1381,6 +1407,7 @@ def test_runner_terminates_exact_child_when_post_spawn_publication_fails(
     assert not (config.state_directory / startup.LOCK_FILENAME).exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_waits_for_independent_listener_release(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -1402,6 +1429,7 @@ def test_runner_waits_for_independent_listener_release(tmp_path: Path) -> None:
     assert len(runtime.children) == 2
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_refuses_restart_when_listener_release_exceeds_budget(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -1429,6 +1457,7 @@ def test_runner_refuses_restart_when_listener_release_exceeds_budget(tmp_path: P
         (None, None, "0" * 64, "credential_drift"),
     ],
 )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_refuses_config_and_credential_drift_before_spawn(
     tmp_path: Path,
     config_hash: str | None,
@@ -1457,6 +1486,7 @@ def test_runner_refuses_config_and_credential_drift_before_spawn(
     assert runtime.children == []
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_runner_lock_rejects_live_generation_and_recovers_exact_stale_lock(
     tmp_path: Path,
 ) -> None:
@@ -1509,6 +1539,7 @@ def test_runner_lock_rejects_live_generation_and_recovers_exact_stale_lock(
     assert not lock_path.with_name(lock_path.name + ".takeover").exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_uninstall_removes_only_validated_owned_definition_and_stale_locks(
     tmp_path: Path,
 ) -> None:
@@ -1548,6 +1579,7 @@ def test_uninstall_removes_only_validated_owned_definition_and_stale_locks(
     assert scheduler.calls == ["query", "disable", "uninstall", "query"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_uninstall_recovers_owned_artifacts_after_task_already_absent(
     tmp_path: Path,
 ) -> None:
@@ -1565,6 +1597,7 @@ def test_uninstall_recovers_owned_artifacts_after_task_already_absent(
     assert not xml_path.exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_start_refuses_to_remove_foreign_stop_request(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -1582,6 +1615,7 @@ def test_start_refuses_to_remove_foreign_stop_request(tmp_path: Path) -> None:
     assert stop_path.exists()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_stop_request_rejects_boolean_schema_and_out_of_range_pid(tmp_path: Path) -> None:
     config = _config(tmp_path)
     definition = build_task_definition(config)
@@ -1603,6 +1637,7 @@ def test_stop_request_rejects_boolean_schema_and_out_of_range_pid(tmp_path: Path
     assert error.value.code == "stop_request_invalid"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_write_stop_request_rejects_equal_looking_invalid_control_types(
     tmp_path: Path,
 ) -> None:
@@ -1652,6 +1687,7 @@ def test_public_status_and_cli_error_are_redacted(
     assert str(private_path) not in rendered
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_scheduled_task_backend_uses_fixed_script_and_shell_false(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1678,6 +1714,7 @@ def test_scheduled_task_backend_uses_fixed_script_and_shell_false(
     assert TOKEN not in " ".join(command)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows TTS startup lifecycle")
 def test_windows_child_output_is_discarded_and_event_log_is_bounded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

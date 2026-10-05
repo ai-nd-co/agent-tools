@@ -408,6 +408,7 @@ def test_process_start_failure_is_operational_not_missing(monkeypatch) -> None:
     assert "access denied" not in raised.value.message
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_trusted_powershell_ignores_fake_systemroot(monkeypatch, tmp_path: Path) -> None:
     fake = tmp_path / "fake-windows"
     fake_powershell = (

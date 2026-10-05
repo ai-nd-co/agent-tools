@@ -247,6 +247,7 @@ def _native_inspection(
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_default_inspection_stays_compact_and_does_not_probe_fallback() -> None:
     backend = FakeBackend()
     native = FakeNative({})
@@ -312,6 +313,7 @@ def test_native_deadline_failure_after_winapp_success_does_not_restart_fallback(
     assert native.views == ["raw", "control", "content"]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_winapp_interactive_diagnostics_use_the_unfiltered_tree() -> None:
     winapp = FakeWinApp(
         [
@@ -343,6 +345,7 @@ def test_winapp_interactive_diagnostics_use_the_unfiltered_tree() -> None:
     assert result["interactive"] is True
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_deep_inspection_uses_fixed_view_order_and_selects_useful_raw() -> None:
     raw = _native_inspection(
         [
@@ -394,6 +397,7 @@ def test_deep_inspection_uses_fixed_view_order_and_selects_useful_raw() -> None:
     assert editor["locator"]["strategy"] == "runtime_ancestor_v1"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_first_native_action_replaces_a_named_shallow_winapp_container() -> None:
     raw = _native_inspection(
         [
@@ -436,6 +440,7 @@ def test_first_native_action_replaces_a_named_shallow_winapp_container() -> None
     assert result["semantic_surface_shallow"] is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_disabled_native_action_does_not_replace_named_shallow_winapp_container() -> None:
     raw = _native_inspection(
         [
@@ -480,6 +485,7 @@ def test_disabled_native_action_does_not_replace_named_shallow_winapp_container(
     assert result["semantic_surface_shallow"]["reason"] == "container_only_surface"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_disabled_winapp_action_does_not_block_enabled_native_first_action() -> None:
     raw = _native_inspection(
         [
@@ -526,6 +532,7 @@ def test_disabled_winapp_action_does_not_block_enabled_native_first_action() -> 
     assert result["semantic_surface_shallow"] is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_conclusive_raw_replaces_inconclusive_winapp_prefix() -> None:
     raw = _native_inspection(
         [
@@ -560,6 +567,7 @@ def test_conclusive_raw_replaces_inconclusive_winapp_prefix() -> None:
     assert result["provider_attempts"][1]["status"] == "selected"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_deep_provider_consensus_marks_missing_document_surface_shallow() -> None:
     winapp_elements = [
         {
@@ -599,6 +607,7 @@ def test_deep_provider_consensus_marks_missing_document_surface_shallow() -> Non
     assert result["provider_attempts"][0]["status"] == "shallow_selected"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_truncated_raw_empty_document_with_complete_shell_views_is_shallow() -> None:
     winapp_elements = [
         {
@@ -698,6 +707,7 @@ def test_truncated_raw_empty_document_with_complete_shell_views_is_shallow() -> 
         assert attempt["text_bearing_count"] == 16
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_winapp_unavailable_selects_native_at_compact_depth() -> None:
     raw = _native_inspection(
         [
@@ -741,6 +751,7 @@ def test_winapp_unavailable_selects_native_at_compact_depth() -> None:
     }
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_winapp_unavailable_exposes_only_proven_raw_navigation_action() -> None:
     raw = _native_inspection(
         [
@@ -779,6 +790,7 @@ def test_winapp_unavailable_exposes_only_proven_raw_navigation_action() -> None:
     assert "fallbacks" not in result
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 @pytest.mark.parametrize("code", ["uia_backend_unreadable", "uia_process_failed"])
 def test_safe_winapp_execution_failures_select_native(code: str) -> None:
     raw = _native_inspection(
@@ -811,6 +823,7 @@ def test_safe_winapp_execution_failures_select_native(code: str) -> None:
     assert result["provider_attempts"][0]["error_code"] == code
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_interactive_fallback_filters_non_actionable_elements() -> None:
     raw = _native_inspection(
         [
@@ -922,6 +935,7 @@ def test_native_actionability_requires_effective_mutation_state() -> None:
     assert combined["range_read_only"] is False
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_interactive_filter_does_not_change_native_surface_diagnostic() -> None:
     raw = _native_inspection(
         [
@@ -954,6 +968,7 @@ def test_interactive_filter_does_not_change_native_surface_diagnostic() -> None:
     assert result["semantic_surface_shallow"] is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_control_or_content_view_is_never_selected() -> None:
     raw = _native_inspection([_native_element("1")], view="raw")
     useful = _native_inspection(
@@ -1004,6 +1019,7 @@ def test_all_semantic_providers_unavailable_returns_bounded_error() -> None:
     assert all(item["status"] == "unavailable" for item in attempts)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_deep_shallow_surface_reports_every_failed_provider_and_separate_fallbacks() -> None:
     errors = {
         "raw": ComputerError("uia_timeout", "fixture timeout"),
@@ -1040,6 +1056,7 @@ def test_deep_shallow_surface_reports_every_failed_provider_and_separate_fallbac
     assert "semantic_action_unavailable" not in result
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_native_raw_inconclusive_suppresses_observation_fallback() -> None:
     raw = _native_inspection([_native_element("1")], view="raw")
     raw["truncated"] = True
@@ -1073,6 +1090,7 @@ def test_native_raw_inconclusive_suppresses_observation_fallback() -> None:
     assert "fallbacks" not in result
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_truncated_rich_native_raw_is_not_selected_as_complete() -> None:
     raw = _native_inspection(
         [
@@ -1113,6 +1131,7 @@ def test_truncated_rich_native_raw_is_not_selected_as_complete() -> None:
     assert "fallbacks" not in result
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_safe_native_execution_failures_do_not_abort_diagnostics() -> None:
     errors = {
         "raw": ComputerError("uia_process_failed", "fixture process failure"),
@@ -1137,6 +1156,7 @@ def test_safe_native_execution_failures_do_not_abort_diagnostics() -> None:
     ]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_truncated_shallow_prefix_is_inconclusive_without_observation_fallback() -> None:
     result = semantic.inspect_semantic_window(
         hwnd=123,
@@ -1164,6 +1184,7 @@ def test_truncated_shallow_prefix_is_inconclusive_without_observation_fallback()
     assert "fallbacks" not in result
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows desktop control")
 def test_depth_limited_shallow_prefix_is_inconclusive_without_observation_fallback() -> None:
     depth_limited = {**_empty_document(), "depth": 3}
 

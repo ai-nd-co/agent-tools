@@ -1,12 +1,26 @@
-"""Admission control for Whisper and a model allowlist.
+"""Admission control for Whisper, a model allowlist, and a language set for auto-detection.
 
 Why: on the shared 5060 Ti every extra Whisper job or model is extra GPU memory, and an
 over-committed card gives a CUDA out-of-memory error to whichever process allocates last, which
 may be another team's service. So:
 
-- GS_WHISPER_PERMITS (default 1): how many transcription/translation jobs run at once. Others wait
-  their turn, as they did with one CT2 worker. With WHISPER__NUM_WORKERS=2 this leaves one CT2
-  worker free for language ID (gs_speech.langid), which does not take a permit.
+- GS_WHISPER_PERMITS (default 1): how many transcription/translation requests run at once; the
+  rest wait their turn, as they did behind one CT2 worker. With WHISPER__NUM_WORKERS=2 this leaves
+  one CT2 worker free for language ID (gs_speech.langid), which does not take a permit.
+  Admission (below) is an ASGI wrapper. It reads the whole request body first, holding nothing,
+  so a slow upload from a phone never blocks other requests. Only then does it wait for a permit,
+  in the event loop, so waiting requests use no worker thread. Requests without the right API key
+  get 403 from Admission itself, by Speaches' own rule (Bearer, any case, exact token). In-process callers that
+  bypass HTTP (Speaches' realtime loopback) are not admitted. This cluster routes no realtime
+  path, and with this image's FastAPI that loopback fails before reaching Whisper anyway.
+- GS_MAX_BODY_BYTES (default 32 MiB), GS_MAX_PENDING (16), GS_UPLOAD_TIMEOUT_S (120),
+  GS_SEND_TIMEOUT_S (60): the bounds Admission puts on what it buffers and waits for (see the
+  class). 180 s of 16 kHz mono WAV is 5.8 MB.
+- Model administration over HTTP (POST/PUT/PATCH/DELETE /api/ps/..., DELETE /v1/models/...) gets
+  403. This service runs a fixed set of models, and upstream's unload removes a model from the
+  registry before checking it is idle, so an unload during a request lets the next load make a
+  second copy. GET /api/ps (the probe) and POST /v1/models/... (the warm-up's download,
+  allowlisted) still work.
 - GS_MODEL_ALLOWLIST: space- or comma-separated model ids that may be loaded or downloaded. Any
   other id gets 403 instead of a new model in GPU memory or on the volume. Unset or empty means no
   allowlist (upstream behaviour). Speaches' own VAD (silero_vad_v5) is always allowed.
@@ -23,8 +37,10 @@ the file's hash changed, so these wrap the classes' methods after that has happe
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 import functools
+import hmac
 import logging
 import os
 import re
@@ -58,61 +74,6 @@ def resolve_alias(model_id: str) -> str:
         return resolve_model_id_alias(model_id)
     except Exception:  # noqa: BLE001 - no alias file means no aliases
         return model_id
-
-
-class Gate:
-    """A counting semaphore that also reports how many jobs run and wait."""
-
-    def __init__(self, permits: int) -> None:
-        if permits < 1:
-            raise ValueError(f"GS_WHISPER_PERMITS must be at least 1, got {permits}")
-        self.permits = permits
-        self._sem = threading.BoundedSemaphore(permits)
-        self._lock = threading.Lock()
-        self.running = 0
-        self.waiting = 0
-
-    @contextmanager
-    def hold(self, what: str) -> Iterator[None]:
-        start = time.perf_counter()
-        with self._lock:
-            self.waiting += 1
-        try:
-            self._sem.acquire()
-        finally:
-            with self._lock:
-                self.waiting -= 1
-        with self._lock:
-            self.running += 1
-        waited = time.perf_counter() - start
-        if waited >= 0.5:
-            logger.info("whisper admission: %s waited %.2f s for a permit", what, waited)
-        try:
-            yield
-        finally:
-            with self._lock:
-                self.running -= 1
-            self._sem.release()
-
-
-def gated(fn: Callable, gate: Gate, what: str) -> Callable:
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        with gate.hold(what):
-            return fn(*args, **kwargs)
-
-    return wrapper
-
-
-def gated_generator(fn: Callable, gate: Gate, what: str) -> Callable:
-    """The permit is taken at the first item and held until the stream ends or is closed."""
-
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs) -> Generator:  # noqa: ANN002, ANN003
-        with gate.hold(what):
-            yield from fn(*args, **kwargs)
-
-    return wrapper
 
 
 def parse_language_set(raw: str | None) -> frozenset[str] | None:
@@ -198,9 +159,183 @@ def refuse_unless_allowed(allow: frozenset[str] | None, model_id: str) -> None:
     raise HTTPException(status_code=403, detail=f"Model '{model_id}' is not served here.")
 
 
+ADMITTED_PATHS = ("/v1/audio/transcriptions", "/v1/audio/translations")
+
+
+def is_model_admin(method: str, path: str) -> bool:
+    if path.startswith("/api/ps/") and method in ("POST", "DELETE", "PUT", "PATCH"):
+        return True
+    return path.startswith("/v1/models/") and method == "DELETE"
+
+
+async def _reply(send, status: int, detail: bytes, extra: list | None = None) -> None:  # noqa: ANN001
+    headers = [(b"content-type", b"application/json"), *(extra or [])]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": b'{"detail":"' + detail + b'"}'})
+
+
+REPLAY_CHUNK = 64 * 1024
+
+
+class Admission:
+    """ASGI wrapper for Speaches: body first, then a permit, for Whisper requests; the admin block.
+
+    For POST /v1/audio/transcriptions and /translations with the right key:
+    1. At most GS_MAX_PENDING (default 16) such requests are in progress, from upload to answer;
+       more get 503 at once. With GS_MAX_BODY_BYTES (default 32 MiB) that bounds buffered bodies
+       to 512 MiB in the worst case.
+    2. The body is read whole, holding no permit, within GS_UPLOAD_TIMEOUT_S (default 120 s; 408).
+    3. The permit is awaited in the event loop while watching the client: a request whose client
+       has gone is dropped instead of being transcribed for nobody.
+    4. Speaches gets the body back in 64 KiB pieces (one big piece would make Starlette's form
+       parser copy it to disk synchronously, on the event loop), and every send must finish within
+       GS_SEND_TIMEOUT_S (default 60 s), so a client that stops reading cannot hold the permit.
+    The permit is released on every exit path (the `finally` blocks).
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        app,  # noqa: ANN001
+        permits: int,
+        api_key: str | None,
+        max_body: int,
+        max_pending: int = 16,
+        upload_timeout: float = 120.0,
+        send_timeout: float = 60.0,
+    ) -> None:
+        if permits < 1:
+            raise ValueError(f"GS_WHISPER_PERMITS must be at least 1, got {permits}")
+        self.app = app
+        self.permits = permits
+        self.max_body = max_body
+        self.max_pending = max_pending
+        self.upload_timeout = upload_timeout
+        self.send_timeout = send_timeout
+        self._key = api_key.encode() if api_key else None
+        self._sem: asyncio.Semaphore | None = None
+        self.pending = 0
+        self.running = 0
+
+    def _authorized(self, scope) -> bool:  # noqa: ANN001
+        """Speaches' rule (FastAPI HTTPBearer): scheme `Bearer` in any case, then the exact token."""
+        if self._key is None:
+            return True
+        got = next((v for k, v in scope.get("headers", []) if k == b"authorization"), b"")
+        scheme, _, token = got.partition(b" ")
+        return scheme.lower() == b"bearer" and hmac.compare_digest(token.strip(), self._key)
+
+    async def _read_body(self, receive) -> bytes | None:  # noqa: ANN001
+        chunks, size = [], 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return None
+            chunk = message.get("body", b"")
+            size += len(chunk)
+            if size > self.max_body:
+                raise _TooLarge
+            chunks.append(chunk)
+            if not message.get("more_body", False):
+                body = b"".join(chunks)
+                chunks.clear()
+                return body
+
+    async def _acquire_unless_gone(self, receive) -> bool:  # noqa: ANN001
+        """True with the permit held; False (and no permit) if the client disconnected first."""
+        acquire = asyncio.ensure_future(self._sem.acquire())
+        watch = asyncio.ensure_future(receive())
+        try:
+            await asyncio.wait({acquire, watch}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            watch.cancel()
+            acquire.cancel()
+            if acquire.done() and not acquire.cancelled() and acquire.exception() is None:
+                self._sem.release()
+            raise
+        gone = watch.done() and not watch.cancelled() and watch.result().get("type") == "http.disconnect"
+        if acquire.done() and not gone:
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+            return True
+        # The client left (a disconnect wins even if the permit came in the same instant).
+        watch.cancel()
+        acquire.cancel()
+        await asyncio.gather(watch, return_exceptions=True)
+        try:
+            await acquire
+        except asyncio.CancelledError:
+            return False
+        self._sem.release()
+        return False
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001, C901
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        method, path = scope["method"], scope["path"]
+        if is_model_admin(method, path):
+            await _reply(send, 403, b"Model administration is disabled on this service.")
+            return
+        if method != "POST" or path not in ADMITTED_PATHS:
+            await self.app(scope, receive, send)
+            return
+        if not self._authorized(scope):
+            await _reply(send, 403, b"API key required or invalid.", [(b"www-authenticate", b"Bearer")])
+            return
+        if self.pending >= self.max_pending:
+            await _reply(send, 503, b"Too many requests in progress.", [(b"retry-after", b"1")])
+            return
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(self.permits)
+
+        async def timed_send(message) -> None:  # noqa: ANN001
+            await asyncio.wait_for(send(message), timeout=self.send_timeout)
+
+        self.pending += 1
+        try:
+            try:
+                body = await asyncio.wait_for(self._read_body(receive), timeout=self.upload_timeout)
+            except _TooLarge:
+                await _reply(timed_send, 413, b"Request body too large.")
+                return
+            except TimeoutError:
+                await _reply(timed_send, 408, b"Upload too slow.")
+                return
+            if body is None:
+                return
+            pieces = [body[i : i + REPLAY_CHUNK] for i in range(0, len(body), REPLAY_CHUNK)] or [b""]
+            del body
+
+            async def replay():  # noqa: ANN202
+                if pieces:
+                    piece = pieces.pop(0)
+                    return {"type": "http.request", "body": piece, "more_body": bool(pieces)}
+                return await receive()  # afterwards the real channel, so a disconnect is still seen
+
+            start = time.perf_counter()
+            if not await self._acquire_unless_gone(receive):
+                return
+            try:
+                waited = time.perf_counter() - start
+                if waited >= 0.5:
+                    logger.info("whisper admission: %s waited %.2f s", path, waited)
+                self.running += 1
+                await self.app(scope, replay, timed_send)
+            finally:
+                self.running -= 1
+                self._sem.release()
+        finally:
+            self.pending -= 1
+
+
+class _TooLarge(Exception):  # noqa: N818
+    pass
+
+
 class State:
-    def __init__(self, gate: Gate, allow: frozenset[str] | None, langs: frozenset[str] | None) -> None:
-        self.gate = gate
+    def __init__(self, permits: int, limits: dict, allow: frozenset[str] | None, langs: frozenset[str] | None) -> None:
+        self.permits = permits
+        self.limits = limits
         self.allow = allow
         self.langs = langs
 
@@ -209,7 +344,7 @@ STATE: State | None = None
 
 
 def install(env: Mapping[str, str] | None = None) -> State:
-    """Wrap Speaches' classes. Call once, before the app is created. A second call is a no-op."""
+    """Wrap Speaches' classes. Call once, before serving. A second call is a no-op."""
     global STATE  # noqa: PLW0603
     env = os.environ if env is None else env
 
@@ -221,7 +356,15 @@ def install(env: Mapping[str, str] | None = None) -> State:
         assert STATE is not None
         return STATE
 
-    gate = Gate(int(env.get("GS_WHISPER_PERMITS", "1")))
+    permits = int(env.get("GS_WHISPER_PERMITS", "1"))
+    if permits < 1:
+        raise ValueError(f"GS_WHISPER_PERMITS must be at least 1, got {permits}")
+    limits = {
+        "max_body": int(env.get("GS_MAX_BODY_BYTES", str(32 * 1024 * 1024))),
+        "max_pending": int(env.get("GS_MAX_PENDING", "16")),
+        "upload_timeout": float(env.get("GS_UPLOAD_TIMEOUT_S", "120")),
+        "send_timeout": float(env.get("GS_SEND_TIMEOUT_S", "60")),
+    }
     allow = parse_allowlist(env.get("GS_MODEL_ALLOWLIST"))
     langs = parse_language_set(env.get("GS_STT_LANGUAGES"))
 
@@ -234,16 +377,18 @@ def install(env: Mapping[str, str] | None = None) -> State:
         m.handle_streaming_transcription_request = with_languages_generator(
             m.handle_streaming_transcription_request, langs
         )
-    # The permit is outermost: it is taken before any GPU work, language detection included.
-    m.handle_non_streaming_transcription_request = gated(
-        m.handle_non_streaming_transcription_request, gate, "transcription"
-    )
-    m.handle_streaming_transcription_request = gated_generator(
-        m.handle_streaming_transcription_request, gate, "streaming transcription"
-    )
-    m.handle_translation_request = gated(m.handle_translation_request, gate, "translation")
 
     if allow is not None:
+        # Before the stream starts, so a refused model gets a 403 rather than a broken 200 stream.
+        orig_dispatch = m.handle_transcription_request
+
+        @functools.wraps(orig_dispatch)
+        def handle_transcription_request(self, request, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            refuse_unless_allowed(allow, request.model)
+            return orig_dispatch(self, request, **kwargs)
+
+        m.handle_transcription_request = handle_transcription_request
+
         orig_load = BaseModelManager.load_model
         orig_download = ExecutorRegistry.download_model_by_id
 
@@ -261,10 +406,11 @@ def install(env: Mapping[str, str] | None = None) -> State:
         ExecutorRegistry.download_model_by_id = download_model_by_id
 
     setattr(WhisperModelManager, _INSTALLED_MARK, True)
-    STATE = State(gate, allow, langs)
+    STATE = State(permits, limits, allow, langs)
     logger.info(
-        "gs_speech: whisper permits %d; model allowlist %s; transcription languages %s",
-        gate.permits,
+        "gs_speech: whisper permits %d; limits %s; model allowlist %s; transcription languages %s",
+        permits,
+        limits,
         "off" if allow is None else sorted(allow),
         "any" if langs is None else sorted(langs),
     )

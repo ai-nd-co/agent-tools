@@ -126,10 +126,20 @@ class LanguageSetTest(unittest.TestCase):
 class BatchSizeTest(unittest.TestCase):
     def test_default_only(self) -> None:
         seen = []
-        wrapped = ext.with_batch_size(lambda self, audio, **kw: seen.append(kw.get("batch_size")), 2)
+
+        def transcribe(self, audio, language=None, batch_size=8):  # noqa: ANN001, ANN202 - faster-whisper's shape
+            seen.append(batch_size)
+
+        wrapped = ext.with_batch_size(transcribe, 2)
         wrapped(None, "a")
         wrapped(None, "a", batch_size=8)
-        self.assertEqual(seen, [2, 8])
+        wrapped(None, "a", None, 4)  # positional
+        self.assertEqual(seen, [2, 8, 4])
+
+    def test_real_signature(self) -> None:
+        from faster_whisper import BatchedInferencePipeline
+
+        self.assertIn("batch_size", __import__("inspect").signature(BatchedInferencePipeline.transcribe).parameters)
 
 
 class InstallTest(unittest.TestCase):
@@ -456,6 +466,28 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(state["calls"], 0)
         self.assertFalse(app._sem.locked())  # noqa: SLF001
         self.assertEqual((app.pending, app.running), (0, 0))
+
+    def test_cancelled_while_queued_strands_nothing(self) -> None:
+        app, state = self.app()
+
+        async def go() -> None:
+            app._sem = asyncio.Semaphore(1)  # noqa: SLF001
+            await app._sem.acquire()  # noqa: SLF001 - someone else holds the permit
+
+            async def receive():  # noqa: ANN202 - the client stays
+                await asyncio.sleep(10)
+                return {"type": "http.disconnect"}
+
+            task = asyncio.create_task(app._acquire_unless_gone(receive))  # noqa: SLF001
+            await asyncio.sleep(0.05)
+            app._sem.release()  # noqa: SLF001 - the permit is granted to the waiter...
+            task.cancel()  # ...and the request is cancelled in the same instant
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.05)
+            self.assertFalse(app._sem.locked())  # noqa: SLF001 - nobody holds it
+
+        asyncio.run(go())
 
     def test_stalled_reader_releases_the_permit(self) -> None:
         app, state = self.app(send_timeout=0.2)

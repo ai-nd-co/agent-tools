@@ -45,6 +45,7 @@ import asyncio
 from contextlib import contextmanager
 import functools
 import hmac
+import inspect
 import logging
 import os
 import re
@@ -155,11 +156,14 @@ def with_languages_generator(fn: Callable, langs: frozenset[str]) -> Callable:
 
 
 def with_batch_size(orig: Callable, batch_size: int) -> Callable:
-    """Wraps BatchedInferencePipeline.transcribe: batch_size unless the caller gave one."""
+    """Wraps BatchedInferencePipeline.transcribe: batch_size unless the caller gave one, by name or
+    by position."""
+    sig = inspect.signature(orig)
 
     @functools.wraps(orig)
     def transcribe(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
-        kwargs.setdefault("batch_size", batch_size)
+        if "batch_size" not in sig.bind_partial(self, *args, **kwargs).arguments:
+            kwargs["batch_size"] = batch_size
         return orig(self, *args, **kwargs)
 
     return transcribe
@@ -256,32 +260,34 @@ class Admission:
                 return body
 
     async def _acquire_unless_gone(self, receive) -> bool:  # noqa: ANN001
-        """True with the permit held; False (and no permit) if the client disconnected first."""
+        """True with the permit held; False (and no permit) if the client disconnected first.
+
+        A disconnect wins even when the permit arrived in the same instant. The cleanup has no
+        await in it, so a cancellation anywhere here cannot strand a granted permit: a pending
+        acquisition is cancelled (asyncio's Semaphore passes on a grant it loses that way), and a
+        completed one that is not handed to the caller is released.
+        """
         acquire = asyncio.ensure_future(self._sem.acquire())
         watch = asyncio.ensure_future(receive())
+        owned = False
         try:
             await asyncio.wait({acquire, watch}, return_when=asyncio.FIRST_COMPLETED)
-        except BaseException:
+            gone = (
+                watch.done()
+                and not watch.cancelled()
+                and watch.exception() is None
+                and watch.result().get("type") == "http.disconnect"
+            )
+            owned = acquire.done() and not acquire.cancelled() and acquire.exception() is None and not gone
+            return owned
+        finally:
             watch.cancel()
-            acquire.cancel()
-            if acquire.done() and not acquire.cancelled() and acquire.exception() is None:
-                self._sem.release()
-            raise
-        gone = watch.done() and not watch.cancelled() and watch.result().get("type") == "http.disconnect"
-        if acquire.done() and not gone:
-            watch.cancel()
-            await asyncio.gather(watch, return_exceptions=True)
-            return True
-        # The client left (a disconnect wins even if the permit came in the same instant).
-        watch.cancel()
-        acquire.cancel()
-        await asyncio.gather(watch, return_exceptions=True)
-        try:
-            await acquire
-        except asyncio.CancelledError:
-            return False
-        self._sem.release()
-        return False
+            if not owned:
+                if acquire.done():
+                    if not acquire.cancelled() and acquire.exception() is None:
+                        self._sem.release()
+                else:
+                    acquire.cancel()
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001, C901
         if scope["type"] != "http":
@@ -330,11 +336,11 @@ class Admission:
             start = time.perf_counter()
             if not await self._acquire_unless_gone(receive):
                 return
+            self.running += 1
             try:
                 waited = time.perf_counter() - start
                 if waited >= 0.5:
                     logger.info("whisper admission: %s waited %.2f s", path, waited)
-                self.running += 1
                 await self.app(scope, replay, timed_send)
             finally:
                 self.running -= 1

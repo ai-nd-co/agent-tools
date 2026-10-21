@@ -123,6 +123,15 @@ class LanguageSetTest(unittest.TestCase):
         self.assertEqual(closed, [True])
 
 
+class BatchSizeTest(unittest.TestCase):
+    def test_default_only(self) -> None:
+        seen = []
+        wrapped = ext.with_batch_size(lambda self, audio, **kw: seen.append(kw.get("batch_size")), 2)
+        wrapped(None, "a")
+        wrapped(None, "a", batch_size=8)
+        self.assertEqual(seen, [2, 8])
+
+
 class InstallTest(unittest.TestCase):
     """Against the real Speaches classes in this image."""
 

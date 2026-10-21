@@ -13,6 +13,10 @@ may be another team's service. So:
   get 403 from Admission itself, by Speaches' own rule (Bearer, any case, exact token). In-process callers that
   bypass HTTP (Speaches' realtime loopback) are not admitted. This cluster routes no realtime
   path, and with this image's FastAPI that loopback fails before reaching Whisper anyway.
+- GS_WHISPER_BATCH_SIZE: how many 30 s windows of one recording Whisper decodes at once (faster-
+  whisper's default is 8). Measured at int8: one 26-minute file took the container from 2,706 to
+  5,746 MiB for the 17 s of its decode at 8. On a shared card the transient is the budget, so the
+  deployment sets a smaller value; only long recordings get slower. Unset means faster-whisper's.
 - GS_MAX_BODY_BYTES (default 32 MiB), GS_MAX_PENDING (16), GS_UPLOAD_TIMEOUT_S (120),
   GS_SEND_TIMEOUT_S (60): the bounds Admission puts on what it buffers and waits for (see the
   class). 180 s of 16 kHz mono WAV is 5.8 MB.
@@ -148,6 +152,17 @@ def with_languages_generator(fn: Callable, langs: frozenset[str]) -> Callable:
             it.close()
 
     return wrapper
+
+
+def with_batch_size(orig: Callable, batch_size: int) -> Callable:
+    """Wraps BatchedInferencePipeline.transcribe: batch_size unless the caller gave one."""
+
+    @functools.wraps(orig)
+    def transcribe(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        kwargs.setdefault("batch_size", batch_size)
+        return orig(self, *args, **kwargs)
+
+    return transcribe
 
 
 def refuse_unless_allowed(allow: frozenset[str] | None, model_id: str) -> None:
@@ -368,6 +383,14 @@ def install(env: Mapping[str, str] | None = None) -> State:
     allow = parse_allowlist(env.get("GS_MODEL_ALLOWLIST"))
     langs = parse_language_set(env.get("GS_STT_LANGUAGES"))
 
+    batch_size = int(env["GS_WHISPER_BATCH_SIZE"]) if env.get("GS_WHISPER_BATCH_SIZE") else None
+    if batch_size is not None:
+        if batch_size < 1:
+            raise ValueError(f"GS_WHISPER_BATCH_SIZE must be at least 1, got {batch_size}")
+        from faster_whisper import BatchedInferencePipeline
+
+        BatchedInferencePipeline.transcribe = with_batch_size(BatchedInferencePipeline.transcribe, batch_size)
+
     m = WhisperModelManager
     if langs is not None:
         from faster_whisper import WhisperModel
@@ -408,8 +431,9 @@ def install(env: Mapping[str, str] | None = None) -> State:
     setattr(WhisperModelManager, _INSTALLED_MARK, True)
     STATE = State(permits, limits, allow, langs)
     logger.info(
-        "gs_speech: whisper permits %d; limits %s; model allowlist %s; transcription languages %s",
+        "gs_speech: whisper permits %d; batch size %s; limits %s; model allowlist %s; transcription languages %s",
         permits,
+        batch_size or "default",
         limits,
         "off" if allow is None else sorted(allow),
         "any" if langs is None else sorted(langs),

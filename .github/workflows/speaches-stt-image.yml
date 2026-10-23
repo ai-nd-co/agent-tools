@@ -1,7 +1,8 @@
 # Build, check and publish the speech-stt image (docker/speaches-stt/Dockerfile) to GHCR.
 #
 # The image is the Speaches release the office cluster already runs, pinned by digest, plus a
-# newer cuBLAS for the RTX 50-series card (see the Dockerfile). Same delivery contract as the
+# newer cuBLAS for the RTX 50-series card, CTranslate2 4.8.3 for int8, and gs_speech (admission
+# control, model allowlist, language-ID listener; see the Dockerfile). Same delivery contract as the
 # tts-server image: the cluster pulls by DIGEST, and a deploy is a k3s-gpu-cluster PR changing the
 # pin in terraform/52-speech.tf. Feature branches publish too, tagged by commit.
 #
@@ -68,7 +69,17 @@ jobs:
               [ -w "$p" ] && { echo "$p is writable at runtime"; exit 1; } || true
             done
             case "$LD_LIBRARY_PATH" in /opt/cublas-12.9:*) ;; *) echo "loader path: $LD_LIBRARY_PATH"; exit 1;; esac
+            v=$(python -I -c "import ctranslate2; print(ctranslate2.__version__)")
+            [ "$v" = 4.8.3 ] || { echo "ctranslate2 $v"; exit 1; }
+            for f in /opt/gs-speech/gs_speech/*.py; do
+              [ "$(stat -c %u "$f")" = 0 ] || { echo "$f is not root-owned"; exit 1; }
+              [ -w "$f" ] && { echo "$f is writable at runtime"; exit 1; } || true
+            done
             echo "checks passed"'
+
+      # gs_speech's unit tests, against the real Speaches classes in the image; no GPU needed.
+      - name: Unit tests
+        run: docker run --rm --entrypoint python "$IMAGE:$TAG" -I -m unittest discover -s /opt/gs-speech/tests -v
 
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin

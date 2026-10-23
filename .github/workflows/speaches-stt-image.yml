@@ -1,0 +1,94 @@
+# Build, check and publish the speech-stt image (docker/speaches-stt/Dockerfile) to GHCR.
+#
+# The image is the Speaches release the office cluster already runs, pinned by digest, plus a
+# newer cuBLAS for the RTX 50-series card (see the Dockerfile). Same delivery contract as the
+# tts-server image: the cluster pulls by DIGEST, and a deploy is a k3s-gpu-cluster PR changing the
+# pin in terraform/52-speech.tf. Feature branches publish too, tagged by commit.
+#
+# GitHub-hosted runner, like tts-server-image.yml: no cluster access is needed to build. There is
+# no GPU here, so the checks are static. Speed and accuracy are measured on the card before a pin.
+name: speaches-stt image
+
+on:
+  push:
+    branches: ['main', 'feat/**']
+    paths:
+      - 'docker/speaches-stt/**'
+      - '.github/workflows/speaches-stt-image.yml'
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/ai-nd-co/speaches-stt
+  # The file patch 433 (k3s-gpu-cluster speech-entrypoint ConfigMap) is written for. If the base
+  # changes, the patch refuses to apply, so a mismatch here fails the build instead.
+  WHISPER_PY_SHA256: 52515e6f4786885f4fd70b731bcc2a58b16fc6af55efb97731225222b32a5a02
+
+concurrency:
+  group: speaches-stt-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The base image is ~8.6 GB; the runner's preinstalled toolchains leave too little disk for it.
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_SHA::12}"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          docker build -t "$IMAGE:$tag" docker/speaches-stt
+
+      # What the cluster relies on, checked without a GPU: runs as uid 1000, the patched file is
+      # unchanged, both new cuBLAS libraries are present, readable and root-owned, and they come
+      # first on the loader path.
+      - name: Check
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint sh -e WANT="$WHISPER_PY_SHA256" "$IMAGE:$TAG" -c '
+            set -eu
+            [ "$(id -u)" = 1000 ] || { echo "not uid 1000"; exit 1; }
+            got=$(sha256sum /home/ubuntu/speaches/src/speaches/executors/whisper.py | cut -c1-64)
+            [ "$got" = "$WANT" ] || { echo "whisper.py changed: $got"; exit 1; }
+            for f in libcublas.so.12 libcublasLt.so.12; do
+              p=/opt/cublas-12.9/$f
+              [ -s "$p" ] && [ -r "$p" ] || { echo "missing $p"; exit 1; }
+              [ "$(stat -c %u "$p")" = 0 ] || { echo "$p is not root-owned"; exit 1; }
+              [ -w "$p" ] && { echo "$p is writable at runtime"; exit 1; } || true
+            done
+            case "$LD_LIBRARY_PATH" in /opt/cublas-12.9:*) ;; *) echo "loader path: $LD_LIBRARY_PATH"; exit 1;; esac
+            echo "checks passed"'
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$TAG"
+          if [ "$GITHUB_REF_NAME" = main ]; then
+            docker tag "$IMAGE:$TAG" "$IMAGE:main"
+            docker push "$IMAGE:main"
+          fi
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$TAG")
+          {
+            echo "## speaches-stt image"
+            echo
+            echo "Pin this in k3s-gpu-cluster terraform/52-speech.tf (speech_images.STT):"
+            echo
+            echo '```'
+            echo "$digest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$digest"

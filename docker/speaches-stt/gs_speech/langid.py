@@ -35,8 +35,6 @@ worker (WHISPER__NUM_WORKERS=2) beside at most one transcription job.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 import hmac
 import io
 import logging
@@ -44,12 +42,14 @@ import os
 import re
 import threading
 import time
-from typing import TYPE_CHECKING, Any
 import wave
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-import numpy as np
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -128,7 +128,9 @@ class SpeachesWhisper:
                 from huggingface_hub import try_to_load_from_cache
 
                 path = try_to_load_from_cache(self.model_id, "model.bin")
-                self._revision = os.path.basename(os.path.dirname(path)) if isinstance(path, str) else "unknown"
+                self._revision = (
+                    os.path.basename(os.path.dirname(path)) if isinstance(path, str) else "unknown"
+                )
             except Exception:  # noqa: BLE001
                 self._revision = "unknown"
         return self._revision
@@ -139,20 +141,26 @@ def decode(data: bytes, content_type: str | None) -> np.ndarray:
     ctype = (content_type or "").split(";")[0].strip().lower()
     if ctype in ("audio/pcm", "audio/raw"):
         if len(data) % 2:
-            raise HTTPException(status_code=400, detail="PCM length is not a whole number of 16-bit samples.")
+            raise HTTPException(
+                status_code=400, detail="PCM length is not a whole number of 16-bit samples."
+            )
         pcm = data[: MAX_SAMPLES * 2]
     else:
         try:
             with wave.open(io.BytesIO(data), "rb") as w:
                 fmt = (w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getcomptype())
                 if fmt != (1, 2, SAMPLE_RATE, "NONE"):
-                    raise HTTPException(status_code=415, detail="Send 16 kHz mono 16-bit PCM (WAV or audio/pcm).")
+                    raise HTTPException(
+                        status_code=415, detail="Send 16 kHz mono 16-bit PCM (WAV or audio/pcm)."
+                    )
                 want = min(w.getnframes(), MAX_SAMPLES)
                 pcm = w.readframes(want)
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001 - wave raises wave.Error, EOFError, RuntimeError, struct.error
-            raise HTTPException(status_code=415, detail="Not a readable WAV; send 16 kHz mono 16-bit PCM.") from e
+            raise HTTPException(
+                status_code=415, detail="Not a readable WAV; send 16 kHz mono 16-bit PCM."
+            ) from e
         if len(pcm) != want * 2:
             raise HTTPException(status_code=400, detail="WAV is shorter than its header says.")
     if not pcm:
@@ -166,7 +174,9 @@ def make_app(env: Mapping[str, str] | None = None, model: Any | None = None) -> 
         from speaches.dependencies import get_config
 
         cfg = get_config()
-        model = SpeachesWhisper(env.get("GS_LID_MODEL") or env["STT_MODEL"], cfg.whisper.compute_type)
+        model = SpeachesWhisper(
+            env.get("GS_LID_MODEL") or env["STT_MODEL"], cfg.whisper.compute_type
+        )
     slots = Slots(int(env.get("GS_LID_MAX_OUTSTANDING", "2")))
     # 1 MiB keeps an upload under Starlette's in-memory spool limit (30 s of PCM is 960,000 bytes).
     max_bytes = int(env.get("GS_LID_MAX_BYTES", str(1024 * 1024)))
@@ -186,7 +196,9 @@ def make_app(env: Mapping[str, str] | None = None, model: Any | None = None) -> 
         if not hmac.compare_digest(got.encode(), f"Bearer {api_key}".encode()):
             raise HTTPException(status_code=401, detail="Bearer token required.")
 
-    def detect(data: bytes, content_type: str | None, queued_at: float, request_id: str | None) -> dict:
+    def detect(
+        data: bytes, content_type: str | None, queued_at: float, request_id: str | None
+    ) -> dict:
         started = time.perf_counter()
         audio = decode(data, content_type)
         decoded = time.perf_counter()

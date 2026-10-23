@@ -32,7 +32,9 @@ class PortRouter:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
-            await self.main(scope, receive, send)  # only Speaches has startup work (Admission passes it on)
+            await self.main(
+                scope, receive, send
+            )  # only Speaches has startup work (Admission passes it on)
             return
         server = scope.get("server")
         if self.lid is not None and server is not None and server[1] == self.lid_port:
@@ -66,8 +68,12 @@ def main() -> None:
     from speaches.dependencies import get_config
 
     key = get_config().api_key
-    main_app = ext.Admission(app, state.permits, key.get_secret_value() if key else None, **state.limits)
-    config = uvicorn.Config(PortRouter(main_app, lid_app, lid_port), host=host, port=port, lifespan="on")
+    main_app = ext.Admission(
+        app, state.permits, key.get_secret_value() if key else None, **state.limits
+    )
+    config = uvicorn.Config(
+        PortRouter(main_app, lid_app, lid_port), host=host, port=port, lifespan="on"
+    )
     server = uvicorn.Server(config)
     sockets = [bind(host, port)]
     if lid_app is not None:

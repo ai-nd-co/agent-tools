@@ -1,25 +1,24 @@
 """Unit tests for gs_speech. No GPU: Whisper is a stand-in. Run inside the image:
 
-    docker run --rm --entrypoint python <image> -I -m unittest discover -s /opt/gs-speech/tests -v
+docker run --rm --entrypoint python <image> -I -m unittest discover -s /opt/gs-speech/tests -v
 """
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 import io
 import sys
 import threading
 import time
 import unittest
 import wave
+from contextlib import contextmanager
 
 sys.path.insert(0, "/opt/gs-speech")
 
 import numpy as np  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-
 from gs_speech import ext, langid  # noqa: E402
 from gs_speech.serve import PortRouter  # noqa: E402
 
@@ -139,25 +138,33 @@ class BatchSizeTest(unittest.TestCase):
     def test_real_signature(self) -> None:
         from faster_whisper import BatchedInferencePipeline
 
-        self.assertIn("batch_size", __import__("inspect").signature(BatchedInferencePipeline.transcribe).parameters)
+        self.assertIn(
+            "batch_size",
+            __import__("inspect").signature(BatchedInferencePipeline.transcribe).parameters,
+        )
 
 
 class InstallTest(unittest.TestCase):
     """Against the real Speaches classes in this image."""
 
     def test_install_wraps_and_refuses(self) -> None:
+        from faster_whisper import WhisperModel
         from speaches.executors.shared.base_model_manager import BaseModelManager
         from speaches.executors.whisper import WhisperModelManager
 
-        from faster_whisper import WhisperModel
-
         orig_detect = WhisperModel.detect_language
         state = ext.install(
-            {"GS_WHISPER_PERMITS": "1", "GS_MODEL_ALLOWLIST": "Systran/faster-whisper-large-v3", "GS_STT_LANGUAGES": "en,ru"}
+            {
+                "GS_WHISPER_PERMITS": "1",
+                "GS_MODEL_ALLOWLIST": "Systran/faster-whisper-large-v3",
+                "GS_STT_LANGUAGES": "en,ru",
+            }
         )
         self.assertIs(ext.install({}), state)  # second call is a no-op
         self.assertEqual(state.langs, frozenset({"en", "ru"}))
-        self.assertTrue(hasattr(WhisperModelManager.handle_non_streaming_transcription_request, "__wrapped__"))
+        self.assertTrue(
+            hasattr(WhisperModelManager.handle_non_streaming_transcription_request, "__wrapped__")
+        )
         self.assertIs(WhisperModel.detect_language.__wrapped__, orig_detect)
 
         class Dummy(BaseModelManager):
@@ -165,8 +172,13 @@ class InstallTest(unittest.TestCase):
                 return model_id
 
         mgr = Dummy(ttl=-1)
-        self.assertEqual(mgr.load_model("Systran/faster-whisper-large-v3").model_id, "Systran/faster-whisper-large-v3")
-        self.assertEqual(mgr.load_model("whisper-1").model_id, "whisper-1")  # alias of the allowed id
+        self.assertEqual(
+            mgr.load_model("Systran/faster-whisper-large-v3").model_id,
+            "Systran/faster-whisper-large-v3",
+        )
+        self.assertEqual(
+            mgr.load_model("whisper-1").model_id, "whisper-1"
+        )  # alias of the allowed id
         with self.assertRaises(HTTPException) as cm:
             mgr.load_model("Systran/faster-whisper-tiny")
         self.assertEqual(cm.exception.status_code, 403)
@@ -179,7 +191,9 @@ class InstallTest(unittest.TestCase):
         ext.install({})
         if ext.STATE.allow is None:
             self.skipTest("installed without an allowlist")
-        with self.assertRaises(HTTPException) as cm:  # raised by the call itself, not on first iteration
+        with self.assertRaises(
+            HTTPException
+        ) as cm:  # raised by the call itself, not on first iteration
             WhisperModelManager.handle_transcription_request(
                 object(), SimpleNamespace(model="Systran/faster-whisper-tiny", stream=True)
             )
@@ -207,7 +221,9 @@ class LangIdTest(unittest.TestCase):
         body = r.json()
         self.assertEqual(body["language"], "ru")
         self.assertEqual(body["probabilities"], {"ru": 0.9, "en": 0.07, "uz": 0.03})
-        self.assertEqual((body["model"], body["revision"]), ("Systran/faster-whisper-large-v3", "edaa852"))
+        self.assertEqual(
+            (body["model"], body["revision"]), ("Systran/faster-whisper-large-v3", "edaa852")
+        )
         self.assertAlmostEqual(body["audio_seconds"], 1.0, places=2)
         self.assertEqual(w.calls, 1)
 
@@ -218,13 +234,17 @@ class LangIdTest(unittest.TestCase):
         data = wav_bytes(2.0)
         ours = langid.decode(data, "audio/wav")
         theirs = audio_file_dependency(
-            UploadFile(io.BytesIO(data), filename="a.wav", headers=Headers({"content-type": "audio/wav"}))
+            UploadFile(
+                io.BytesIO(data), filename="a.wav", headers=Headers({"content-type": "audio/wav"})
+            )
         ).data
         self.assertEqual(ours.shape, theirs.shape)
         self.assertLess(float(np.max(np.abs(ours - theirs))), 1e-3)
 
     def test_first_30_seconds_only(self) -> None:
-        self.assertEqual(len(langid.decode(np.zeros(16000 * 40, "<i2").tobytes(), "audio/pcm")), 16000 * 30)
+        self.assertEqual(
+            len(langid.decode(np.zeros(16000 * 40, "<i2").tobytes(), "audio/pcm")), 16000 * 30
+        )
 
     def test_pcm(self) -> None:
         r = self.post(self.client(FakeWhisper()), np.zeros(8000, "<i2").tobytes(), "audio/pcm")
@@ -243,12 +263,25 @@ class LangIdTest(unittest.TestCase):
             w.setframerate(8000)
             w.writeframes(b"\x00\x00" * 800)
         self.assertEqual(self.post(c, buf.getvalue()).status_code, 415)  # 8 kHz
-        self.assertEqual(self.post(c, wav_bytes()[:-1]).status_code, 400)  # truncated to an odd length
+        self.assertEqual(
+            self.post(c, wav_bytes()[:-1]).status_code, 400
+        )  # truncated to an odd length
         self.assertEqual(c.post("/v1/langid", data={"x": "1"}).status_code, 400)  # no file field
-        self.assertEqual(self.post(c, wav_bytes()[:-2]).status_code, 400)  # truncated by an even count
-        riff = b"RIFF" + (100).to_bytes(4, "little") + b"WAVE" + b"junk" + (10**6).to_bytes(4, "little") + b"\0" * 8
+        self.assertEqual(
+            self.post(c, wav_bytes()[:-2]).status_code, 400
+        )  # truncated by an even count
+        riff = (
+            b"RIFF"
+            + (100).to_bytes(4, "little")
+            + b"WAVE"
+            + b"junk"
+            + (10**6).to_bytes(4, "little")
+            + b"\0" * 8
+        )
         self.assertEqual(self.post(c, riff).status_code, 415)  # chunk past the RIFF boundary
-        self.assertEqual(self.post(c, b"\0" * (16000 * 2 * 31 + 1), "audio/pcm").status_code, 400)  # odd, past 30 s
+        self.assertEqual(
+            self.post(c, b"\0" * (16000 * 2 * 31 + 1), "audio/pcm").status_code, 400
+        )  # odd, past 30 s
         self.assertEqual(c.app.state.slots.used, 0)
 
     def test_not_loaded(self) -> None:
@@ -262,16 +295,26 @@ class LangIdTest(unittest.TestCase):
     def test_key(self) -> None:
         c = self.client(FakeWhisper(), GS_LID_API_KEY="k" * 40)
         self.assertEqual(self.post(c, wav_bytes()).status_code, 401)
-        self.assertEqual(self.post(c, wav_bytes(), headers={"Authorization": "Bearer " + "k" * 40}).status_code, 200)
+        self.assertEqual(
+            self.post(c, wav_bytes(), headers={"Authorization": "Bearer " + "k" * 40}).status_code,
+            200,
+        )
 
     def test_request_id(self) -> None:
         c = self.client(FakeWhisper())
-        self.assertEqual(self.post(c, wav_bytes(), headers={"X-Request-Id": "job-42:a"}).json()["request_id"], "job-42:a")
-        self.assertIsNone(self.post(c, wav_bytes(), headers={"X-Request-Id": "bad id"}).json()["request_id"])
+        self.assertEqual(
+            self.post(c, wav_bytes(), headers={"X-Request-Id": "job-42:a"}).json()["request_id"],
+            "job-42:a",
+        )
+        self.assertIsNone(
+            self.post(c, wav_bytes(), headers={"X-Request-Id": "bad id"}).json()["request_id"]
+        )
         self.assertIsNone(self.post(c, wav_bytes()).json()["request_id"])
 
     def test_busy_cap_and_release(self) -> None:
-        app = langid.make_app(env={"GS_LID_MAX_OUTSTANDING": "1"}, model=FakeModel(FakeWhisper(delay=0.5)))
+        app = langid.make_app(
+            env={"GS_LID_MAX_OUTSTANDING": "1"}, model=FakeModel(FakeWhisper(delay=0.5))
+        )
         results: list[int] = []
 
         def call() -> None:
@@ -348,7 +391,9 @@ class AdmissionTest(unittest.TestCase):
         import httpx
 
         async def go():  # noqa: ANN202
-            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://x") as c:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://x"
+            ) as c:
                 return await asyncio.gather(*(call(c) for call in calls))
 
         return asyncio.run(go())
@@ -358,7 +403,12 @@ class AdmissionTest(unittest.TestCase):
 
     def test_one_at_a_time_and_body_intact(self) -> None:
         app, state = self.app()
-        calls = [lambda c, i=i: c.post("/v1/audio/transcriptions", content=b"x" * (1000 + i), headers=self.auth()) for i in range(4)]
+        calls = [
+            lambda c, i=i: c.post(
+                "/v1/audio/transcriptions", content=b"x" * (1000 + i), headers=self.auth()
+            )
+            for i in range(4)
+        ]
         self.assertEqual([r.status_code for r in self.run_async(app, calls)], [200] * 4)
         self.assertEqual(state["peak"], 1)
         self.assertEqual(sorted(len(b) for b in state["bodies"]), [1000, 1001, 1002, 1003])
@@ -380,36 +430,65 @@ class AdmissionTest(unittest.TestCase):
             t0.append(time.perf_counter() - start)
             return r
 
-        rs = self.run_async(app, [lambda c: c.post("/v1/audio/transcriptions", content=slow_body(), headers=self.auth()), fast])
+        rs = self.run_async(
+            app,
+            [
+                lambda c: c.post(
+                    "/v1/audio/transcriptions", content=slow_body(), headers=self.auth()
+                ),
+                fast,
+            ],
+        )
         self.assertEqual([r.status_code for r in rs], [200, 200])
         self.assertLess(t0[0], 0.4)  # did not wait for the slow upload
         self.assertIn(b"ab", state["bodies"])
 
     def test_body_cap(self) -> None:
         app, _ = self.app(max_body=100)
-        r = self.run_async(app, [lambda c: c.post("/v1/audio/transcriptions", content=b"x" * 101, headers=self.auth())])[0]
+        r = self.run_async(
+            app,
+            [lambda c: c.post("/v1/audio/transcriptions", content=b"x" * 101, headers=self.auth())],
+        )[0]
         self.assertEqual(r.status_code, 413)
 
     def test_large_body_replayed_in_pieces_intact(self) -> None:
         app, state = self.app(max_body=1 << 22)
         data = bytes(range(256)) * 4096  # 1 MiB, 16 replay pieces
-        r = self.run_async(app, [lambda c: c.post("/v1/audio/transcriptions", content=data, headers=self.auth())])[0]
+        r = self.run_async(
+            app, [lambda c: c.post("/v1/audio/transcriptions", content=data, headers=self.auth())]
+        )[0]
         self.assertEqual(r.status_code, 200)
         self.assertEqual(state["bodies"], [data])
 
     def test_auth_like_speaches(self) -> None:
         app, state = self.app()
-        rs = self.run_async(app, [
-            lambda c: c.post("/v1/audio/transcriptions", content=b"x"),
-            lambda c: c.post("/v1/audio/transcriptions", content=b"x", headers={"Authorization": "Bearer wrong"}),
-            lambda c: c.post("/v1/audio/transcriptions", content=b"x", headers={"Authorization": "bearer " + self.KEY}),
-        ])
-        self.assertEqual([r.status_code for r in rs], [403, 403, 200])  # scheme in any case, as HTTPBearer
+        rs = self.run_async(
+            app,
+            [
+                lambda c: c.post("/v1/audio/transcriptions", content=b"x"),
+                lambda c: c.post(
+                    "/v1/audio/transcriptions",
+                    content=b"x",
+                    headers={"Authorization": "Bearer wrong"},
+                ),
+                lambda c: c.post(
+                    "/v1/audio/transcriptions",
+                    content=b"x",
+                    headers={"Authorization": "bearer " + self.KEY},
+                ),
+            ],
+        )
+        self.assertEqual(
+            [r.status_code for r in rs], [403, 403, 200]
+        )  # scheme in any case, as HTTPBearer
         self.assertEqual(state["calls"], 1)
 
     def test_too_many_pending(self) -> None:
         app, _ = self.app(max_pending=2)
-        calls = [lambda c: c.post("/v1/audio/transcriptions", content=b"x", headers=self.auth()) for _ in range(4)]
+        calls = [
+            lambda c: c.post("/v1/audio/transcriptions", content=b"x", headers=self.auth())
+            for _ in range(4)
+        ]
         codes = sorted(r.status_code for r in self.run_async(app, calls))
         self.assertEqual(codes, [200, 200, 503, 503])
         self.assertEqual(app.pending, 0)
@@ -426,8 +505,19 @@ class AdmissionTest(unittest.TestCase):
             async def send(m) -> None:  # noqa: ANN001
                 sent.append(m)
 
-            scope = {"type": "http", "method": "POST", "path": "/v1/audio/transcriptions", "headers": [(b"authorization", ("Bearer " + self.KEY).encode())],
-                     "query_string": b"", "root_path": "", "scheme": "http", "server": ("x", 80), "client": ("c", 1), "http_version": "1.1", "raw_path": b"/v1/audio/transcriptions"}
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/audio/transcriptions",
+                "headers": [(b"authorization", ("Bearer " + self.KEY).encode())],
+                "query_string": b"",
+                "root_path": "",
+                "scheme": "http",
+                "server": ("x", 80),
+                "client": ("c", 1),
+                "http_version": "1.1",
+                "raw_path": b"/v1/audio/transcriptions",
+            }
             first = asyncio.create_task(app(scope, holder_receive, send))
             await asyncio.sleep(0.02)  # the first one holds the permit for 0.1 s
             msgs = [{"type": "http.request", "body": b"b", "more_body": False}]
@@ -450,7 +540,10 @@ class AdmissionTest(unittest.TestCase):
         app, state = self.app()
 
         async def go() -> None:
-            msgs = [{"type": "http.request", "body": b"a", "more_body": False}, {"type": "http.disconnect"}]
+            msgs = [
+                {"type": "http.request", "body": b"a", "more_body": False},
+                {"type": "http.disconnect"},
+            ]
 
             async def receive():  # noqa: ANN202 - the disconnect is already there when the permit is free
                 return msgs.pop(0) if msgs else {"type": "http.disconnect"}
@@ -458,8 +551,19 @@ class AdmissionTest(unittest.TestCase):
             async def send(m) -> None:  # noqa: ANN001
                 pass
 
-            scope = {"type": "http", "method": "POST", "path": "/v1/audio/transcriptions", "headers": [(b"authorization", ("Bearer " + self.KEY).encode())],
-                     "query_string": b"", "root_path": "", "scheme": "http", "server": ("x", 80), "client": ("c", 1), "http_version": "1.1", "raw_path": b"/v1/audio/transcriptions"}
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/audio/transcriptions",
+                "headers": [(b"authorization", ("Bearer " + self.KEY).encode())],
+                "query_string": b"",
+                "root_path": "",
+                "scheme": "http",
+                "server": ("x", 80),
+                "client": ("c", 1),
+                "http_version": "1.1",
+                "raw_path": b"/v1/audio/transcriptions",
+            }
             await app(scope, receive, send)
 
         asyncio.run(go())
@@ -499,8 +603,19 @@ class AdmissionTest(unittest.TestCase):
             async def stuck_send(m) -> None:  # noqa: ANN001
                 await asyncio.sleep(10)
 
-            scope = {"type": "http", "method": "POST", "path": "/v1/audio/transcriptions", "headers": [(b"authorization", ("Bearer " + self.KEY).encode())],
-                     "query_string": b"", "root_path": "", "scheme": "http", "server": ("x", 80), "client": ("c", 1), "http_version": "1.1", "raw_path": b"/v1/audio/transcriptions"}
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": "/v1/audio/transcriptions",
+                "headers": [(b"authorization", ("Bearer " + self.KEY).encode())],
+                "query_string": b"",
+                "root_path": "",
+                "scheme": "http",
+                "server": ("x", 80),
+                "client": ("c", 1),
+                "http_version": "1.1",
+                "raw_path": b"/v1/audio/transcriptions",
+            }
             with self.assertRaises(TimeoutError):
                 await app(scope, receive, stuck_send)
 
@@ -515,7 +630,9 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(c.delete("/api/ps/Systran/faster-whisper-large-v3").status_code, 403)
         self.assertEqual(c.delete("/v1/models/Systran/faster-whisper-large-v3").status_code, 403)
         self.assertEqual(c.get("/api/ps").status_code, 200)  # the probe's read
-        self.assertEqual(c.post("/v1/models/Systran/faster-whisper-large-v3").status_code, 200)  # the warm-up
+        self.assertEqual(
+            c.post("/v1/models/Systran/faster-whisper-large-v3").status_code, 200
+        )  # the warm-up
 
 
 class PortRouterTest(unittest.TestCase):

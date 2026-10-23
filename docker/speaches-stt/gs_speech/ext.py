@@ -10,9 +10,10 @@ may be another team's service. So:
   Admission (below) is an ASGI wrapper. It reads the whole request body first, holding nothing,
   so a slow upload from a phone never blocks other requests. Only then does it wait for a permit,
   in the event loop, so waiting requests use no worker thread. Requests without the right API key
-  get 403 from Admission itself, by Speaches' own rule (Bearer, any case, exact token). In-process callers that
-  bypass HTTP (Speaches' realtime loopback) are not admitted. This cluster routes no realtime
-  path, and with this image's FastAPI that loopback fails before reaching Whisper anyway.
+  get 403 from Admission itself, by Speaches' own rule (Bearer, any case, exact token).
+  In-process callers that bypass HTTP (Speaches' realtime loopback) are not admitted.
+  This cluster routes no realtime path, and with this image's FastAPI that loopback fails
+  before reaching Whisper anyway.
 - GS_WHISPER_BATCH_SIZE: how many 30 s windows of one recording Whisper decodes at once (faster-
   whisper's default is 8). Measured at int8: one 26-minute file took the container from 2,706 to
   5,746 MiB for the 17 s of its decode at 8. On a shared card the transient is the budget, so the
@@ -42,7 +43,6 @@ the file's hash changed, so these wrap the classes' methods after that has happe
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 import functools
 import hmac
 import inspect
@@ -51,6 +51,7 @@ import os
 import re
 import threading
 import time
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
@@ -112,7 +113,14 @@ def pick_language(
     if not allowed:
         return detected
     code, p = max(allowed, key=lambda x: x[1])
-    logger.info("language set %s: detected %s %.3f, using %s %.3f", sorted(langs), language, probability, code, p)
+    logger.info(
+        "language set %s: detected %s %.3f, using %s %.3f",
+        sorted(langs),
+        language,
+        probability,
+        code,
+        p,
+    )
     return code, p, all_probs
 
 
@@ -236,7 +244,7 @@ class Admission:
         self.running = 0
 
     def _authorized(self, scope) -> bool:  # noqa: ANN001
-        """Speaches' rule (FastAPI HTTPBearer): scheme `Bearer` in any case, then the exact token."""
+        """Speaches' rule (FastAPI HTTPBearer): scheme `Bearer` in any case, then the token."""
         if self._key is None:
             return True
         got = next((v for k, v in scope.get("headers", []) if k == b"authorization"), b"")
@@ -278,7 +286,12 @@ class Admission:
                 and watch.exception() is None
                 and watch.result().get("type") == "http.disconnect"
             )
-            owned = acquire.done() and not acquire.cancelled() and acquire.exception() is None and not gone
+            owned = (
+                acquire.done()
+                and not acquire.cancelled()
+                and acquire.exception() is None
+                and not gone
+            )
             return owned
         finally:
             watch.cancel()
@@ -301,7 +314,9 @@ class Admission:
             await self.app(scope, receive, send)
             return
         if not self._authorized(scope):
-            await _reply(send, 403, b"API key required or invalid.", [(b"www-authenticate", b"Bearer")])
+            await _reply(
+                send, 403, b"API key required or invalid.", [(b"www-authenticate", b"Bearer")]
+            )
             return
         if self.pending >= self.max_pending:
             await _reply(send, 503, b"Too many requests in progress.", [(b"retry-after", b"1")])
@@ -324,7 +339,9 @@ class Admission:
                 return
             if body is None:
                 return
-            pieces = [body[i : i + REPLAY_CHUNK] for i in range(0, len(body), REPLAY_CHUNK)] or [b""]
+            pieces = [body[i : i + REPLAY_CHUNK] for i in range(0, len(body), REPLAY_CHUNK)] or [
+                b""
+            ]
             del body
 
             async def replay():  # noqa: ANN202
@@ -354,7 +371,9 @@ class _TooLarge(Exception):  # noqa: N818
 
 
 class State:
-    def __init__(self, permits: int, limits: dict, allow: frozenset[str] | None, langs: frozenset[str] | None) -> None:
+    def __init__(
+        self, permits: int, limits: dict, allow: frozenset[str] | None, langs: frozenset[str] | None
+    ) -> None:
         self.permits = permits
         self.limits = limits
         self.allow = allow
@@ -395,14 +414,18 @@ def install(env: Mapping[str, str] | None = None) -> State:
             raise ValueError(f"GS_WHISPER_BATCH_SIZE must be at least 1, got {batch_size}")
         from faster_whisper import BatchedInferencePipeline
 
-        BatchedInferencePipeline.transcribe = with_batch_size(BatchedInferencePipeline.transcribe, batch_size)
+        BatchedInferencePipeline.transcribe = with_batch_size(
+            BatchedInferencePipeline.transcribe, batch_size
+        )
 
     m = WhisperModelManager
     if langs is not None:
         from faster_whisper import WhisperModel
 
         WhisperModel.detect_language = restricting_detect(WhisperModel.detect_language)
-        m.handle_non_streaming_transcription_request = with_languages(m.handle_non_streaming_transcription_request, langs)
+        m.handle_non_streaming_transcription_request = with_languages(
+            m.handle_non_streaming_transcription_request, langs
+        )
         m.handle_streaming_transcription_request = with_languages_generator(
             m.handle_streaming_transcription_request, langs
         )
@@ -437,7 +460,8 @@ def install(env: Mapping[str, str] | None = None) -> State:
     setattr(WhisperModelManager, _INSTALLED_MARK, True)
     STATE = State(permits, limits, allow, langs)
     logger.info(
-        "gs_speech: whisper permits %d; batch size %s; limits %s; model allowlist %s; transcription languages %s",
+        "gs_speech: whisper permits %d; batch size %s; limits %s; model allowlist %s;"
+        " transcription languages %s",
         permits,
         batch_size or "default",
         limits,

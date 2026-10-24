@@ -203,8 +203,8 @@ def parse_context(raw: bytes | None) -> str:
         text = text[-MAX_CONTEXT_CHARS:]
         if "\n" in text:
             text = text.split("\n", 1)[1]
-    # The context sits between tags in the prompt; it must not be able to close them.
-    return re.sub(r"</?(context|transcript)>", "", text, flags=re.IGNORECASE).strip()
+    # The context sits between tags in the prompt; with no angle brackets it cannot close them.
+    return text.replace("<", "‹").replace(">", "›").strip()
 
 
 def correction_message(text: str, context: str) -> str:
@@ -235,26 +235,34 @@ def kept_count(src: list[str], got: list[str], key: Callable[[str], str]) -> int
 
 
 def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int]:
-    """Whether `got` corrects `src` rather than rewriting it; also tokens dropped and added."""
+    """Whether `got` corrects `src` rather than rewriting it; also tokens dropped and added.
+
+    Lengths that cannot pass are refused before the alignment, whose cost grows with both; the
+    counts are then the length difference only.
+    """
+    allowed = max(CORRECT_MIN_ALLOWED, int(len(src) * CORRECT_MAX_SHARE))
+    if len(got) > len(src) + allowed or len(got) < len(src) * CORRECT_MIN_COUNT_RATIO:
+        return False, max(0, len(src) - len(got)), max(0, len(got) - len(src))
     kept = kept_count(src, got, _bare)
     dropped, added = len(src) - kept, len(got) - kept
-    allowed = max(CORRECT_MIN_ALLOWED, int(len(src) * CORRECT_MAX_SHARE))
-    ok = dropped <= allowed and added <= allowed and len(got) >= len(src) * CORRECT_MIN_COUNT_RATIO
-    return ok, dropped, added
+    return dropped <= allowed and added <= allowed, dropped, added
 
 
 def fallback(src: list[str], answer: str) -> str | None:
     """A refused correction's marks, case and breaks on the words it kept; Whisper's elsewhere.
 
     The result has exactly the transcript's words, so it goes through the normal guard. None when
-    the answer kept fewer than FALLBACK_MIN_KEPT of them.
+    the answer kept fewer than FALLBACK_MIN_KEPT of them, or has over twice as many tokens (which
+    also bounds the alignment's cost).
     """
     paragraphs = [p.split() for p in layout(answer).split("\n\n") if p]
     got = [t for p in paragraphs for t in p]
+    if len(got) > 2 * len(src):
+        return None
     starts, i = set(), 0
-    for p in paragraphs:
-        starts.add(i)
+    for p in paragraphs[:-1]:  # where the 2nd and later paragraphs start; never before the first
         i += len(p)
+        starts.add(i)
     sm = difflib.SequenceMatcher(
         None, [core(t) for t in src], [core(t) for t in got], autojunk=False
     )
@@ -330,6 +338,22 @@ async def _stop(*tasks: asyncio.Future) -> None:
         _error(t)
     if interrupted:
         raise asyncio.CancelledError
+
+
+async def _in_thread(fn: Callable, *args: object) -> object:
+    """fn(*args) in a worker thread. A thread cannot be cancelled: a cancellation of the caller
+    waits until it has ended and is then raised, so the caller's accounting (inflight) and its
+    deadline cover the whole of the work."""
+    fut = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    interrupted = False
+    while not fut.done():
+        try:
+            await asyncio.wait({fut})
+        except asyncio.CancelledError:
+            interrupted = True
+    if interrupted:
+        raise asyncio.CancelledError
+    return fut.result()
 
 
 def _error(task: asyncio.Future) -> BaseException | None:
@@ -583,21 +607,21 @@ class Punctuate:
                     else:
                         message = correction_message(payload["text"], context)
                         got = await self.correct(message, max_tokens, remaining)
+                if context is not None:
+                    text = layout(ECHOED_TAGS.sub("", got))
+                    if not same_words(tokens, text.split()):
+                        # Words changed. Aligning takes up to about 1.2 s on 3,000 repeats of one
+                        # word (a Whisper loop), so it runs in a thread, within the deadline.
+                        return await _in_thread(
+                            self._corrected, payload, tokens, body, text, bool(context)
+                        )
         except TimeoutError:
             return ("timeout" if holding else "busy"), body
         except Exception as e:  # noqa: BLE001 - any failure keeps Whisper's answer
             logger.warning("punct: %s", type(e).__name__)
             return "error", body
-        if context is not None:
-            got = ECHOED_TAGS.sub("", got)
-        text = layout(got)
+        text = layout(got if context is None else ECHOED_TAGS.sub("", got))
         new = rewrite(payload, text.split(), text)
-        if new is None and context is not None:
-            # difflib takes about 0.5 s on 3,000 repeats of one word (a Whisper loop): not on
-            # the event loop.
-            return await asyncio.to_thread(
-                self._corrected, payload, tokens, body, text, bool(context)
-            )
         if new is None:
             return "rejected", body
         if text == layout(payload["text"]):

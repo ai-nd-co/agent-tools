@@ -21,9 +21,9 @@ The log line has counts and timings only, never text.
 
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
-return before it is cancelled. One LLM call at a time (the model has one slot), at most
-GS_PUNCT_MAX_WAITING (2) waiting behind it, each bounded by GS_PUNCT_TIMEOUT_S (60) including the
-wait. A client that disconnects meanwhile cancels its pass.
+return before it is cancelled (also if the request itself is cancelled). One LLM call at a time
+(the model has one slot), at most GS_PUNCT_MAX_WAITING (2) waiting behind it, each bounded by
+GS_PUNCT_TIMEOUT_S (60) including the wait. A client that disconnects meanwhile cancels its pass.
 
 Env: GS_PUNCT_URL (chat completions URL; unset = off), GS_PUNCT_MODEL, GS_PUNCT_TIMEOUT_S,
 GS_PUNCT_MIN_RUN, GS_PUNCT_MAX_WORDS (3000), GS_PUNCT_MAX_BYTES (8 MiB), GS_PUNCT_MAX_WAITING,
@@ -33,7 +33,6 @@ GS_PUNCT_APP_GRACE_S.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
 import math
@@ -121,35 +120,50 @@ def _replace_tokens(text: str, tokens: list[str]) -> str:
     return re.sub(r"\S+", lambda _m: next(it), text)
 
 
-def make_complete(url: str, model: str) -> Complete:
+MAX_LLM_BYTES = 1024 * 1024  # an answer of max_tokens is far smaller; anything bigger is refused
+
+
+def make_complete(url: str, model: str, transport=None) -> Complete:  # noqa: ANN001
     """One HTTP client per call: a few calls an hour, and nothing left open at shutdown."""
     import httpx
 
     async def complete(text: str, max_tokens: int, timeout: float) -> str:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                url,
-                json={
-                    "model": model,
-                    "temperature": 0,
-                    "max_tokens": max_tokens,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM},
-                        {"role": "user", "content": text},
-                    ],
-                },
-                timeout=timeout,
-            )
-            r.raise_for_status()
-            return str(r.json()["choices"][0]["message"]["content"])
+        body = {
+            "model": model,
+            "temperature": 0,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": text},
+            ],
+        }
+        data = bytearray()
+        async with httpx.AsyncClient(transport=transport) as client:
+            async with client.stream("POST", url, json=body, timeout=timeout) as r:
+                r.raise_for_status()
+                async for chunk in r.aiter_bytes():
+                    data += chunk
+                    if len(data) > MAX_LLM_BYTES:
+                        raise ValueError("LLM answer too large")
+        return str(json.loads(bytes(data))["choices"][0]["message"]["content"])
 
     return complete
 
 
-async def _cancel(task: asyncio.Future) -> None:
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await task
+async def _stop(task: asyncio.Future) -> None:
+    """Cancel `task` if it still runs and wait until it has ended.
+
+    The task's own result or error is collected, never raised. A cancellation of the caller is not
+    swallowed: `asyncio.wait` passes it on, and the task has already been told to stop.
+    """
+    if not task.done():
+        task.cancel()
+        await asyncio.wait({task})
+    _error(task)
+
+
+def _error(task: asyncio.Future) -> BaseException | None:
+    return None if task.cancelled() else task.exception()
 
 
 async def _until_disconnect(receive) -> None:  # noqa: ANN001
@@ -182,7 +196,7 @@ class Punctuate:
         self.app_grace = app_grace
         self.send_timeout = send_timeout
         self._lock: asyncio.Lock | None = None
-        self.waiting = 0
+        self.inflight = 0  # passes holding or waiting for the LLM slot
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001, C901
         if (
@@ -197,14 +211,17 @@ class Punctuate:
         chunks: list[bytes] = []
         size = 0
         passing = False
-        complete = asyncio.Event()
+        complete = asyncio.Event()  # the app has sent its last body message
 
         async def capture(message) -> None:  # noqa: ANN001
             nonlocal start, size, passing
+            kind = message["type"]
+            last = kind == "http.response.body" and not message.get("more_body", False)
             if passing:
                 await send(message)
+                if last:
+                    complete.set()
                 return
-            kind = message["type"]
             if kind == "http.response.start":
                 ctype = dict(message.get("headers", [])).get(b"content-type", b"")
                 if message["status"] != 200 or not ctype.startswith(b"application/json"):
@@ -223,69 +240,87 @@ class Punctuate:
                         await send({"type": "http.response.body", "body": c, "more_body": True})
                     chunks.clear()
                     await send(message)
+                    if last:
+                        complete.set()
                     return
-                chunks.append(body)
-                if not message.get("more_body", False):
+                if body:
+                    chunks.append(body)
+                if last:
                     complete.set()
                 return
             await send(message)
 
+        # The app task is stopped on every way out of here, an outer cancellation included, so an
+        # app stuck after its answer cannot keep Admission's Whisper permit.
         task = asyncio.ensure_future(self.app(scope, receive, capture))
-        done = asyncio.ensure_future(complete.wait())
         try:
-            await asyncio.wait({task, done}, return_when=asyncio.FIRST_COMPLETED)
-        except asyncio.CancelledError:
-            await _cancel(task)
-            raise
+            done = asyncio.ensure_future(complete.wait())
+            try:
+                await asyncio.wait({task, done}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                await _stop(done)
+            if not complete.is_set():
+                # The app ended without a whole answer: let its own error through, or say so.
+                if _error(task) is not None:
+                    raise _error(task)
+                if start is not None and not passing:
+                    chunks.clear()
+                    await asyncio.wait_for(
+                        _send_error(send, 500, b"Incomplete transcription response."),
+                        timeout=self.send_timeout,
+                    )
+                return
+            # The answer is whole. The app gets a short grace to return (Admission releases the
+            # permit there); after that it is cancelled. An error after the answer changes nothing.
+            await asyncio.wait({task}, timeout=self.app_grace)
+            if not task.done():
+                logger.warning(
+                    "punct: app still running %.1f s after its answer; cancelled", self.app_grace
+                )
+            elif _error(task) is not None:
+                logger.warning(
+                    "punct: app raised after its answer: %s", type(_error(task)).__name__
+                )
+            await _stop(task)
+            if passing:
+                return
+            body = b"".join(chunks)
+            chunks.clear()
+            result = await self._punctuate_unless_gone(body, receive)
+            if result is None:
+                return  # the client left; nobody to answer
+            outcome, body = result
+            headers = [(k, v) for k, v in start.get("headers", []) if k != b"content-length"]
+            headers += [
+                (b"content-length", str(len(body)).encode()),
+                (b"x-gs-punctuated", outcome.encode()),
+            ]
+
+            async def finish() -> None:
+                await send({**start, "headers": headers})
+                await send({"type": "http.response.body", "body": body})
+
+            await asyncio.wait_for(finish(), timeout=self.send_timeout)
         finally:
-            done.cancel()
-        if passing:
-            await task  # the answer is streaming straight through
-            return
-        if not complete.is_set():
-            # The app ended without a whole answer: let its own error through, or say so.
-            if task.exception() is not None:
-                raise task.exception()
-            if start is not None:
-                await _send_error(send, 500, b"Incomplete transcription response.")
-            return
-        # The answer is whole. The app gets a short grace to return (Admission releases the
-        # Whisper permit there), then it is cancelled; an error after the answer changes nothing.
-        finished, _ = await asyncio.wait({task}, timeout=self.app_grace)
-        if not finished:
-            logger.warning(
-                "punct: app still running %.1f s after its answer; cancelled", self.app_grace
-            )
-            await _cancel(task)
-        elif task.exception() is not None:
-            logger.warning(
-                "punct: app raised after its answer: %s", type(task.exception()).__name__
-            )
-        body = b"".join(chunks)
-        chunks.clear()
+            await _stop(task)
+
+    async def _punctuate_unless_gone(self, body: bytes, receive) -> tuple[str, bytes] | None:  # noqa: ANN001
+        """The pass, raced against the client leaving; None if it left (a tie counts as left).
+
+        Only called once the app task has ended, so nothing else reads `receive` any more.
+        """
         work = asyncio.ensure_future(self._punctuate(body))
         gone = asyncio.ensure_future(_until_disconnect(receive))
         try:
             await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            if not work.done():
-                await _cancel(work)
-            if not gone.done():
-                await _cancel(gone)
-        if not work.done() or work.cancelled():
-            return  # the client left; nobody to answer
-        outcome, body = work.result()
-        headers = [(k, v) for k, v in start.get("headers", []) if k != b"content-length"]
-        headers += [
-            (b"content-length", str(len(body)).encode()),
-            (b"x-gs-punctuated", outcome.encode()),
-        ]
-
-        async def finish() -> None:
-            await send({**start, "headers": headers})
-            await send({"type": "http.response.body", "body": body})
-
-        await asyncio.wait_for(finish(), timeout=self.send_timeout)
+            await _stop(work)
+            await _stop(gone)
+        if gone.done() and not gone.cancelled() and gone.exception() is None:
+            return None
+        if work.cancelled():
+            return None
+        return work.result()
 
     async def _punctuate(self, body: bytes) -> tuple[str, bytes]:
         try:
@@ -312,10 +347,14 @@ class Punctuate:
             return "skipped", body
         if self._lock is None:
             self._lock = asyncio.Lock()
-        if self._lock.locked() and self.waiting >= self.max_waiting:
+        if self.inflight >= 1 + self.max_waiting:  # one in the slot, max_waiting behind it
             outcome, out = "busy", body
         else:
-            outcome, out = await self._ask(payload, tokens, body, begin)
+            self.inflight += 1
+            try:
+                outcome, out = await self._ask(payload, tokens, body, begin)
+            finally:
+                self.inflight -= 1
         logger.info(
             "punct: %s, %d words, longest unpunctuated %d, %.0f ms",
             outcome,
@@ -329,11 +368,9 @@ class Punctuate:
         self, payload: dict, tokens: list[str], body: bytes, begin: float
     ) -> tuple[str, bytes]:
         holding = False
-        self.waiting += 1
         try:
             async with asyncio.timeout(self.timeout):
                 async with self._lock:
-                    self.waiting -= 1
                     holding = True
                     remaining = max(1.0, self.timeout - (time.perf_counter() - begin))
                     max_tokens = math.ceil(len(tokens) * 1.4 * 1.3) + 16
@@ -343,9 +380,6 @@ class Punctuate:
         except Exception as e:  # noqa: BLE001 - any failure keeps Whisper's answer
             logger.warning("punct: %s", type(e).__name__)
             return "error", body
-        finally:
-            if not holding:
-                self.waiting -= 1
         new = rewrite(payload, got.split())
         if new is None:
             return "rejected", body

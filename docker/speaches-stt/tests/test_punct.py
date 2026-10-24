@@ -16,6 +16,8 @@ sys.path.insert(0, "/opt/gs-speech")
 import httpx  # noqa: E402
 from gs_speech import punct  # noqa: E402
 
+PATH = "/v1/audio/transcriptions"
+
 BARE = " ".join(f"word{i}" for i in range(50))  # 50 words, no mark
 PUNCT_TOKENS = [f"Word{i}." if i % 10 == 9 else f"word{i}," for i in range(50)]
 
@@ -321,29 +323,101 @@ class Hardening(unittest.TestCase):
         payload = verbose(BARE)
         fake = Fake()
         app = punct.Punctuate(whisper_app(payload), fake, timeout=5, max_waiting=1)
+        app.inflight = 2  # one note in the slot, one waiting: the cap
+
+        t0 = time.perf_counter()
+        r = call(app)
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("busy", payload))
+        self.assertLess(time.perf_counter() - t0, 1)
+        self.assertEqual((app.inflight, fake.calls), (2, []))
+
+    def test_cap_holds_across_a_lock_handoff(self) -> None:
+        payload = verbose(BARE)
+        release = asyncio.Event()
+
+        async def gated(text: str, max_tokens: int, timeout: float) -> str:
+            await release.wait()
+            return text
+
+        app = punct.Punctuate(whisper_app(payload), gated, timeout=5, max_waiting=1)
 
         async def go():  # noqa: ANN202
-            app._lock = asyncio.Lock()
-            await app._lock.acquire()
-            app.waiting = 1  # one note already queued
+            h = {"x-gs-punctuate": "llm"}
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app), base_url="http://x"
             ) as c:
-                t0 = time.perf_counter()
-                r = await c.post(
-                    "/v1/audio/transcriptions", content=b"a", headers={"x-gs-punctuate": "llm"}
-                )
-                return r, time.perf_counter() - t0
+                first = [
+                    asyncio.ensure_future(c.post(PATH, content=b"a", headers=h)) for _ in range(2)
+                ]
+                while app.inflight < 2:
+                    await asyncio.sleep(0.01)
+                release.set()  # the slot changes hands; a newcomer must still see the cap
+                late = await c.post(PATH, content=b"b", headers=h)
+                return [await f for f in first], late
 
-        r, took = asyncio.run(go())
-        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("busy", payload))
-        self.assertLess(took, 1)
-        self.assertEqual(app.waiting, 1)
+        first, late = asyncio.run(go())
+        self.assertEqual(
+            sorted(r.headers["x-gs-punctuated"] for r in first), ["unchanged", "unchanged"]
+        )
+        self.assertIn(late.headers["x-gs-punctuated"], ("busy", "unchanged"))
+        self.assertEqual(app.inflight, 0)
 
-    def test_waiting_count_returns_to_zero(self) -> None:
+    def test_inflight_returns_to_zero(self) -> None:
         app = punct.Punctuate(whisper_app(verbose(BARE)), Fake(delay=0.5), timeout=0.2)
         call(app)
-        self.assertEqual(app.waiting, 0)
+        self.assertEqual(app.inflight, 0)
+
+    def test_outer_cancel_during_grace_stops_the_app(self) -> None:
+        inner = whisper_app(verbose(BARE))
+        cancelled = []
+
+        async def app(scope, receive, send) -> None:  # noqa: ANN001
+            await inner(scope, receive, send)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        async def script():  # noqa: ANN202
+            yield {"type": "http.request", "body": b"audio", "more_body": False}
+            await asyncio.sleep(30)
+            yield {"type": "http.disconnect"}
+
+        with self.assertRaises(TimeoutError):
+            raw_call(punct.Punctuate(app, Fake(), app_grace=10), script, timeout=0.3)
+        self.assertEqual(cancelled, [True])
+
+    def test_overflow_then_hang_is_cancelled_after_grace(self) -> None:
+        payload = verbose(BARE)
+        inner = whisper_app(payload)
+        cancelled = []
+
+        async def app(scope, receive, send) -> None:  # noqa: ANN001
+            await inner(scope, receive, send)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        t0 = time.perf_counter()
+        r = call(punct.Punctuate(app, Fake(), max_bytes=100, app_grace=0.2))
+        self.assertEqual(r.content, json.dumps(payload).encode())
+        self.assertLess(time.perf_counter() - t0, 3)
+        self.assertEqual(cancelled, [True])
+
+    def test_llm_answer_size_is_capped(self) -> None:
+        big = b'{"choices":[{"message":{"content":"' + b"x" * (punct.MAX_LLM_BYTES + 10) + b'"}}]}'
+        ok = b'{"choices":[{"message":{"content":"Hello."}}]}'
+
+        def complete_with(answer: bytes):  # noqa: ANN202
+            t = httpx.MockTransport(lambda req: httpx.Response(200, content=answer))
+            return punct.make_complete("http://llm/v1/chat/completions", "m", transport=t)
+
+        self.assertEqual(asyncio.run(complete_with(ok)("hello", 10, 5)), "Hello.")
+        with self.assertRaises(ValueError):
+            asyncio.run(complete_with(big)("hello", 10, 5))
 
     def test_disconnect_cancels_the_pass_and_sends_nothing(self) -> None:
         started, cancelled = asyncio.Event(), []

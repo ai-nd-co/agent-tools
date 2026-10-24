@@ -55,7 +55,7 @@ def bind(host: str, port: int) -> socket.socket:
 def main() -> None:
     from speaches.main import create_app
 
-    from gs_speech import ext, langid
+    from gs_speech import ext, langid, punct
 
     app = create_app()  # sets up logging; the wrappers below act on the classes, used per request
     state = ext.install()
@@ -68,8 +68,9 @@ def main() -> None:
     from speaches.dependencies import get_config
 
     key = get_config().api_key
-    main_app = ext.Admission(
-        app, state.permits, key.get_secret_value() if key else None, **state.limits
+    main_app = punct.wrap(
+        ext.Admission(app, state.permits, key.get_secret_value() if key else None, **state.limits),
+        os.environ,
     )
     config = uvicorn.Config(
         PortRouter(main_app, lid_app, lid_port), host=host, port=port, lifespan="on"

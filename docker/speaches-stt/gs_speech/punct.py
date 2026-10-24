@@ -120,7 +120,8 @@ CORRECT_MIN_COUNT_RATIO = 0.5
 
 def _russian_numbers() -> list[str]:
     """Russian number words in their cases (a form may also be another word: семью, family)."""
-    words = """ноль нуль нуля нулю нулём нулем один одного одному одним одном одна одной одну одно
+    words = """ноль нуль нуля ноля нулю нолю нулём нолём нуле ноле нули ноли нулей нолей
+    один одного одному одним одном одна одной одну одно
     одни одних одним одними два двух двум двумя две три трёх трех трём трем тремя четыре четырёх
     четырех четырём четырем четырьмя сорок сорока девяносто девяноста сто ста сотни сотен двести
     двухсот двумстам двумястами двухстах триста трёхсот трехсот тремстам тремястами трёхстах
@@ -128,7 +129,7 @@ def _russian_numbers() -> list[str]:
     четырехстах полтора полторы полутора""".split()
     for stem in "пят шест сем девят десят".split():  # пять, пяти, пятью
         words += [stem + "ь", stem + "и", stem + "ью"]
-    words += ["восемь", "восьми", "восемью", "восьмью"]
+    words += ["восемь", "восьми", "восемью", "восьмью", "восьмьюдесятью", "восьмьюстами"]
     for stem in "один две три четыр пят шест сем восем девят".split():  # одиннадцать ...
         words += [stem + "надцать", stem + "надцати", stem + "надцатью"]
     for stem in "двадцат тридцат".split():
@@ -336,11 +337,16 @@ def _moved(sm: difflib.SequenceMatcher, src: list[str], got: list[str]) -> bool:
                 gone.setdefault(_key(src[i]), []).append(i)
             for t in got[j1:j2]:
                 new.setdefault(_key(t), []).append(i1)
-    for key, places in gone.items():
-        for i in places:
-            for j in new.get(key, []):
+    if not gone.keys() & new.keys():
+        return False
+    count = [0]  # count[i]: sensitive tokens in src[:i], so any interval is checked at once
+    for t in src:
+        count.append(count[-1] + _sensitive(t))
+    for key in gone.keys() & new.keys():
+        for i in gone[key]:
+            for j in new[key]:
                 lo, hi = sorted((i, j))
-                if any(_sensitive(t) for t in src[lo : hi + 1]):
+                if count[min(hi + 1, len(src))] > count[lo]:
                     return True
     return False
 

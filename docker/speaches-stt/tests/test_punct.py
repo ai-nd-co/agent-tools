@@ -790,11 +790,44 @@ class Correction(unittest.TestCase):
             self.assertEqual(
                 punct.is_correction(src, "We can deploy.".split())[3], "number or negation", mark
             )
-        for word in punct._russian_numbers() + [
-            w.replace("ё", "е") for w in punct._russian_numbers()
-        ]:
+        expected = """ноль нуль нуля ноля нулю нолю нулём нолём нулем нолем нуле ноле
+        один одного одному
+        одним одном одна одной одну одно одни одних одними два двух двум двумя две три трёх трех
+        трём трем тремя четыре четырёх четырех четырём четырем четырьмя пять пяти пятью шесть
+        шести шестью семь семи семью восемь восьми восемью восьмью девять девяти девятью десять
+        десяти десятью одиннадцать одиннадцати одиннадцатью двенадцать двенадцати двенадцатью
+        тринадцать тринадцати четырнадцать пятнадцать пятнадцати шестнадцать семнадцать
+        восемнадцать девятнадцать девятнадцати двадцать двадцати двадцатью тридцать тридцати
+        тридцатью сорок сорока пятьдесят пятидесяти пятьюдесятью шестьдесят шестидесяти
+        шестьюдесятью семьдесят семидесяти семьюдесятью восемьдесят восьмидесяти восемьюдесятью
+        восьмьюдесятью девяносто девяноста сто ста двести двухсот двумстам двумястами двухстах
+        триста трёхсот трёмстам тремястами трёхстах четыреста четырёхсот четырёмстам
+        четырьмястами четырёхстах пятьсот пятисот пятистам пятьюстами пятистах шестьсот
+        шестисот семьсот семисот восемьсот восьмисот восемьюстами восьмьюстами девятьсот
+        девятисот тысяча тысячи тысяче тысячу тысячей тысячью тысяч тысячам тысячами тысячах
+        миллион миллиона миллиону миллионом миллионе миллионы миллионов миллиард миллиарда
+        миллиардов полтора полторы полутора""".split()  # written out, not from the code
+        for word in expected + punct._russian_numbers():
             src = ["дай", word, "людям"]
             self.assertFalse(punct.is_correction(src, ["Дай", "всем", "людям."])[0], word)
+
+    def test_move_check_is_linear(self) -> None:  # Codex round 6
+        src, got = [], []
+        for b in range(300):
+            block = [f"t{chr(97 + b // 26)}{chr(97 + b % 26)}{chr(97 + k)}" for k in range(9)]
+            src += block + ["alpha" if b < 150 else "beta"]
+            got += block + ["beta" if b < 150 else "alpha"]
+        calls = []
+        real = punct._sensitive
+        punct._sensitive = lambda t: calls.append(t) or real(t)
+        try:
+            t0 = time.perf_counter()
+            punct.is_correction(src, got)
+            elapsed = time.perf_counter() - t0
+        finally:
+            punct._sensitive = real
+        self.assertLess(len(calls), 4 * len(src))
+        self.assertLess(elapsed, 2)
 
     def test_separate_fixes_of_one_word_are_no_move(self) -> None:  # Codex round 5
         src = "ask cloud to check the clod service".split()

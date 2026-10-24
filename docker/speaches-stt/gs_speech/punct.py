@@ -6,15 +6,17 @@ asks an OpenAI-compatible chat model to add punctuation and capitals, and keeps 
 every word is unchanged.
 
 When it acts: POST /v1/audio/transcriptions with the header `X-GS-Punctuate: llm`, a complete 200
-JSON answer (response_format json or verbose_json) of at most GS_PUNCT_MAX_BYTES, and a stretch of
-at least GS_PUNCT_MIN_RUN (40) words with no punctuation mark. Anything else passes through
-untouched, byte for byte.
+JSON answer (response_format json or verbose_json) of at most GS_PUNCT_MAX_BYTES, and either a
+stretch of at least GS_PUNCT_MIN_RUN (40) words with no punctuation mark or at least
+GS_PUNCT_PARAGRAPH_MIN_WORDS (80; 0 = off) words in all, which the model also splits into
+paragraphs. Anything else passes through untouched, byte for byte.
 
 The guard: the answer and the transcript are split on whitespace; there must be the same number of
 tokens, and each pair may differ only in letter case and in sentence marks (. , ? ! ; : …) at the
 token's two ends. Anything inside a token must be identical, so `we'll`/`well`, `1.5`/`15` or
 `re-sign`/`resign` are refused. Then `text`, each segment's `text` and, when they line up one to
-one, the `words` entries take the punctuated tokens; timestamps and every other field are unchanged.
+one, the `words` entries take the punctuated tokens; the top-level `text` also takes the model's
+paragraph breaks (a blank line between paragraphs). Timestamps and every other field are unchanged.
 Otherwise, and on any error, timeout or busy model, the original answer is sent. The header
 `X-GS-Punctuated` says what happened: applied, unchanged, rejected, skipped, busy, timeout or error.
 The log line has counts and timings only, never text.
@@ -26,8 +28,8 @@ return before it is cancelled (also if the request itself is cancelled). One LLM
 GS_PUNCT_TIMEOUT_S (60) including the wait. A client that disconnects meanwhile cancels its pass.
 
 Env: GS_PUNCT_URL (chat completions URL; unset = off), GS_PUNCT_MODEL, GS_PUNCT_TIMEOUT_S,
-GS_PUNCT_MIN_RUN, GS_PUNCT_MAX_WORDS (3000), GS_PUNCT_MAX_BYTES (8 MiB), GS_PUNCT_MAX_WAITING,
-GS_PUNCT_APP_GRACE_S.
+GS_PUNCT_MIN_RUN, GS_PUNCT_PARAGRAPH_MIN_WORDS, GS_PUNCT_MAX_WORDS (3000), GS_PUNCT_MAX_BYTES
+(8 MiB), GS_PUNCT_MAX_WAITING, GS_PUNCT_APP_GRACE_S.
 """
 
 from __future__ import annotations
@@ -46,14 +48,18 @@ PATH = "/v1/audio/transcriptions"
 OPT_IN = (b"x-gs-punctuate", b"llm")
 EDGE = ".,?!;:…"
 MARK = re.compile(r"[.,?!;:…]")
-# Tested on 17 of Davron's notes with Qwen3.8-27B: words kept in all 17. Asking also not to "join or
-# split" words made the model return the text unpunctuated, so the wording stays as tested.
+# Tested with Qwen3.8-27B IQ3_XXS on 20 of Davron's notes of 80+ words: 19 kept every word, 1 was
+# refused by the guard; punctuation as good as the wording without paragraphs, 1-8 paragraphs a
+# note. Asking also not to "join or split" words made the model return the text unpunctuated, so
+# test any change to this wording.
 SYSTEM = (
-    "You restore punctuation and capitalization in speech transcripts. Return the same text with "
-    "punctuation (full stops, commas, question marks) and capital letters added. Do not add, "
-    "remove, replace, reorder or correct any word, and keep filler words and repeats exactly. "
-    "Output only the text."
+    "You restore punctuation and capitalization in speech transcripts and split them into "
+    "paragraphs. Return the same text with punctuation (full stops, commas, question marks) and "
+    "capital letters added, and start a new paragraph, separated by a blank line, wherever the "
+    "topic or thought changes. Do not add, remove, replace, reorder or correct any word, and keep "
+    "filler words and repeats exactly. Output only the text."
 )
+PARAGRAPH = re.compile(r"\n\s*\n")
 
 Complete = Callable[[str, int, float], Awaitable[str]]
 
@@ -79,13 +85,26 @@ def same_words(src: list[str], got: list[str]) -> bool:
     )
 
 
-def rewrite(payload: dict, punctuated: list[str]) -> dict | None:
-    """The payload with punctuated tokens in place, or None if they do not line up exactly."""
+def layout(answer: str) -> str:
+    """The answer's paragraphs, separated by one blank line, with single spaces inside each."""
+    paragraphs = [" ".join(p.split()) for p in PARAGRAPH.split(answer.strip())]
+    return "\n\n".join(p for p in paragraphs if p)
+
+
+def rewrite(payload: dict, punctuated: list[str], text: str | None = None) -> dict | None:
+    """The payload with punctuated tokens in place, or None if they do not line up exactly.
+
+    `text`, when given, is the new top-level text (with paragraph breaks); it must consist of
+    exactly the punctuated tokens. Segments and words take the tokens only, so their timing stays
+    exact.
+    """
+    if text is not None and text.split() != punctuated:
+        return None
     src = payload["text"].split()
     if not same_words(src, punctuated):
         return None
     out = dict(payload)
-    out["text"] = _replace_tokens(payload["text"], punctuated)
+    out["text"] = text if text is not None else _replace_tokens(payload["text"], punctuated)
     segments = payload.get("segments")
     if isinstance(segments, list):
         seg_tokens = [str(s.get("text", "")).split() for s in segments]
@@ -193,6 +212,7 @@ class Punctuate:
         complete: Complete,
         timeout: float = 60.0,
         min_run: int = 40,
+        paragraph_min_words: int = 80,
         max_words: int = 3000,
         max_bytes: int = 8 * 1024 * 1024,
         max_waiting: int = 2,
@@ -203,6 +223,7 @@ class Punctuate:
         self.complete = complete
         self.timeout = timeout
         self.min_run = min_run
+        self.paragraph_min_words = paragraph_min_words
         self.max_words = max_words
         self.max_bytes = max_bytes
         self.max_waiting = max_waiting
@@ -352,11 +373,10 @@ class Punctuate:
         if not isinstance(text, str):
             return "skipped", body
         tokens = text.split()
-        if (
-            not tokens
-            or len(tokens) > self.max_words
-            or longest_unpunctuated(tokens) < self.min_run
-        ):
+        wanted = longest_unpunctuated(tokens) >= self.min_run or (
+            self.paragraph_min_words > 0 and len(tokens) >= self.paragraph_min_words
+        )
+        if not tokens or len(tokens) > self.max_words or not wanted:
             return "skipped", body
         if self._lock is None:
             self._lock = asyncio.Lock()
@@ -386,17 +406,21 @@ class Punctuate:
                 async with self._lock:
                     holding = True
                     remaining = max(1.0, self.timeout - (time.perf_counter() - begin))
-                    max_tokens = math.ceil(len(tokens) * 1.4 * 1.3) + 16
+                    # Budget from characters, not words: a Cyrillic word costs several tokens.
+                    # Half the characters is a heuristic with room for marks and breaks (it worked
+                    # on the 12 test notes, Russian included); a cut-short answer is refused anyway.
+                    max_tokens = math.ceil(len(payload["text"]) / 2) + 64
                     got = await self.complete(payload["text"], max_tokens, remaining)
         except TimeoutError:
             return ("timeout" if holding else "busy"), body
         except Exception as e:  # noqa: BLE001 - any failure keeps Whisper's answer
             logger.warning("punct: %s", type(e).__name__)
             return "error", body
-        new = rewrite(payload, got.split())
+        text = layout(got)
+        new = rewrite(payload, text.split(), text)
         if new is None:
             return "rejected", body
-        if got.split() == tokens:
+        if text == layout(payload["text"]):
             return "unchanged", body
         return "applied", json.dumps(new, ensure_ascii=False).encode()
 
@@ -426,6 +450,7 @@ def wrap(app, env: Mapping[str, str]):  # noqa: ANN001, ANN201
         make_complete(url, env.get("GS_PUNCT_MODEL", "default")),
         timeout=float(env.get("GS_PUNCT_TIMEOUT_S", "60")),
         min_run=int(env.get("GS_PUNCT_MIN_RUN", "40")),
+        paragraph_min_words=int(env.get("GS_PUNCT_PARAGRAPH_MIN_WORDS", "80")),
         max_words=int(env.get("GS_PUNCT_MAX_WORDS", "3000")),
         max_bytes=int(env.get("GS_PUNCT_MAX_BYTES", str(8 * 1024 * 1024))),
         max_waiting=int(env.get("GS_PUNCT_MAX_WAITING", "2")),

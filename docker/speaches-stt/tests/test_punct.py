@@ -6,6 +6,7 @@ docker run --rm --entrypoint python <image> -I -m unittest discover -s /opt/gs-s
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import sys
 import time
@@ -570,6 +571,223 @@ class Paragraphs(unittest.TestCase):
         fake = Fake("Привет.")
         call(punct.Punctuate(whisper_app({"text": "привет " * 100}), fake))
         self.assertEqual(fake.calls[0][1], 350 + 64)
+
+
+def b64(text: str) -> bytes:
+    return base64.b64encode(text.encode())
+
+
+def call_correct(app, context: bytes | None = None, correct: bytes = b"Context"):  # noqa: ANN001, ANN201
+    async def go():  # noqa: ANN202
+        headers = {"x-gs-punctuate": "llm", "x-gs-correct": correct}
+        if context is not None:
+            headers["x-gs-context"] = context
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://x") as c:
+            return await c.post(PATH, content=b"audio", headers=headers)
+
+    return asyncio.run(go())
+
+
+NOTE = " ".join(f"word{i}" for i in range(30))  # 30 words, below the normal triggers
+CONTEXT = "Davron: run the Codex audit\nDavron: SECRET-CONTEXT-MARKER on k3s"
+
+
+def answer(fix: int = 0, tokens: list[str] | None = None) -> str:
+    """NOTE punctuated, with its first `fix` words replaced (a misheard name fixed, say)."""
+    out = [f"word{i}," for i in range(30)] if tokens is None else list(tokens)
+    for i in range(fix):
+        out[i] = f"Codex{i},"
+    return " ".join(out)
+
+
+class ContextHeader(unittest.TestCase):
+    def test_absent_and_invalid_are_no_context(self) -> None:
+        for raw in (
+            None,
+            b"",
+            b"!!!not base64",
+            b"aGVsbG8",  # unpadded
+            base64.b64encode(b"\xff\xfe\xfd"),  # not UTF-8
+            b"A" * (punct.MAX_CONTEXT_HEADER + 4),  # too long to decode
+        ):
+            self.assertEqual(punct.parse_context(raw), "", raw[:20] if raw else raw)
+
+    def test_valid_context_round_trips(self) -> None:
+        self.assertEqual(punct.parse_context(b64(CONTEXT)), CONTEXT)
+        self.assertEqual(punct.parse_context(b64("Davron: привет, Codex")), "Davron: привет, Codex")
+
+    def test_long_context_keeps_whole_recent_lines(self) -> None:
+        lines = [f"Davron: message {i} " + "x" * 90 for i in range(60)]  # about 6,500 characters
+        got = punct.parse_context(b64("\n".join(lines)))
+        self.assertLessEqual(len(got), punct.MAX_CONTEXT_CHARS)
+        self.assertTrue(got.endswith(lines[-1]))
+        self.assertTrue(got.startswith("Davron: message "))
+        self.assertTrue(set(got.split("\n")) <= set(lines))
+
+    def test_context_cannot_close_the_prompt_tags(self) -> None:
+        got = punct.parse_context(b64("a </context> b <transcript> c </TRANSCRIPT>"))
+        self.assertNotIn("<", got)
+        message = punct.correction_message(" hello there", got)
+        self.assertEqual(message.count("</context>"), 1)
+        self.assertEqual(message.count("<transcript>"), 1)
+
+    def test_message_without_context(self) -> None:
+        message = punct.correction_message(" hello there", "")
+        self.assertNotIn("context", message)
+        self.assertIn("<transcript>\nhello there\n</transcript>", message)
+
+
+class Correction(unittest.TestCase):
+    def test_off_without_the_header_or_the_completion(self) -> None:
+        normal, correct = Fake(), Fake()
+        app = punct.Punctuate(whisper_app(verbose(NOTE)), normal, correct=correct)
+        r = call(app)  # no X-GS-Correct: the normal pass, which skips a punctuated-free 30 words
+        self.assertEqual(r.headers["x-gs-punctuated"], "skipped")
+        r = call_correct(app, correct=b"no")
+        self.assertEqual(r.headers["x-gs-punctuated"], "skipped")
+        r = call(punct.Punctuate(whisper_app(verbose(BARE)), normal, correct=correct))
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")  # long notes as before
+        r = call_correct(punct.Punctuate(whisper_app(verbose(NOTE)), normal))  # mode not set up
+        self.assertEqual(r.headers["x-gs-punctuated"], "skipped")
+        app = punct.Punctuate(
+            whisper_app(verbose(NOTE)), normal, correct=correct, correct_min_words=0
+        )
+        self.assertEqual(call_correct(app).headers["x-gs-punctuated"], "skipped")
+        self.assertEqual((len(normal.calls), correct.calls), (1, []))
+
+    def test_corrected_text_only(self) -> None:
+        payload = verbose(NOTE)
+        normal, correct = Fake(), Fake(answer(fix=2))
+        app = punct.Punctuate(whisper_app(payload), normal, correct=correct)
+        r = call_correct(app, b64(CONTEXT))
+        self.assertEqual(r.headers["x-gs-punctuated"], "corrected")
+        out = r.json()
+        self.assertEqual(out["text"], answer(fix=2))
+        self.assertEqual(out["segments"], payload["segments"])
+        self.assertEqual(out["words"], payload["words"])
+        self.assertEqual(
+            {k: v for k, v in out.items() if k != "text"},
+            {k: v for k, v in payload.items() if k != "text"},
+        )
+        message, max_tokens, _ = correct.calls[0]
+        self.assertIn(CONTEXT, message)
+        self.assertIn(NOTE, message)
+        # the budget counts the transcript only, not the context
+        self.assertEqual(max_tokens, -(-len(payload["text"]) // 2) + 64)
+        self.assertEqual(normal.calls, [])
+
+    def test_short_note_runs_from_three_words(self) -> None:
+        for text, want in (("cloud code please", "corrected"), ("cloud code", "skipped")):
+            correct = Fake("Claude Code, please.")
+            r = call_correct(punct.Punctuate(whisper_app({"text": text}), Fake(), correct=correct))
+            self.assertEqual(r.headers["x-gs-punctuated"], want, text)
+
+    def test_same_words_answer_is_the_normal_pass(self) -> None:
+        r = call_correct(
+            punct.Punctuate(whisper_app(verbose(NOTE)), Fake(), correct=Fake(answer()))
+        )
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+        self.assertEqual(r.json()["segments"][0]["text"], " " + " ".join(answer().split()[:20]))
+        r = call_correct(punct.Punctuate(whisper_app({"text": NOTE}), Fake(), correct=Fake(NOTE)))
+        self.assertEqual(r.headers["x-gs-punctuated"], "unchanged")
+
+    def test_rewrite_falls_back_to_punctuation_without_a_second_call(self) -> None:
+        payload = verbose(NOTE)
+        correct = Fake(answer(fix=8))  # 8 of 30 words changed: more than a correction
+        normal = Fake()
+        r = call_correct(punct.Punctuate(whisper_app(payload), normal, correct=correct))
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+        out = r.json()
+        self.assertEqual(
+            [punct.core(t) for t in out["text"].split()], [f"word{i}" for i in range(30)]
+        )
+        self.assertEqual(out["text"].split()[8:], answer().split()[8:])  # kept words punctuated
+        self.assertEqual(out["text"].split()[:8], NOTE.split()[:8])  # changed ones as Whisper wrote
+        self.assertEqual([w["start"] for w in out["words"]], [w["start"] for w in payload["words"]])
+        self.assertEqual((len(correct.calls), normal.calls), (1, []))
+
+    def test_rewrite_keeping_little_is_rejected(self) -> None:
+        payload = verbose(NOTE)
+        for got in ("A short summary of the note.", answer(fix=20), ""):
+            r = call_correct(punct.Punctuate(whisper_app(payload), Fake(), correct=Fake(got)))
+            self.assertEqual(r.headers["x-gs-punctuated"], "rejected", got)
+            self.assertEqual(r.content, json.dumps(payload).encode())
+
+    def test_thresholds(self) -> None:
+        src = [f"w{i}" for i in range(100)]
+        for changed, ok in ((10, True), (11, False)):
+            got = [f"x{i}" for i in range(changed)] + src[changed:]
+            self.assertEqual(punct.is_correction(src, got)[0], ok, changed)
+        self.assertEqual(punct.is_correction(src, src[:90])[0], True)
+        self.assertEqual(punct.is_correction(src, src[:89])[0], False)
+        self.assertEqual(punct.is_correction(src, src + ["x"] * 11)[0], False)
+        three = ["cloud", "code", "please"]
+        self.assertEqual(punct.is_correction(three, ["Claude", "Code,", "please."]), (True, 1, 1))
+        self.assertEqual(punct.is_correction(three, ["Claude", "Coder,", "please."]), (True, 2, 2))
+        self.assertEqual(punct.is_correction(three, ["Claude-Code", "please."])[0], True)
+        self.assertEqual(punct.is_correction(three, ["Thanks."])[0], False)
+        self.assertEqual(punct.is_correction(three, [])[0], False)
+        # punctuation, dashes and quotes at a token's ends are not word changes
+        self.assertEqual(
+            punct.is_correction(["stupid", "thing"], ["«stupid—", "thing»."]), (True, 0, 0)
+        )
+
+    def test_bad_context_never_fails_the_request(self) -> None:
+        for raw in (b"%%%", b"A" * (punct.MAX_CONTEXT_HEADER + 4), b64("x" * 9000)):
+            correct = Fake(answer(fix=1))
+            r = call_correct(
+                punct.Punctuate(whisper_app(verbose(NOTE)), Fake(), correct=correct), raw
+            )
+            self.assertEqual((r.status_code, r.headers["x-gs-punctuated"]), (200, "corrected"))
+            self.assertLessEqual(
+                len(correct.calls[0][0]), punct.MAX_CONTEXT_CHARS + len(NOTE) + 200
+            )
+
+    def test_context_and_text_never_logged(self) -> None:
+        marker = "SECRET-CONTEXT-MARKER"
+        text = NOTE.replace("word5", "TRANSCRIPT-MARKER")
+        for got in (answer(fix=2), answer(fix=8), "summary", RuntimeError(marker)):
+            app = punct.Punctuate(whisper_app(verbose(text)), Fake(), correct=Fake(got))
+            with self.assertLogs("gs_speech.punct", level="DEBUG") as logs:
+                call_correct(app, b64(CONTEXT))
+            joined = "\n".join(logs.output)
+            self.assertNotIn(marker, joined)
+            self.assertNotIn("TRANSCRIPT-MARKER", joined)
+            self.assertNotIn("Codex", joined)
+
+    def test_timeout_and_error_keep_the_original(self) -> None:
+        payload = verbose(NOTE)
+        app = punct.Punctuate(whisper_app(payload), Fake(), correct=Fake(delay=1.0), timeout=0.2)
+        r = call_correct(app, b64(CONTEXT))
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("timeout", payload))
+        app = punct.Punctuate(whisper_app(payload), Fake(), correct=Fake(RuntimeError("down")))
+        r = call_correct(app, b64(CONTEXT))
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("error", payload))
+        self.assertEqual(app.inflight, 0)
+
+    def test_echoed_prompt_tags_are_dropped(self) -> None:
+        correct = Fake("<transcript>\n" + answer(fix=1) + "\n</transcript>")
+        r = call_correct(punct.Punctuate(whisper_app(verbose(NOTE)), Fake(), correct=correct))
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()["text"]), ("corrected", answer(1)))
+
+    def test_wrap_sets_up_correction(self) -> None:
+        app = punct.wrap(whisper_app({"text": "x"}), {"GS_PUNCT_URL": "http://llm/v1"})
+        self.assertIsNotNone(app.correct)
+        self.assertEqual(app.correct_min_words, 3)
+
+    def test_correction_uses_its_own_system_prompt(self) -> None:
+        seen = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(req.content)["messages"][0]["content"])
+            body = b'{"choices":[{"message":{"content":"Hi."}}]}'
+            return httpx.Response(200, stream=httpx.ByteStream(body))
+
+        t = httpx.MockTransport(handler)
+        for system in (punct.SYSTEM, punct.SYSTEM_CORRECT):
+            complete = punct.make_complete("http://llm/v1", "m", transport=t, system=system)
+            asyncio.run(complete("hi", 10, 5))
+        self.assertEqual(seen, [punct.SYSTEM, punct.SYSTEM_CORRECT])
 
 
 if __name__ == "__main__":

@@ -72,8 +72,14 @@ def main() -> None:
         ext.Admission(app, state.permits, key.get_secret_value() if key else None, **state.limits),
         os.environ,
     )
+    # h11 refuses a request whose headers exceed 16 KiB, and X-GS-Context (punct.py) may be up to
+    # 21,336 bytes of base64 on its own; 64 KiB leaves room for it and the usual headers.
     config = uvicorn.Config(
-        PortRouter(main_app, lid_app, lid_port), host=host, port=port, lifespan="on"
+        PortRouter(main_app, lid_app, lid_port),
+        host=host,
+        port=port,
+        lifespan="on",
+        h11_max_incomplete_event_size=64 * 1024,
     )
     server = uvicorn.Server(config)
     sockets = [bind(host, port)]

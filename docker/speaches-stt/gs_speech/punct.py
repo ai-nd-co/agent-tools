@@ -21,6 +21,20 @@ Otherwise, and on any error, timeout or busy model, the original answer is sent.
 `X-GS-Punctuated` says what happened: applied, unchanged, rejected, skipped, busy, timeout or error.
 The log line has counts and timings only, never text.
 
+Correction mode: the extra header `X-GS-Correct: context` (with `X-GS-Punctuate: llm`) asks the
+model also to fix misheard words, names above all, using the chat's recent messages from
+`X-GS-Context` (standard base64 of UTF-8 text, at most 4,000 characters; when invalid it is ignored,
+when longer only its end is kept, and it is never logged). The pass then runs on any transcript of
+at least GS_PUNCT_CORRECT_MIN_WORDS (3) words. The word guard is replaced by a looser one against
+rewriting: the answer is aligned with the transcript (difflib on lower-case tokens without edge
+punctuation), and at most max(2, 10%) of the transcript's tokens may be dropped and as many added,
+and the answer must keep at least half as many tokens. A correction replaces only the top-level
+`text` (`X-GS-Punctuated: corrected`); segments and words stay as Whisper wrote them, since their
+timings belong to Whisper's words. An answer that changed no word is used as in the normal pass
+(applied or unchanged). A refused answer falls back, without a second call, to its punctuation on
+the words it kept unchanged, if it kept at least half of them (applied); otherwise the original
+answer is sent (rejected). The log line has counts only.
+
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
 return before it is cancelled (also if the request itself is cancelled). One LLM call at a time
@@ -29,17 +43,21 @@ GS_PUNCT_TIMEOUT_S (60) including the wait. A client that disconnects meanwhile 
 
 Env: GS_PUNCT_URL (chat completions URL; unset = off), GS_PUNCT_MODEL, GS_PUNCT_TIMEOUT_S,
 GS_PUNCT_MIN_RUN, GS_PUNCT_PARAGRAPH_MIN_WORDS, GS_PUNCT_MAX_WORDS (3000), GS_PUNCT_MAX_BYTES
-(8 MiB), GS_PUNCT_MAX_WAITING, GS_PUNCT_APP_GRACE_S.
+(8 MiB), GS_PUNCT_MAX_WAITING, GS_PUNCT_APP_GRACE_S, GS_PUNCT_CORRECT_MIN_WORDS (0 = mode off).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import difflib
 import json
 import logging
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
 
 logger = logging.getLogger("gs_speech.punct")
@@ -60,6 +78,37 @@ SYSTEM = (
     "filler words and repeats exactly. Output only the text."
 )
 PARAGRAPH = re.compile(r"\n\s*\n")
+
+CORRECT_OPT_IN = (b"x-gs-correct", b"context")
+CONTEXT_HEADER = b"x-gs-context"
+MAX_CONTEXT_CHARS = 4000
+# 4,000 characters of UTF-8 are at most 16,000 bytes, 21,336 in base64; a longer header is ignored
+# without decoding it.
+MAX_CONTEXT_HEADER = 24 * 1024
+# Tested with Qwen3.8-27B IQ3_XXS on 40 of Davron's notes (31 English, 9 Russian), each with his 3
+# previous notes as context: 17 notes changed, by at most 6 tokens (of 324): names (Codex, Claude,
+# k3s, Anthropic), repeated words dropped, a missing article or pronoun, hyphenation. No rephrasing.
+# Without the context two of the name fixes were missed.
+SYSTEM_CORRECT = (
+    "You correct transcripts of voice notes made by speech recognition, which often mishears "
+    "names and technical terms. Fix misheard words, punctuation and capitalization, and split the "
+    "text into paragraphs, separated by a blank line, wherever the topic or thought changes. The "
+    "recent messages of the chat, when given, show the names and terms the speaker is likely to "
+    "use; never copy anything else from them. Names that come up often: Codex, Claude, Claude "
+    "Code, claude-tools, k3s, Whisper, vox-flow, agent-hub, Telegram, Asana, Terraform, GPU. Keep "
+    "the speaker's own words, word order and language: do not rephrase, summarise, translate, "
+    "explain, add or remove anything, and keep filler words and repeats. Output only the "
+    "corrected transcript."
+)
+# The guard against rewriting. On the same notes the corrections changed at most 5.8% of the tokens
+# of a note of 50+ words (2 of a 16-word note); prompts asking to clean up, paraphrase or summarise
+# changed 11.8-100% (33 of 36 answers; the other 3 changed 1 token of a 14-word note). Short notes
+# may change 2 tokens, as one name can be two words ("cloud code").
+CORRECT_MAX_SHARE = 0.10
+CORRECT_MIN_ALLOWED = 2
+CORRECT_MIN_COUNT_RATIO = 0.5
+FALLBACK_MIN_KEPT = 0.5  # below this the answer is another text, and its marks land on stray words
+ECHOED_TAGS = re.compile(r"\A\s*<transcript>|</transcript>\s*\Z")  # if the model repeats them
 
 Complete = Callable[[str, int, float], Awaitable[str]]
 
@@ -139,10 +188,99 @@ def _replace_tokens(text: str, tokens: list[str]) -> str:
     return re.sub(r"\S+", lambda _m: next(it), text)
 
 
+def parse_context(raw: bytes | None) -> str:
+    """The chat context from `X-GS-Context`: "" when absent or invalid, else its last 4,000 chars.
+
+    A cut keeps whole lines when it can, so the oldest message is dropped rather than half of it.
+    """
+    if not raw or len(raw) > MAX_CONTEXT_HEADER:
+        return ""
+    try:
+        text = base64.b64decode(raw.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, ValueError):
+        return ""
+    if len(text) > MAX_CONTEXT_CHARS:
+        text = text[-MAX_CONTEXT_CHARS:]
+        if "\n" in text:
+            text = text.split("\n", 1)[1]
+    # The context sits between tags in the prompt; it must not be able to close them.
+    return re.sub(r"</?(context|transcript)>", "", text, flags=re.IGNORECASE).strip()
+
+
+def correction_message(text: str, context: str) -> str:
+    """The user message of a correction: the context, if any, then the transcript."""
+    parts = []
+    if context:
+        parts.append(
+            "Recent messages in this chat, oldest first:\n<context>\n" + context + "\n</context>"
+        )
+    parts.append("Transcript to correct:\n<transcript>\n" + text.strip() + "\n</transcript>")
+    return "\n\n".join(parts)
+
+
+def _bare(token: str) -> str:
+    """A token for comparing wordings: lower case, without punctuation or symbols at its ends."""
+    i, j = 0, len(token)
+    while i < j and unicodedata.category(token[i])[0] in "PS":
+        i += 1
+    while j > i and unicodedata.category(token[j - 1])[0] in "PS":
+        j -= 1
+    return token[i:j].lower()
+
+
+def kept_count(src: list[str], got: list[str], key: Callable[[str], str]) -> int:
+    """How many tokens of `src` appear in `got` in the same order (difflib's matching blocks)."""
+    sm = difflib.SequenceMatcher(None, [key(t) for t in src], [key(t) for t in got], autojunk=False)
+    return sum(m.size for m in sm.get_matching_blocks())
+
+
+def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int]:
+    """Whether `got` corrects `src` rather than rewriting it; also tokens dropped and added."""
+    kept = kept_count(src, got, _bare)
+    dropped, added = len(src) - kept, len(got) - kept
+    allowed = max(CORRECT_MIN_ALLOWED, int(len(src) * CORRECT_MAX_SHARE))
+    ok = dropped <= allowed and added <= allowed and len(got) >= len(src) * CORRECT_MIN_COUNT_RATIO
+    return ok, dropped, added
+
+
+def fallback(src: list[str], answer: str) -> str | None:
+    """A refused correction's marks, case and breaks on the words it kept; Whisper's elsewhere.
+
+    The result has exactly the transcript's words, so it goes through the normal guard. None when
+    the answer kept fewer than FALLBACK_MIN_KEPT of them.
+    """
+    paragraphs = [p.split() for p in layout(answer).split("\n\n") if p]
+    got = [t for p in paragraphs for t in p]
+    starts, i = set(), 0
+    for p in paragraphs:
+        starts.add(i)
+        i += len(p)
+    sm = difflib.SequenceMatcher(
+        None, [core(t) for t in src], [core(t) for t in got], autojunk=False
+    )
+    out, breaks, kept = list(src), set(), 0
+    for a, b, size in sm.get_matching_blocks():
+        kept += size
+        for k in range(size):
+            out[a + k] = got[b + k]
+            if b + k in starts and a + k > 0:
+                breaks.add(a + k)
+    if kept < len(src) * FALLBACK_MIN_KEPT:
+        return None
+    lines, cur = [], []
+    for k, t in enumerate(out):
+        if k in breaks:
+            lines.append(" ".join(cur))
+            cur = []
+        cur.append(t)
+    lines.append(" ".join(cur))
+    return "\n\n".join(lines)
+
+
 MAX_LLM_BYTES = 1024 * 1024  # an answer of max_tokens is far smaller; anything bigger is refused
 
 
-def make_complete(url: str, model: str, transport=None) -> Complete:  # noqa: ANN001
+def make_complete(url: str, model: str, transport=None, system: str = SYSTEM) -> Complete:  # noqa: ANN001
     """One HTTP client per call: a few calls an hour, and nothing left open at shutdown."""
     import httpx
 
@@ -152,7 +290,7 @@ def make_complete(url: str, model: str, transport=None) -> Complete:  # noqa: AN
             "temperature": 0,
             "max_tokens": max_tokens,
             "messages": [
-                {"role": "system", "content": SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": text},
             ],
         }
@@ -218,9 +356,13 @@ class Punctuate:
         max_waiting: int = 2,
         app_grace: float = 5.0,
         send_timeout: float = 60.0,
+        correct: Complete | None = None,
+        correct_min_words: int = 3,
     ) -> None:
         self.app = app
         self.complete = complete
+        self.correct = correct  # the completion with SYSTEM_CORRECT; None = correction mode off
+        self.correct_min_words = correct_min_words
         self.timeout = timeout
         self.min_run = min_run
         self.paragraph_min_words = paragraph_min_words
@@ -241,6 +383,7 @@ class Punctuate:
         ):
             await self.app(scope, receive, send)
             return
+        context = self._correction_context(scope.get("headers", []))
         start: dict | None = None
         chunks: list[bytes] = []
         size = 0
@@ -320,7 +463,7 @@ class Punctuate:
                 return
             body = b"".join(chunks)
             chunks.clear()
-            result = await self._punctuate_unless_gone(body, receive)
+            result = await self._punctuate_unless_gone(body, receive, context)
             if result is None:
                 return  # the client left; nobody to answer
             outcome, body = result
@@ -338,12 +481,27 @@ class Punctuate:
         finally:
             await _stop(task)
 
-    async def _punctuate_unless_gone(self, body: bytes, receive) -> tuple[str, bytes] | None:  # noqa: ANN001
+    def _correction_context(self, headers: list) -> str | None:
+        """None for the normal pass; the chat context ("" if none) when correction is asked for."""
+        if self.correct is None or self.correct_min_words <= 0:
+            return None
+        found = [(k.lower(), v) for k, v in headers]
+        if CORRECT_OPT_IN not in [(k, v.strip().lower()) for k, v in found]:
+            return None
+        try:
+            return parse_context(next((v for k, v in found if k == CONTEXT_HEADER), None))
+        except Exception as e:  # noqa: BLE001 - a bad context is no context
+            logger.warning("punct: context: %s", type(e).__name__)
+            return ""
+
+    async def _punctuate_unless_gone(  # noqa: ANN001
+        self, body: bytes, receive, context: str | None = None
+    ) -> tuple[str, bytes] | None:
         """The pass, raced against the client leaving; None if it left (a tie counts as left).
 
         Only called once the app task has ended, so nothing else reads `receive` any more.
         """
-        work = asyncio.ensure_future(self._punctuate(body))
+        work = asyncio.ensure_future(self._punctuate(body, context))
         gone = asyncio.ensure_future(_until_disconnect(receive))
         try:
             await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
@@ -356,14 +514,16 @@ class Punctuate:
             return "error", body
         return work.result()
 
-    async def _punctuate(self, body: bytes) -> tuple[str, bytes]:
+    async def _punctuate(self, body: bytes, context: str | None = None) -> tuple[str, bytes]:
         try:
-            return await self._punctuate_or_raise(body)
+            return await self._punctuate_or_raise(body, context)
         except Exception as e:  # noqa: BLE001 - never worse than Whisper's own answer
             logger.warning("punct: %s", type(e).__name__)
             return "error", body
 
-    async def _punctuate_or_raise(self, body: bytes) -> tuple[str, bytes]:
+    async def _punctuate_or_raise(  # noqa: C901
+        self, body: bytes, context: str | None = None
+    ) -> tuple[str, bytes]:
         begin = time.perf_counter()
         try:
             payload = json.loads(body)
@@ -376,6 +536,8 @@ class Punctuate:
         wanted = longest_unpunctuated(tokens) >= self.min_run or (
             self.paragraph_min_words > 0 and len(tokens) >= self.paragraph_min_words
         )
+        if context is not None:
+            wanted = wanted or len(tokens) >= self.correct_min_words
         if not tokens or len(tokens) > self.max_words or not wanted:
             return "skipped", body
         if self._lock is None:
@@ -385,7 +547,7 @@ class Punctuate:
         else:
             self.inflight += 1
             try:
-                outcome, out = await self._ask(payload, tokens, body, begin)
+                outcome, out = await self._ask(payload, tokens, body, begin, context)
             finally:
                 self.inflight -= 1
         logger.info(
@@ -397,8 +559,13 @@ class Punctuate:
         )
         return outcome, out
 
-    async def _ask(
-        self, payload: dict, tokens: list[str], body: bytes, begin: float
+    async def _ask(  # noqa: PLR0913
+        self,
+        payload: dict,
+        tokens: list[str],
+        body: bytes,
+        begin: float,
+        context: str | None = None,
     ) -> tuple[str, bytes]:
         holding = False
         try:
@@ -409,19 +576,54 @@ class Punctuate:
                     # Budget from characters, not words: a Cyrillic word costs several tokens.
                     # Half the characters is a heuristic with room for marks and breaks (it worked
                     # on the 12 test notes, Russian included); a cut-short answer is refused anyway.
+                    # The context does not count: the answer is the transcript only.
                     max_tokens = math.ceil(len(payload["text"]) / 2) + 64
-                    got = await self.complete(payload["text"], max_tokens, remaining)
+                    if context is None:
+                        got = await self.complete(payload["text"], max_tokens, remaining)
+                    else:
+                        message = correction_message(payload["text"], context)
+                        got = await self.correct(message, max_tokens, remaining)
         except TimeoutError:
             return ("timeout" if holding else "busy"), body
         except Exception as e:  # noqa: BLE001 - any failure keeps Whisper's answer
             logger.warning("punct: %s", type(e).__name__)
             return "error", body
+        if context is not None:
+            got = ECHOED_TAGS.sub("", got)
         text = layout(got)
         new = rewrite(payload, text.split(), text)
+        if new is None and context is not None:
+            # difflib takes about 0.5 s on 3,000 repeats of one word (a Whisper loop): not on
+            # the event loop.
+            return await asyncio.to_thread(
+                self._corrected, payload, tokens, body, text, bool(context)
+            )
         if new is None:
             return "rejected", body
         if text == layout(payload["text"]):
             return "unchanged", body
+        return "applied", json.dumps(new, ensure_ascii=False).encode()
+
+    def _corrected(
+        self, payload: dict, tokens: list[str], body: bytes, text: str, with_context: bool
+    ) -> tuple[str, bytes]:
+        """A correction that changed words: the new top-level text, or the fallback if refused."""
+        ok, dropped, added = is_correction(tokens, text.split())
+        logger.info(
+            "punct: correction %s, %d words, %d dropped, %d added, count ratio %.2f, context %s",
+            "accepted" if ok else "refused",
+            len(tokens),
+            dropped,
+            added,
+            len(text.split()) / len(tokens),
+            "yes" if with_context else "no",
+        )
+        if ok:
+            return "corrected", json.dumps({**payload, "text": text}, ensure_ascii=False).encode()
+        punctuated = fallback(tokens, text)
+        new = None if punctuated is None else rewrite(payload, punctuated.split(), punctuated)
+        if new is None or punctuated == layout(payload["text"]):
+            return "rejected", body
         return "applied", json.dumps(new, ensure_ascii=False).encode()
 
 
@@ -445,9 +647,10 @@ def wrap(app, env: Mapping[str, str]):  # noqa: ANN001, ANN201
     url = env.get("GS_PUNCT_URL")
     if not url:
         return app
+    model = env.get("GS_PUNCT_MODEL", "default")
     return Punctuate(
         app,
-        make_complete(url, env.get("GS_PUNCT_MODEL", "default")),
+        make_complete(url, model),
         timeout=float(env.get("GS_PUNCT_TIMEOUT_S", "60")),
         min_run=int(env.get("GS_PUNCT_MIN_RUN", "40")),
         paragraph_min_words=int(env.get("GS_PUNCT_PARAGRAPH_MIN_WORDS", "80")),
@@ -456,4 +659,6 @@ def wrap(app, env: Mapping[str, str]):  # noqa: ANN001, ANN201
         max_waiting=int(env.get("GS_PUNCT_MAX_WAITING", "2")),
         app_grace=float(env.get("GS_PUNCT_APP_GRACE_S", "5")),
         send_timeout=float(env.get("GS_SEND_TIMEOUT_S", "60")),
+        correct=make_complete(url, model, system=SYSTEM_CORRECT),
+        correct_min_words=int(env.get("GS_PUNCT_CORRECT_MIN_WORDS", "3")),
     )

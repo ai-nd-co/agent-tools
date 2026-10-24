@@ -116,23 +116,53 @@ CORRECT_MIN_ALLOWED = 2
 CORRECT_MIN_COUNT_RATIO = 0.5
 # Words that may flip a note's meaning: a correction that drops, adds or replaces one is refused
 # (the LLM turned "fifteen" into "fifty" and "don't deploy" into "deploy" when the context said so).
+
+
+def _russian_numbers() -> list[str]:
+    """Russian number words in their cases (a form may also be another word: семью, family)."""
+    words = """ноль нуль нуля нулю нулём нулем один одного одному одним одном одна одной одну одно
+    одни одних одним одними два двух двум двумя две три трёх трех трём трем тремя четыре четырёх
+    четырех четырём четырем четырьмя сорок сорока девяносто девяноста сто ста сотни сотен двести
+    двухсот двумстам двумястами двухстах триста трёхсот трехсот тремстам тремястами трёхстах
+    трехстах четыреста четырёхсот четырехсот четырёмстам четыремстам четырьмястами четырёхстах
+    четырехстах полтора полторы полутора""".split()
+    for stem in "пят шест сем девят десят".split():  # пять, пяти, пятью
+        words += [stem + "ь", stem + "и", stem + "ью"]
+    words += ["восемь", "восьми", "восемью", "восьмью"]
+    for stem in "один две три четыр пят шест сем восем девят".split():  # одиннадцать ...
+        words += [stem + "надцать", stem + "надцати", stem + "надцатью"]
+    for stem in "двадцат тридцат".split():
+        words += [stem + "ь", stem + "и", stem + "ью"]
+    for nom, gen, ins in (  # пятьдесят, пятидесяти, пятьюдесятью; and the hundreds
+        ("пятьдесят", "пятидесяти", "пятьюдесятью"),
+        ("шестьдесят", "шестидесяти", "шестьюдесятью"),
+        ("семьдесят", "семидесяти", "семьюдесятью"),
+        ("восемьдесят", "восьмидесяти", "восемьюдесятью"),
+        ("пятьсот", "пятисот", "пятьюстами"),
+        ("шестьсот", "шестисот", "шестьюстами"),
+        ("семьсот", "семисот", "семьюстами"),
+        ("восемьсот", "восьмисот", "восемьюстами"),
+        ("девятьсот", "девятисот", "девятьюстами"),
+    ):
+        words += [nom, gen, ins]
+    for stem in "пятист шестист семист восьмист девятист".split():
+        words += [stem + "ам", stem + "ах"]
+    for stem in ("тысяч", "миллион", "миллиард"):
+        ends = "а и е у ей ью ам ами ах" if stem == "тысяч" else "а у ом е ы ов ам ами ах"
+        words += [stem] + [stem + e for e in ends.split()]
+    return words
+
+
 NUMBER_WORDS = frozenset(
     """zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
     fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty
-    ninety hundred hundreds thousand thousands million millions billion billions
-    ноль нуль нуля один одна одно одного одной одному одним одну два две двух двум двумя три трёх
-    трех трём трем тремя четыре четырёх четырех четырём четырем четырьмя пять пяти пятью шесть
-    шести семь семи восемь восьми девять девяти десять десяти одиннадцать одиннадцати двенадцать
-    двенадцати тринадцать тринадцати четырнадцать четырнадцати пятнадцать пятнадцати шестнадцать
-    шестнадцати семнадцать семнадцати восемнадцать восемнадцати девятнадцать девятнадцати
-    двадцать двадцати тридцать тридцати сорок сорока пятьдесят пятидесяти шестьдесят шестидесяти
-    семьдесят семидесяти восемьдесят восьмидесяти девяносто девяноста сто ста двести двухсот
-    триста трёхсот трехсот четыреста четырёхсот пятьсот пятисот шестьсот семьсот восемьсот
-    девятьсот тысяча тысячи тысяч тысячу тысячей миллион миллиона миллионов миллиард миллиарда
-    миллиардов""".split()
+    ninety hundred hundreds thousand thousands million millions billion billions""".split()
+    + _russian_numbers()
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
 FILLERS = frozenset("uh um er erm ah э ну".split())
+APOSTROPHES = str.maketrans(dict.fromkeys("\u2018\u2019\u02bc\u02b9\u00b4\u0060\u2032\uff07", "'"))
+HYPHENS = re.compile("[-\u2010-\u2015\u2212\ufe63\uff0d]")
 DIGIT_NAMES = frozenset({"k3s"})  # names in SYSTEM_CORRECT with a digit: a fix to one is no number
 MAX_REPLACE = 2  # tokens on either side of one replacement ("cloud code" -> "Claude Code")
 ECHOED_TAGS = re.compile(r"\A\s*<transcript>|</transcript>\s*\Z")  # if the model repeats them
@@ -256,19 +286,28 @@ def _bare(token: str) -> str:
 
 
 def _key(token: str) -> str:
-    """What a token is compared by: with a digit, its core, so a sign, currency or % counts."""
-    return core(token) if any(c.isdigit() for c in token) else _bare(token)
+    """What a token is compared by. With a digit, all but sentence marks at its end, so a sign,
+    currency, % or a leading decimal point (".5") counts."""
+    return token.rstrip(EDGE).lower() if any(c.isdigit() for c in token) else _bare(token)
 
 
 def _sensitive(token: str) -> bool:
     """A number or a negation, whose change could flip what the note says."""
-    bare = _bare(token).replace("\u2019", "'")
+    bare = unicodedata.normalize("NFKC", _bare(token)).translate(APOSTROPHES)
     if any(c.isdigit() for c in token):
         return bare not in DIGIT_NAMES
     return (
         bare in NEGATIONS
         or bare.endswith("n't")
-        or any(part in NUMBER_WORDS for part in bare.split("-"))
+        or any(part in NUMBER_WORDS for part in HYPHENS.split(bare))
+    )
+
+
+def same_numbers(src: list[str], got: list[str]) -> bool:
+    """For answers with the same words: whether every token with a digit is also the same by
+    `_key` (same_words strips a leading "." too, so ".5" and "5" would pass)."""
+    return all(
+        _key(a) == _key(b) for a, b in zip(src, got, strict=True) if any(c.isdigit() for c in a + b)
     )
 
 
@@ -281,6 +320,17 @@ def _dropped_ok(src: list[str], i1: int, i2: int) -> bool:
     before = [_bare(t) for t in src[max(0, i1 - k) : i1]]
     after = [_bare(t) for t in src[i2 : i2 + k]]
     return run in (before, after)
+
+
+def _moved(sm: difflib.SequenceMatcher, src: list[str], got: list[str]) -> bool:
+    """Whether a token was dropped in one place and added in another: content moved, which can
+    turn "Not ready. Ready now." into "Ready. Not ready now." with every change allowed."""
+    gone, new = set(), set()
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag != "equal":
+            gone.update(_key(t) for t in src[i1:i2])
+            new.update(_key(t) for t in got[j1:j2])
+    return bool(gone & new)
 
 
 def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
@@ -313,6 +363,8 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
     dropped, added = len(src) - kept, len(got) - kept
     if not reason and (dropped > allowed or added > allowed):
         reason = "share"
+    if not reason and _moved(sm, src, got):
+        reason = "move"
     return not reason, dropped, added, reason
 
 
@@ -647,7 +699,8 @@ class Punctuate:
                 if context is not None:
                     got = _unwrap(got, payload["text"])
                     text = layout(got)
-                    if not same_words(tokens, text.split()):
+                    answer = text.split()
+                    if not (same_words(tokens, answer) and same_numbers(tokens, answer)):
                         # Words changed. Aligning takes up to about 1.2 s on 3,000 repeats of one
                         # word (a Whisper loop), so it runs in a thread, within the deadline.
                         return await _in_thread(

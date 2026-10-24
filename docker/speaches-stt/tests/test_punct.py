@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 import unittest
 
 sys.path.insert(0, "/opt/gs-speech")
@@ -199,6 +200,171 @@ class Wrapper(unittest.TestCase):
         self.assertIsInstance(
             punct.wrap(app, {"GS_PUNCT_URL": "http://llm/v1/chat/completions"}), punct.Punctuate
         )
+
+
+def raw_call(app, receive_script, timeout: float = 5.0):  # noqa: ANN001, ANN201
+    """Drive `app` directly: receive_script yields ASGI messages (awaiting as it likes)."""
+    sent: list[dict] = []
+
+    async def go() -> None:
+        it = receive_script()
+
+        async def receive():  # noqa: ANN202
+            return await it.__anext__()
+
+        async def send(message) -> None:  # noqa: ANN001
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/audio/transcriptions",
+            "headers": [(b"x-gs-punctuate", b"llm")],
+        }
+        await asyncio.wait_for(app(scope, receive, send), timeout)
+
+    asyncio.run(go())
+    return sent
+
+
+class Hardening(unittest.TestCase):
+    """Regressions for the Codex audit, round 1."""
+
+    def test_guard_refuses_changes_inside_a_token(self) -> None:
+        for a, b in (
+            ("we\u2019ll", "well"),
+            ("1.5", "15"),
+            ("re-sign", "resign"),
+            ("-5", "5"),
+            ("cafe\u0301", "cafe"),
+            ("it's", "its"),
+            ("...", ""),
+        ):
+            self.assertFalse(punct.same_words([a], [b] if b else []), (a, b))
+            self.assertFalse(punct.same_words([a], [b + "."] if b else ["."]), (a, b))
+        self.assertTrue(
+            punct.same_words(["hello", "us", "1.5", "co-op"], ["Hello,", "US.", "1.5?", "co-op!"])
+        )
+        self.assertTrue(punct.same_words(["\u2026and"], ["And"]))
+
+    def test_app_error_after_the_answer_keeps_the_answer(self) -> None:
+        inner = whisper_app(verbose(BARE))
+
+        async def app(scope, receive, send) -> None:  # noqa: ANN001
+            await inner(scope, receive, send)
+            raise RuntimeError("cleanup failed")
+
+        r = call(punct.Punctuate(app, Fake()))
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+
+    def test_app_hanging_after_the_answer_is_cancelled(self) -> None:
+        inner = whisper_app(verbose(BARE))
+        cancelled = []
+
+        async def app(scope, receive, send) -> None:  # noqa: ANN001
+            await inner(scope, receive, send)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        t0 = time.perf_counter()
+        r = call(punct.Punctuate(app, Fake(), app_grace=0.2))
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+        self.assertLess(time.perf_counter() - t0, 3)
+        self.assertEqual(cancelled, [True])
+
+    def test_incomplete_answers_become_500(self) -> None:
+        async def truncated(scope, receive, send) -> None:  # noqa: ANN001
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"text": "par', "more_body": True})
+
+        async def start_only(scope, receive, send) -> None:  # noqa: ANN001
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+
+        fake = Fake()
+        for app in (truncated, start_only):
+            r = call(punct.Punctuate(app, fake))
+            self.assertEqual(r.status_code, 500)
+            self.assertEqual(r.json(), {"detail": "Incomplete transcription response."})
+        self.assertEqual(fake.calls, [])
+
+    def test_app_error_before_the_answer_propagates(self) -> None:
+        async def broken(scope, receive, send) -> None:  # noqa: ANN001
+            raise RuntimeError("whisper failed")
+
+        with self.assertRaises(RuntimeError):
+            call(punct.Punctuate(broken, Fake()))
+
+    def test_oversized_answer_streams_through_unchanged(self) -> None:
+        payload = verbose(BARE)
+        fake = Fake()
+        r = call(punct.Punctuate(whisper_app(payload), fake, max_bytes=100))
+        self.assertNotIn("x-gs-punctuated", r.headers)
+        self.assertEqual(r.content, json.dumps(payload).encode())
+        self.assertEqual(fake.calls, [])
+
+    def test_queue_cap_answers_busy_at_once(self) -> None:
+        payload = verbose(BARE)
+        fake = Fake()
+        app = punct.Punctuate(whisper_app(payload), fake, timeout=5, max_waiting=1)
+
+        async def go():  # noqa: ANN202
+            app._lock = asyncio.Lock()
+            await app._lock.acquire()
+            app.waiting = 1  # one note already queued
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url="http://x"
+            ) as c:
+                t0 = time.perf_counter()
+                r = await c.post(
+                    "/v1/audio/transcriptions", content=b"a", headers={"x-gs-punctuate": "llm"}
+                )
+                return r, time.perf_counter() - t0
+
+        r, took = asyncio.run(go())
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("busy", payload))
+        self.assertLess(took, 1)
+        self.assertEqual(app.waiting, 1)
+
+    def test_waiting_count_returns_to_zero(self) -> None:
+        app = punct.Punctuate(whisper_app(verbose(BARE)), Fake(delay=0.5), timeout=0.2)
+        call(app)
+        self.assertEqual(app.waiting, 0)
+
+    def test_disconnect_cancels_the_pass_and_sends_nothing(self) -> None:
+        started, cancelled = asyncio.Event(), []
+
+        async def slow(text: str, max_tokens: int, timeout: float) -> str:
+            started.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+            return text
+
+        async def script():  # noqa: ANN202
+            yield {"type": "http.request", "body": b"audio", "more_body": False}
+            await started.wait()
+            yield {"type": "http.disconnect"}
+
+        sent = raw_call(punct.Punctuate(whisper_app(verbose(BARE)), slow), script)
+        self.assertEqual(sent, [])
+        self.assertEqual(cancelled, [True])
 
 
 if __name__ == "__main__":

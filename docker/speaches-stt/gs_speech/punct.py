@@ -138,28 +138,41 @@ def make_complete(url: str, model: str, transport=None) -> Complete:  # noqa: AN
             ],
         }
         data = bytearray()
+        headers = {"accept-encoding": "identity"}  # raw bytes only: nothing to inflate in memory
         async with httpx.AsyncClient(transport=transport) as client:
-            async with client.stream("POST", url, json=body, timeout=timeout) as r:
+            async with client.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
                 r.raise_for_status()
-                async for chunk in r.aiter_bytes():
-                    data += chunk
-                    if len(data) > MAX_LLM_BYTES:
+                if r.headers.get("content-encoding", "identity").lower() != "identity":
+                    raise ValueError("LLM answer is compressed")
+                async for chunk in r.aiter_raw():
+                    if len(data) + len(chunk) > MAX_LLM_BYTES:
                         raise ValueError("LLM answer too large")
+                    data += chunk
         return str(json.loads(bytes(data))["choices"][0]["message"]["content"])
 
     return complete
 
 
-async def _stop(task: asyncio.Future) -> None:
-    """Cancel `task` if it still runs and wait until it has ended.
+async def _stop(*tasks: asyncio.Future) -> None:
+    """Cancel the tasks still running, once each, and wait until all have ended.
 
-    The task's own result or error is collected, never raised. A cancellation of the caller is not
-    swallowed: `asyncio.wait` passes it on, and the task has already been told to stop.
+    Their own results and errors are collected, never raised. A cancellation of the caller that
+    arrives meanwhile is held until every task has ended, then raised: cleanup is never cut short.
     """
-    if not task.done():
-        task.cancel()
-        await asyncio.wait({task})
-    _error(task)
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    pending = {t for t in tasks if not t.done()}
+    interrupted = False
+    while pending:
+        try:
+            _, pending = await asyncio.wait(pending)
+        except asyncio.CancelledError:
+            interrupted = True
+    for t in tasks:
+        _error(t)
+    if interrupted:
+        raise asyncio.CancelledError
 
 
 def _error(task: asyncio.Future) -> BaseException | None:
@@ -314,12 +327,12 @@ class Punctuate:
         try:
             await asyncio.wait({work, gone}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            await _stop(work)
-            await _stop(gone)
-        if gone.done() and not gone.cancelled() and gone.exception() is None:
-            return None
-        if work.cancelled():
-            return None
+            await _stop(work, gone)
+        if not gone.cancelled() and gone.exception() is None:
+            return None  # the client is gone
+        if work.cancelled():  # the watcher failed, not the client: answer with Whisper's text
+            logger.warning("punct: disconnect watcher failed: %s", type(gone.exception()).__name__)
+            return "error", body
         return work.result()
 
     async def _punctuate(self, body: bytes) -> tuple[str, bytes]:

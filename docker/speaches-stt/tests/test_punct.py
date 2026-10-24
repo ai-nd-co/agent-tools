@@ -412,7 +412,9 @@ class Hardening(unittest.TestCase):
         ok = b'{"choices":[{"message":{"content":"Hello."}}]}'
 
         def complete_with(answer: bytes):  # noqa: ANN202
-            t = httpx.MockTransport(lambda req: httpx.Response(200, content=answer))
+            t = httpx.MockTransport(
+                lambda req: httpx.Response(200, stream=httpx.ByteStream(answer))
+            )
             return punct.make_complete("http://llm/v1/chat/completions", "m", transport=t)
 
         self.assertEqual(asyncio.run(complete_with(ok)("hello", 10, 5)), "Hello.")
@@ -439,6 +441,50 @@ class Hardening(unittest.TestCase):
         sent = raw_call(punct.Punctuate(whisper_app(verbose(BARE)), slow), script)
         self.assertEqual(sent, [])
         self.assertEqual(cancelled, [True])
+
+    def test_stop_finishes_cleanup_before_passing_on_a_cancel(self) -> None:
+        cleaned = []
+
+        async def child() -> None:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.2)  # slow cleanup
+                cleaned.append(True)
+                raise
+
+        async def go() -> None:
+            c = asyncio.ensure_future(child())
+            await asyncio.sleep(0)
+            stopper = asyncio.ensure_future(punct._stop(c))
+            await asyncio.sleep(0.05)
+            stopper.cancel()  # the caller is cancelled while the child cleans up
+            with self.assertRaises(asyncio.CancelledError):
+                await stopper
+            self.assertTrue(c.done())
+
+        asyncio.run(go())
+        self.assertEqual(cleaned, [True])
+
+    def test_watcher_failure_still_answers(self) -> None:
+        payload = verbose(BARE)
+
+        async def script():  # noqa: ANN202
+            yield {"type": "http.request", "body": b"audio", "more_body": False}
+            raise RuntimeError("receive broke")
+
+        sent = raw_call(punct.Punctuate(whisper_app(payload), Fake(delay=1.0)), script)
+        headers = dict(sent[0]["headers"])
+        self.assertEqual(headers[b"x-gs-punctuated"], b"error")
+        self.assertEqual(sent[1]["body"], json.dumps(payload).encode())
+
+    def test_compressed_llm_answer_is_refused(self) -> None:
+        t = httpx.MockTransport(
+            lambda req: httpx.Response(200, content=b"x", headers={"content-encoding": "gzip"})
+        )
+        complete = punct.make_complete("http://llm/v1/chat/completions", "m", transport=t)
+        with self.assertRaises(ValueError):
+            asyncio.run(complete("hello", 10, 5))
 
 
 if __name__ == "__main__":

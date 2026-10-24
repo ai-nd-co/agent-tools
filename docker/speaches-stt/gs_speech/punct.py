@@ -157,7 +157,7 @@ NUMBER_WORDS = frozenset(
     """zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
     fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty
     ninety hundred hundreds thousand thousands million millions billion billions""".split()
-    + _russian_numbers()
+    + [w.replace("ё", "е") for w in _russian_numbers()]  # compared with ё folded to е
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
 FILLERS = frozenset("uh um er erm ah э ну".split())
@@ -293,7 +293,9 @@ def _key(token: str) -> str:
 
 def _sensitive(token: str) -> bool:
     """A number or a negation, whose change could flip what the note says."""
-    bare = unicodedata.normalize("NFKC", _bare(token)).translate(APOSTROPHES)
+    # Apostrophes first: NFKC splits U+00B4 into a space and a combining accent.
+    bare = _bare(token).translate(APOSTROPHES)
+    bare = unicodedata.normalize("NFKC", bare).translate(APOSTROPHES).replace("ё", "е")
     if any(c.isdigit() for c in token):
         return bare not in DIGIT_NAMES
     return (
@@ -323,14 +325,24 @@ def _dropped_ok(src: list[str], i1: int, i2: int) -> bool:
 
 
 def _moved(sm: difflib.SequenceMatcher, src: list[str], got: list[str]) -> bool:
-    """Whether a token was dropped in one place and added in another: content moved, which can
-    turn "Not ready. Ready now." into "Ready. Not ready now." with every change allowed."""
-    gone, new = set(), set()
+    """Whether a token was dropped in one place and added in another across a number or a
+    negation: content moved over it, which can turn "Not ready. Ready now." into "Ready. Not
+    ready now." with every change allowed. Two separate fixes of one word stay allowed."""
+    gone: dict[str, list[int]] = {}  # key -> source positions it was dropped from
+    new: dict[str, list[int]] = {}  # key -> source positions it was added at
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag != "equal":
-            gone.update(_key(t) for t in src[i1:i2])
-            new.update(_key(t) for t in got[j1:j2])
-    return bool(gone & new)
+            for i in range(i1, i2):
+                gone.setdefault(_key(src[i]), []).append(i)
+            for t in got[j1:j2]:
+                new.setdefault(_key(t), []).append(i1)
+    for key, places in gone.items():
+        for i in places:
+            for j in new.get(key, []):
+                lo, hi = sorted((i, j))
+                if any(_sensitive(t) for t in src[lo : hi + 1]):
+                    return True
+    return False
 
 
 def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:

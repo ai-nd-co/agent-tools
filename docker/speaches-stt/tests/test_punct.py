@@ -764,6 +764,8 @@ class Correction(unittest.TestCase):
             ("нет не надо деплоить", "Надо деплоить.", "negation"),
             # Codex round 4: Unicode apostrophe and hyphen, Russian cases, a moved negation
             ("we can\u02bct deploy", "We can deploy.", "negation"),
+            ("we can\u00b4t deploy", "We can deploy.", "negation"),  # Codex round 5
+            ("дай трёмстам людям", "Дай всем людям.", "number"),  # Codex round 5
             ("pay twenty\u2011five now", "Pay thirty\u2011five now.", "number"),
             ("с шестью узлами", "С семью узлами.", "number"),
             ("дай двумстам людям", "Дай трёмстам людям.", "number"),
@@ -781,6 +783,23 @@ class Correction(unittest.TestCase):
                 self.assertIn(reason.split()[0], why, (src, got))
             else:
                 self.assertTrue(ok, (src, got))
+
+    def test_every_apostrophe_and_number_form_is_protected(self) -> None:  # Codex round 5
+        for mark in "'\u2018\u2019\u02bc\u02b9\u00b4\u0060\u2032\uff07":
+            src = f"we can{mark}t deploy".split()
+            self.assertEqual(
+                punct.is_correction(src, "We can deploy.".split())[3], "number or negation", mark
+            )
+        for word in punct._russian_numbers() + [
+            w.replace("ё", "е") for w in punct._russian_numbers()
+        ]:
+            src = ["дай", word, "людям"]
+            self.assertFalse(punct.is_correction(src, ["Дай", "всем", "людям."])[0], word)
+
+    def test_separate_fixes_of_one_word_are_no_move(self) -> None:  # Codex round 5
+        src = "ask cloud to check the clod service".split()
+        got = "Ask Claude to check the cloud service.".split()
+        self.assertEqual(punct.is_correction(src, got)[3], "")
 
     def test_leading_decimal_point_is_a_number_change(self) -> None:  # Codex round 4
         payload = {"text": "pay .5 dollars now"}

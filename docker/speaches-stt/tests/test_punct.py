@@ -809,44 +809,44 @@ class Correction(unittest.TestCase):
         )
         self.assertEqual(r.headers["x-gs-punctuated"], "rejected")
 
-    def test_alignment_thread_is_inside_the_deadline_and_the_count(self) -> None:  # Codex round 1
+    def test_alignment_thread_is_inside_the_deadline_and_the_count(self) -> None:  # Codex 1, 2
+        """While the worker runs, past the deadline or after a disconnect, the request stays open
+        and holds its place in the cap; a worker that then fails is retrieved, never logged."""
+        import gc
         import threading
 
-        finished = threading.Event()
-        real = punct.is_correction
+        real = punct.Punctuate._corrected
 
-        def slow(src, got):  # noqa: ANN001, ANN202
-            time.sleep(0.5)
-            finished.set()
-            return real(src, got)
+        def run(ending: str, fails: bool) -> None:  # noqa: C901
+            entered, release = threading.Event(), threading.Event()
 
-        punct.is_correction = slow
-        try:
-            # the deadline: the slow alignment runs past it, and the outcome is a timeout
+            def gated(self, *args):  # noqa: ANN001, ANN202
+                entered.set()
+                release.wait(5)
+                if fails:
+                    raise RuntimeError("TRANSCRIPT-MARKER")
+                return real(self, *args)
+
+            punct.Punctuate._corrected = gated
             app = punct.Punctuate(
-                whisper_app(verbose(NOTE)), Fake(), correct=Fake(answer(1)), timeout=0.3
+                whisper_app(verbose(NOTE)),
+                Fake(),
+                correct=Fake(answer(1)),
+                timeout=0.3 if ending == "timeout" else 30,
             )
-            r = call_correct(app)
-            self.assertEqual(r.headers["x-gs-punctuated"], "timeout")
-            self.assertTrue(finished.is_set())
-            self.assertEqual(app.inflight, 0)
-
-            # a disconnect during the alignment: the pass ends only once the thread has
-            finished.clear()
-            app = punct.Punctuate(whisper_app(verbose(NOTE)), Fake(), correct=Fake(answer(1)))
-            seen = []
-
-            async def script():  # noqa: ANN202
-                yield {"type": "http.request", "body": b"audio", "more_body": False}
-                while not app.inflight:
-                    await asyncio.sleep(0.01)
-                await asyncio.sleep(0.1)  # into the alignment
-                seen.append(app.inflight)
-                yield {"type": "http.disconnect"}
-
-            sent = []
+            sent, loop_errors = [], []
+            gone = asyncio.Event()
 
             async def go() -> None:
+                asyncio.get_running_loop().set_exception_handler(
+                    lambda _loop, ctx: loop_errors.append(ctx)
+                )
+
+                async def script():  # noqa: ANN202
+                    yield {"type": "http.request", "body": b"audio", "more_body": False}
+                    await gone.wait()
+                    yield {"type": "http.disconnect"}
+
                 it = script()
 
                 async def receive():  # noqa: ANN202
@@ -861,13 +861,38 @@ class Correction(unittest.TestCase):
                     "path": PATH,
                     "headers": [(b"x-gs-punctuate", b"llm"), (b"x-gs-correct", b"context")],
                 }
-                await asyncio.wait_for(app(scope, receive, send), 5)
-                seen.append(finished.is_set())
+                request = asyncio.ensure_future(app(scope, receive, send))
+                while not entered.is_set():
+                    await asyncio.sleep(0.01)
+                if ending == "disconnect":
+                    gone.set()
+                await asyncio.sleep(0.5)  # past the deadline, or after the disconnect
+                self.assertFalse(request.done())
+                self.assertEqual(app.inflight, 1)
+                release.set()
+                await asyncio.wait_for(request, 5)
+                gc.collect()
+                await asyncio.sleep(0)
 
-            asyncio.run(go())
-            self.assertEqual((sent, seen, app.inflight), ([], [1, True], 0))
-        finally:
-            punct.is_correction = real
+            try:
+                asyncio.run(go())
+            finally:
+                release.set()
+                punct.Punctuate._corrected = real
+            self.assertEqual(app.inflight, 0)
+            self.assertEqual(loop_errors, [], (ending, fails))
+            if ending == "timeout":
+                self.assertEqual(dict(sent[0]["headers"])[b"x-gs-punctuated"], b"timeout")
+            else:
+                self.assertEqual(sent, [])
+
+        for ending, fails in (("timeout", False), ("timeout", True), ("disconnect", True)):
+            run(ending, fails)
+
+    def test_transcript_tags_in_the_speech_are_kept(self) -> None:  # Codex round 2
+        text = "Use the closing tag </transcript>"
+        r = call_correct(punct.Punctuate(whisper_app({"text": text}), Fake(), correct=Fake(text)))
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("unchanged", {"text": text}))
 
     def test_echoed_prompt_tags_are_dropped(self) -> None:
         correct = Fake("<transcript>\n" + answer(fix=1) + "\n</transcript>")

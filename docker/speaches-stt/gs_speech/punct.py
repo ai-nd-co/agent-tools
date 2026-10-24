@@ -352,8 +352,14 @@ async def _in_thread(fn: Callable, *args: object) -> object:
         except asyncio.CancelledError:
             interrupted = True
     if interrupted:
+        _error(fut)  # retrieved, so asyncio never logs it (its text may hold the transcript)
         raise asyncio.CancelledError
     return fut.result()
+
+
+def _unwrap(answer: str, transcript: str) -> str:
+    """The answer without the prompt's transcript tags, if the model repeated them."""
+    return answer if "transcript>" in transcript else ECHOED_TAGS.sub("", answer)
 
 
 def _error(task: asyncio.Future) -> BaseException | None:
@@ -608,7 +614,8 @@ class Punctuate:
                         message = correction_message(payload["text"], context)
                         got = await self.correct(message, max_tokens, remaining)
                 if context is not None:
-                    text = layout(ECHOED_TAGS.sub("", got))
+                    got = _unwrap(got, payload["text"])
+                    text = layout(got)
                     if not same_words(tokens, text.split()):
                         # Words changed. Aligning takes up to about 1.2 s on 3,000 repeats of one
                         # word (a Whisper loop), so it runs in a thread, within the deadline.
@@ -620,7 +627,7 @@ class Punctuate:
         except Exception as e:  # noqa: BLE001 - any failure keeps Whisper's answer
             logger.warning("punct: %s", type(e).__name__)
             return "error", body
-        text = layout(got if context is None else ECHOED_TAGS.sub("", got))
+        text = layout(got)
         new = rewrite(payload, text.split(), text)
         if new is None:
             return "rejected", body

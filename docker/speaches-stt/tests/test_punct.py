@@ -129,7 +129,7 @@ class Wrapper(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.headers["x-gs-punctuated"], "applied")
         self.assertEqual(int(r.headers["content-length"]), len(r.content))
-        self.assertEqual(r.json()["text"], " " + " ".join(PUNCT_TOKENS))
+        self.assertEqual(r.json()["text"], " ".join(PUNCT_TOKENS))
         self.assertEqual(fake.calls[0][0], " " + BARE)
         self.assertGreaterEqual(fake.calls[0][1], 50)
 
@@ -485,6 +485,61 @@ class Hardening(unittest.TestCase):
         complete = punct.make_complete("http://llm/v1/chat/completions", "m", transport=t)
         with self.assertRaises(ValueError):
             asyncio.run(complete("hello", 10, 5))
+
+
+LONG_PUNCTUATED = " ".join(
+    f"Sentence number {i} is here." for i in range(20)
+)  # 100 words, punctuated
+
+
+class Paragraphs(unittest.TestCase):
+    def test_layout(self) -> None:
+        self.assertEqual(punct.layout("  a b.\n\n\n c  d.\n e. \n\n"), "a b.\n\nc d. e.")
+        self.assertEqual(punct.layout("one line only."), "one line only.")
+
+    def test_rewrite_takes_the_layout_for_text_only(self) -> None:
+        p = verbose(BARE)
+        text = " ".join(PUNCT_TOKENS[:25]) + "\n\n" + " ".join(PUNCT_TOKENS[25:])
+        out = punct.rewrite(p, text.split(), text)
+        self.assertEqual(out["text"], text)
+        self.assertNotIn("\n", "".join(s["text"] for s in out["segments"]))
+        self.assertEqual(" ".join(s["text"].strip() for s in out["segments"]).split(), text.split())
+        self.assertIsNone(punct.rewrite(p, PUNCT_TOKENS, "something else entirely"))
+
+    def test_paragraphs_applied_through_the_wrapper(self) -> None:
+        answer = " ".join(PUNCT_TOKENS[:30]) + "\n\n" + " ".join(PUNCT_TOKENS[30:])
+        r = call(punct.Punctuate(whisper_app(verbose(BARE)), Fake(answer)))
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+        self.assertEqual(r.json()["text"], answer)
+
+    def test_long_punctuated_text_gets_paragraphs(self) -> None:
+        tokens = LONG_PUNCTUATED.split()
+        answer = " ".join(tokens[:50]) + "\n\n" + " ".join(tokens[50:])
+        fake = Fake(answer)
+        r = call(punct.Punctuate(whisper_app({"text": LONG_PUNCTUATED}), fake))
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()["text"]), ("applied", answer))
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_long_punctuated_text_unchanged_when_no_breaks(self) -> None:
+        r = call(punct.Punctuate(whisper_app({"text": LONG_PUNCTUATED}), Fake(LONG_PUNCTUATED)))
+        self.assertEqual(
+            (r.headers["x-gs-punctuated"], r.json()), ("unchanged", {"text": LONG_PUNCTUATED})
+        )
+
+    def test_paragraph_trigger_can_be_off(self) -> None:
+        fake = Fake()
+        app = punct.Punctuate(whisper_app({"text": LONG_PUNCTUATED}), fake, paragraph_min_words=0)
+        r = call(app)
+        self.assertEqual(r.headers["x-gs-punctuated"], "skipped")
+        self.assertEqual(fake.calls, [])
+
+    def test_a_changed_word_with_paragraphs_is_refused(self) -> None:
+        tokens = LONG_PUNCTUATED.split()
+        answer = " ".join(tokens[:50]) + "\n\nCHANGED " + " ".join(tokens[51:])
+        r = call(punct.Punctuate(whisper_app({"text": LONG_PUNCTUATED}), Fake(answer)))
+        self.assertEqual(
+            (r.headers["x-gs-punctuated"], r.json()), ("rejected", {"text": LONG_PUNCTUATED})
+        )
 
 
 if __name__ == "__main__":

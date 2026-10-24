@@ -541,6 +541,36 @@ class Paragraphs(unittest.TestCase):
             (r.headers["x-gs-punctuated"], r.json()), ("rejected", {"text": LONG_PUNCTUATED})
         )
 
+    def test_trigger_boundary_at_80_words(self) -> None:
+        for n, want in ((79, "skipped"), (80, "unchanged")):
+            text = " ".join(["Word."] * n)
+            r = call(punct.Punctuate(whisper_app({"text": text}), Fake(text)))
+            self.assertEqual(r.headers["x-gs-punctuated"], want, n)
+
+    def test_layout_keeps_tokens_across_unicode_whitespace(self) -> None:
+        for answer in ("a\r\n\r\nb c", "a\u00a0b\n\nc", "a\fb\u2029c", "a\t\tb\n \n c"):
+            self.assertEqual(punct.layout(answer).split(), answer.split(), repr(answer))
+        self.assertEqual(punct.layout("a\r\n\r\nb"), "a\n\nb")
+
+    def test_text_that_differs_from_the_tokens_is_refused(self) -> None:
+        p = verbose(BARE)
+        other = " ".join(t.rstrip(".,") for t in PUNCT_TOKENS)  # same words, other marks
+        self.assertIsNone(punct.rewrite(p, PUNCT_TOKENS, other))
+
+    def test_same_layout_is_unchanged_and_removed_breaks_are_applied(self) -> None:
+        text = LONG_PUNCTUATED.replace(
+            "is here. Sentence number 10", "is here.\n\nSentence number 10"
+        )
+        r = call(punct.Punctuate(whisper_app({"text": text}), Fake(text)))
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("unchanged", {"text": text}))
+        r = call(punct.Punctuate(whisper_app({"text": text}), Fake(" ".join(text.split()))))
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+
+    def test_budget_counts_characters(self) -> None:
+        fake = Fake("Привет.")
+        call(punct.Punctuate(whisper_app({"text": "привет " * 100}), fake))
+        self.assertEqual(fake.calls[0][1], 350 + 64)
+
 
 if __name__ == "__main__":
     unittest.main()

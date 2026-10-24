@@ -406,7 +406,10 @@ class Punctuate:
                 async with self._lock:
                     holding = True
                     remaining = max(1.0, self.timeout - (time.perf_counter() - begin))
-                    max_tokens = math.ceil(len(tokens) * 1.4 * 1.3) + 48  # + paragraph breaks
+                    # Budget from characters, not words: a Cyrillic word costs several tokens.
+                    # Half the characters is at least 1.3x the input's tokens for English and
+                    # Russian, with room for marks and breaks; a cut-short answer is refused anyway.
+                    max_tokens = math.ceil(len(payload["text"]) / 2) + 64
                     got = await self.complete(payload["text"], max_tokens, remaining)
         except TimeoutError:
             return ("timeout" if holding else "busy"), body
@@ -417,7 +420,7 @@ class Punctuate:
         new = rewrite(payload, text.split(), text)
         if new is None:
             return "rejected", body
-        if text.split() == tokens and "\n" not in text:
+        if text == layout(payload["text"]):
             return "unchanged", body
         return "applied", json.dumps(new, ensure_ascii=False).encode()
 

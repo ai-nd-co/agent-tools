@@ -407,8 +407,8 @@ class Punctuate:
                     holding = True
                     remaining = max(1.0, self.timeout - (time.perf_counter() - begin))
                     # Budget from characters, not words: a Cyrillic word costs several tokens.
-                    # Half the characters is at least 1.3x the input's tokens for English and
-                    # Russian, with room for marks and breaks; a cut-short answer is refused anyway.
+                    # Half the characters is a heuristic with room for marks and breaks (it worked
+                    # on the 12 test notes, Russian included); a cut-short answer is refused anyway.
                     max_tokens = math.ceil(len(payload["text"]) / 2) + 64
                     got = await self.complete(payload["text"], max_tokens, remaining)
         except TimeoutError:

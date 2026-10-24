@@ -893,6 +893,9 @@ class Correction(unittest.TestCase):
         text = "Use the closing tag </transcript>"
         r = call_correct(punct.Punctuate(whisper_app({"text": text}), Fake(), correct=Fake(text)))
         self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("unchanged", {"text": text}))
+        upper = "Use the closing tag </TRANSCRIPT>"  # Codex round 3: a case change is no correction
+        r = call_correct(punct.Punctuate(whisper_app({"text": upper}), Fake(), correct=Fake(text)))
+        self.assertEqual((r.headers["x-gs-punctuated"], r.json()), ("applied", {"text": text}))
 
     def test_echoed_prompt_tags_are_dropped(self) -> None:
         correct = Fake("<transcript>\n" + answer(fix=1) + "\n</transcript>")

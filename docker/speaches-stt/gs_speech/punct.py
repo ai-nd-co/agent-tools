@@ -359,7 +359,7 @@ async def _in_thread(fn: Callable, *args: object) -> object:
 
 def _unwrap(answer: str, transcript: str) -> str:
     """The answer without the prompt's transcript tags, if the model repeated them."""
-    return answer if "transcript>" in transcript else ECHOED_TAGS.sub("", answer)
+    return answer if "transcript>" in transcript.lower() else ECHOED_TAGS.sub("", answer)
 
 
 def _error(task: asyncio.Future) -> BaseException | None:

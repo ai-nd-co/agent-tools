@@ -27,13 +27,17 @@ model also to fix misheard words, names above all, using the chat's recent messa
 when longer only its end is kept, and it is never logged). The pass then runs on any transcript of
 at least GS_PUNCT_CORRECT_MIN_WORDS (3) words. The word guard is replaced by a looser one against
 rewriting: the answer is aligned with the transcript (difflib on lower-case tokens without edge
-punctuation), and at most max(2, 10%) of the transcript's tokens may be dropped and as many added,
-and the answer must keep at least half as many tokens. A correction replaces only the top-level
+punctuation; tokens with a digit keep everything but sentence marks), and at most max(2, 10%) of
+the transcript's tokens may be dropped and as many added, and the answer must keep at least half
+as many tokens. A correction replaces only the top-level
 `text` (`X-GS-Punctuated: corrected`); segments and words stay as Whisper wrote them, since their
 timings belong to Whisper's words. An answer that changed no word is used as in the normal pass
-(applied or unchanged). A refused answer falls back, without a second call, to its punctuation on
-the words it kept unchanged, if it kept at least half of them (applied); otherwise the original
-answer is sent (rejected). The log line has counts only.
+(applied or unchanged). It also refuses any change to a number (digits compared exactly, so a sign,
+currency or percent counts) or to a negation, an insertion of more than one token, a deletion of
+anything but a repeat or a filler, and a replacement of more than 2 tokens on either side. It does
+not police person names: a context can make the model swap one name for another. A refused answer
+sends the original (rejected); its punctuation is not reused, as it can put a stop mid-sentence.
+The log line has counts and the refusal's kind only.
 
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
@@ -103,11 +107,34 @@ SYSTEM_CORRECT = (
 # The guard against rewriting. On the same notes the corrections changed at most 5.8% of the tokens
 # of a note of 50+ words (2 of a 16-word note); prompts asking to clean up, paraphrase or summarise
 # changed 11.8-100% (33 of 36 answers; the other 3 changed 1 token of a 14-word note). Short notes
-# may change 2 tokens, as one name can be two words ("cloud code").
+# may change 2 tokens, as one name can be two words ("cloud code"). On top of the share: no number
+# or negation may change, an insertion is one token at most, a deletion only drops a repeat or a
+# filler, and one replacement spans at most MAX_REPLACE tokens on either side. Person names are not
+# policed: the owner chose free correction, and a context can talk the model into another name.
 CORRECT_MAX_SHARE = 0.10
 CORRECT_MIN_ALLOWED = 2
 CORRECT_MIN_COUNT_RATIO = 0.5
-FALLBACK_MIN_KEPT = 0.5  # below this the answer is another text, and its marks land on stray words
+# Words that may flip a note's meaning: a correction that drops, adds or replaces one is refused
+# (the LLM turned "fifteen" into "fifty" and "don't deploy" into "deploy" when the context said so).
+NUMBER_WORDS = frozenset(
+    """zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
+    fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty
+    ninety hundred hundreds thousand thousands million millions billion billions
+    ноль нуль нуля один одна одно одного одной одному одним одну два две двух двум двумя три трёх
+    трех трём трем тремя четыре четырёх четырех четырём четырем четырьмя пять пяти пятью шесть
+    шести семь семи восемь восьми девять девяти десять десяти одиннадцать одиннадцати двенадцать
+    двенадцати тринадцать тринадцати четырнадцать четырнадцати пятнадцать пятнадцати шестнадцать
+    шестнадцати семнадцать семнадцати восемнадцать восемнадцати девятнадцать девятнадцати
+    двадцать двадцати тридцать тридцати сорок сорока пятьдесят пятидесяти шестьдесят шестидесяти
+    семьдесят семидесяти восемьдесят восьмидесяти девяносто девяноста сто ста двести двухсот
+    триста трёхсот трехсот четыреста четырёхсот пятьсот пятисот шестьсот семьсот восемьсот
+    девятьсот тысяча тысячи тысяч тысячу тысячей миллион миллиона миллионов миллиард миллиарда
+    миллиардов""".split()
+)
+NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
+FILLERS = frozenset("uh um er erm ah э ну".split())
+DIGIT_NAMES = frozenset({"k3s"})  # names in SYSTEM_CORRECT with a digit: a fix to one is no number
+MAX_REPLACE = 2  # tokens on either side of one replacement ("cloud code" -> "Claude Code")
 ECHOED_TAGS = re.compile(r"\A\s*<transcript>|</transcript>\s*\Z")  # if the model repeats them
 
 Complete = Callable[[str, int, float], Awaitable[str]]
@@ -228,61 +255,65 @@ def _bare(token: str) -> str:
     return token[i:j].lower()
 
 
-def kept_count(src: list[str], got: list[str], key: Callable[[str], str]) -> int:
-    """How many tokens of `src` appear in `got` in the same order (difflib's matching blocks)."""
-    sm = difflib.SequenceMatcher(None, [key(t) for t in src], [key(t) for t in got], autojunk=False)
-    return sum(m.size for m in sm.get_matching_blocks())
+def _key(token: str) -> str:
+    """What a token is compared by: with a digit, its core, so a sign, currency or % counts."""
+    return core(token) if any(c.isdigit() for c in token) else _bare(token)
 
 
-def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int]:
-    """Whether `got` corrects `src` rather than rewriting it; also tokens dropped and added.
+def _sensitive(token: str) -> bool:
+    """A number or a negation, whose change could flip what the note says."""
+    bare = _bare(token).replace("\u2019", "'")
+    if any(c.isdigit() for c in token):
+        return bare not in DIGIT_NAMES
+    return (
+        bare in NEGATIONS
+        or bare.endswith("n't")
+        or any(part in NUMBER_WORDS for part in bare.split("-"))
+    )
+
+
+def _dropped_ok(src: list[str], i1: int, i2: int) -> bool:
+    """Whether src[i1:i2] may be dropped: fillers, or a repeat of the words just before or after."""
+    run = [_bare(t) for t in src[i1:i2]]
+    k = len(run)
+    if all(t in FILLERS for t in run):
+        return True
+    before = [_bare(t) for t in src[max(0, i1 - k) : i1]]
+    after = [_bare(t) for t in src[i2 : i2 + k]]
+    return run in (before, after)
+
+
+def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
+    """Whether `got` corrects `src` rather than rewriting it; tokens dropped and added; and the
+    reason for a refusal ("" when accepted).
 
     Lengths that cannot pass are refused before the alignment, whose cost grows with both; the
     counts are then the length difference only.
     """
     allowed = max(CORRECT_MIN_ALLOWED, int(len(src) * CORRECT_MAX_SHARE))
     if len(got) > len(src) + allowed or len(got) < len(src) * CORRECT_MIN_COUNT_RATIO:
-        return False, max(0, len(src) - len(got)), max(0, len(got) - len(src))
-    kept = kept_count(src, got, _bare)
-    dropped, added = len(src) - kept, len(got) - kept
-    return dropped <= allowed and added <= allowed, dropped, added
-
-
-def fallback(src: list[str], answer: str) -> str | None:
-    """A refused correction's marks, case and breaks on the words it kept; Whisper's elsewhere.
-
-    The result has exactly the transcript's words, so it goes through the normal guard. None when
-    the answer kept fewer than FALLBACK_MIN_KEPT of them, or has over twice as many tokens (which
-    also bounds the alignment's cost).
-    """
-    paragraphs = [p.split() for p in layout(answer).split("\n\n") if p]
-    got = [t for p in paragraphs for t in p]
-    if len(got) > 2 * len(src):
-        return None
-    starts, i = set(), 0
-    for p in paragraphs[:-1]:  # where the 2nd and later paragraphs start; never before the first
-        i += len(p)
-        starts.add(i)
+        return False, max(0, len(src) - len(got)), max(0, len(got) - len(src)), "length"
     sm = difflib.SequenceMatcher(
-        None, [core(t) for t in src], [core(t) for t in got], autojunk=False
+        None, [_key(t) for t in src], [_key(t) for t in got], autojunk=False
     )
-    out, breaks, kept = list(src), set(), 0
-    for a, b, size in sm.get_matching_blocks():
-        kept += size
-        for k in range(size):
-            out[a + k] = got[b + k]
-            if b + k in starts and a + k > 0:
-                breaks.add(a + k)
-    if kept < len(src) * FALLBACK_MIN_KEPT:
-        return None
-    lines, cur = [], []
-    for k, t in enumerate(out):
-        if k in breaks:
-            lines.append(" ".join(cur))
-            cur = []
-        cur.append(t)
-    lines.append(" ".join(cur))
-    return "\n\n".join(lines)
+    kept, reason = 0, ""
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            kept += i2 - i1
+        elif reason:
+            continue
+        elif any(_sensitive(t) for t in src[i1:i2] + got[j1:j2]):
+            reason = "number or negation"
+        elif tag == "insert" and j2 - j1 > 1:
+            reason = "insertion"
+        elif tag == "delete" and not _dropped_ok(src, i1, i2):
+            reason = "deletion"
+        elif tag == "replace" and max(i2 - i1, j2 - j1) > MAX_REPLACE:
+            reason = "replacement"
+    dropped, added = len(src) - kept, len(got) - kept
+    if not reason and (dropped > allowed or added > allowed):
+        reason = "share"
+    return not reason, dropped, added, reason
 
 
 MAX_LLM_BYTES = 1024 * 1024  # an answer of max_tokens is far smaller; anything bigger is refused
@@ -639,10 +670,10 @@ class Punctuate:
         self, payload: dict, tokens: list[str], body: bytes, text: str, with_context: bool
     ) -> tuple[str, bytes]:
         """A correction that changed words: the new top-level text, or the fallback if refused."""
-        ok, dropped, added = is_correction(tokens, text.split())
+        ok, dropped, added, reason = is_correction(tokens, text.split())
         logger.info(
             "punct: correction %s, %d words, %d dropped, %d added, count ratio %.2f, context %s",
-            "accepted" if ok else "refused",
+            "accepted" if ok else f"refused ({reason})",
             len(tokens),
             dropped,
             added,
@@ -651,11 +682,7 @@ class Punctuate:
         )
         if ok:
             return "corrected", json.dumps({**payload, "text": text}, ensure_ascii=False).encode()
-        punctuated = fallback(tokens, text)
-        new = None if punctuated is None else rewrite(payload, punctuated.split(), punctuated)
-        if new is None or punctuated == layout(payload["text"]):
-            return "rejected", body
-        return "applied", json.dumps(new, ensure_ascii=False).encode()
+        return "rejected", body
 
 
 async def _send_error(send, status: int, detail: bytes) -> None:  # noqa: ANN001

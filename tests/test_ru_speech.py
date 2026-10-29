@@ -26,6 +26,8 @@ def _unsayable(spoken: str) -> list[str]:
         if _UNSAYABLE.match(character)
         or unicodedata.decimal(character, None) is not None
         or "LATIN" in unicodedata.name(character, "")
+        or unicodedata.normalize("NFKC", character).isascii()
+        and unicodedata.normalize("NFKC", character).isalnum()
     ]
 
 
@@ -60,12 +62,25 @@ def test_mixed_russian_message_reads_every_latin_word() -> None:
         ("Привет, мир.", "Привет, мир."),
         ("10-20 минут", "десять-двадцать минут"),
         ("код C# и F#", "код си шарп и эф шарп"),
-        ("https://x.io/view?id=41#top", "экс точка ио слэш вью ай-ди сорок один"),
+        ("https://x.io/view?id=41#top", "экс точка ио слэш вью ай-ди сорок один топ"),
         ("Œuvre ４１", "оеувр сорок один"),
+        ("PR#41 готов", "пи-ар номер сорок один готов"),
+        ("https://x.io/view#top", "экс точка ио слэш вью топ"),
+        ("Код ꜰʀ готов.", "Код эф-ар готов."),
+        ("𝘊𝘐 и м² и H₂O", "си-ай и м два и эйч два оу"),
+        ("№ 5", "номер пять"),
     ],
 )
 def test_rewrite_examples(text: str, expected: str) -> None:
     assert speakable_russian_text(text) == expected
+
+
+def test_url_fragment_routes_keep_their_identifier() -> None:
+    first = speakable_russian_text("https://app.example/#/tickets/41")
+    second = speakable_russian_text("https://app.example/#/tickets/42")
+
+    assert first != second
+    assert first.endswith("сорок один")
 
 
 @pytest.mark.parametrize(
@@ -77,7 +92,7 @@ def test_rewrite_examples(text: str, expected: str) -> None:
         "camelCaseIdentifier snake_case_name kebab-case-name dotted.module.path v2.5.1-rc1",
         "ÀÉÎÕÜ ßtraße Œuvre",
         "13 карт, 9999999999999 и 123456789012",
-        "Œ Ø ẞ Æ Ł Þ ŋ ＡＢＣ ４１ ٤٢ ꜰ ʀ",
+        "Œ Ø ẞ Æ Ł Þ ŋ ＡＢＣ ４１ ٤٢ ꜰ ʀ 𝘊𝘐 ² ₂ ﬁ",
     ],
 )
 def test_no_latin_letter_or_digit_survives(text: str) -> None:
@@ -90,6 +105,7 @@ def test_no_latin_letter_or_digit_survives(text: str) -> None:
 def test_a_long_token_without_an_at_sign_stays_linear() -> None:
     started = time.perf_counter()
     speakable_russian_text("a" * 100_000 + " и " + "1" * 50_000)
+    speakable_russian_text("https://x.io/" + "." * 100_000)
 
     assert time.perf_counter() - started < 5.0
 

@@ -135,12 +135,12 @@ _LATIN = re.compile(r"[A-Za-z]")
 
 def speakable_russian_text(text: str) -> str:
     """Rewrite Latin words, digits and symbols in ``text`` into a Cyrillic reading."""
-    text = _fold_foreign_characters(text)
-    text = re.sub(r"(?<=[A-Za-z])#", " шарп", text)
-    text = re.sub(r"#\s*(?=\d)", " номер ", text)
+    text = _fold_foreign_characters(text.replace("№", " номер "))
     text = _URL.sub(lambda match: _speak_url(match.group(0)), text)
     text = _EMAIL.sub(lambda match: _speak_email(match.group(0)), text)
-    text = _TOKEN.sub(lambda match: _speak_token(match.group(0)), text)
+    text = re.sub(r"#\s*(?=\d)", " номер ", text)
+    text = re.sub(r"(?<=[A-Za-z])#(?![\w/])", " шарп", text)
+    text = _TOKEN.sub(_speak_token_apart, text)
     text = text.replace("%", " процентов").replace("&", " и ").replace("+", " плюс ")
     text = text.replace("@", " эт ")
     # Unreachable by construction; a guard so no Latin letter can ever reach Silero.
@@ -150,7 +150,7 @@ def speakable_russian_text(text: str) -> str:
 
 
 def _fold_foreign_characters(text: str) -> str:
-    """Fold non-ASCII Latin letters and digits to ASCII; drop Latin letters that cannot."""
+    """Fold accented, fullwidth, styled and superscript Latin letters and digits to ASCII."""
     folded: list[str] = []
     for character in text:
         if character.isascii():
@@ -160,7 +160,12 @@ def _fold_foreign_characters(text: str) -> str:
         if digit is not None:
             folded.append(str(digit))
             continue
-        if "LATIN" not in unicodedata.name(character, ""):
+        compatible = unicodedata.normalize("NFKC", character)
+        if compatible != character and compatible.isascii() and compatible.isalnum():
+            folded.append(compatible)
+            continue
+        name = unicodedata.name(character, "")
+        if "LATIN" not in name:
             folded.append(character)
             continue
         base = "".join(
@@ -170,18 +175,19 @@ def _fold_foreign_characters(text: str) -> str:
         )
         if base.isascii() and base.isalpha():
             folded.append(base)
+        elif character.lower() in _LATIN_SPECIALS:
+            folded.append(_LATIN_SPECIALS[character.lower()])
         else:
-            folded.append(_LATIN_SPECIALS.get(character.lower(), ""))
+            # "LATIN LETTER SMALL CAPITAL F" and the like: the letter is the name's last word.
+            letter = re.search(r"(?:LETTER|LIGATURE)(?: SMALL| CAPITAL)* ([A-Z]{1,2})$", name)
+            folded.append(letter.group(1) if letter else "")
     return "".join(folded)
 
 
 def _speak_url(url: str) -> str:
-    trailing = ""
-    while url and url[-1] in ".,;:!?":
-        trailing = url[-1] + trailing
-        url = url[:-1]
-    url = re.sub(r"^https?://", "", url, flags=re.IGNORECASE)
-    url = url.split("#", 1)[0].rstrip("/?")
+    stripped = url.rstrip(".,;:!?")
+    trailing = url[len(stripped):]
+    url = re.sub(r"^https?://", "", stripped, flags=re.IGNORECASE).rstrip("/?#")
     spoken = url.replace("/", " слэш ")
     return _speak_separated(spoken) + trailing
 
@@ -193,8 +199,16 @@ def _speak_email(address: str) -> str:
 
 def _speak_separated(text: str) -> str:
     text = re.sub(r"(?<=\w)\.(?=\w)", " точка ", text)
-    text = re.sub(r"[_=&:~?]", " ", text)
+    text = re.sub(r"[_=&:~?#]", " ", text)
     return _TOKEN.sub(lambda match: _speak_token(match.group(0)), text)
+
+
+def _speak_token_apart(match: re.Match[str]) -> str:
+    """Speak a token, kept apart from a Cyrillic letter it touches ("м2" -> "м два")."""
+    source = match.string
+    before = " " if match.start() > 0 and source[match.start() - 1].isalpha() else ""
+    after = " " if match.end() < len(source) and source[match.end()].isalpha() else ""
+    return before + _speak_token(match.group(0)) + after
 
 
 def _speak_token(token: str) -> str:

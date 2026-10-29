@@ -143,6 +143,11 @@ def synthesize_wav(
         language=language,
         speed=speed,
     )
+    if options.engine == "silero":
+        # Silero v5_5_ru drops Latin letters and digits without a sound; read them in Cyrillic.
+        from agent_tools.ru_speech import speakable_russian_text
+
+        text = speakable_russian_text(text)
 
     from agent_tools.remote_tts import (
         RemoteTtsError,

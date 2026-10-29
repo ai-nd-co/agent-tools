@@ -28,6 +28,11 @@ Requirements:
 - Present the result as a natural spoken explanation, not as a literal transcript cleanup.
 - Do not add facts that are not supported by the input.
 
+Russian output policy:
+- When the output is in Russian, write every Latin-script word, name, acronym and number in Cyrillic, the way a Russian speaker reads it aloud. The Russian voice cannot pronounce Latin letters or digits and skips them silently.
+- Good examples: "staging" becomes "стейджинг", "Airwallex" becomes "эйрволлекс", "Visa" becomes "виза", "CI" becomes "си-ай", "PR #41" becomes "пи-ар номер сорок один", "k3s" becomes "кей-три-эс".
+- Never apply this policy to English output.
+
 Table policy:
 - If the input contains a table, do not read every cell verbatim.
 - Use the table to explain the comparison, trend, or ranking it is meant to show.

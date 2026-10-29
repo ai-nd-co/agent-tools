@@ -24,7 +24,7 @@ def _unsayable(spoken: str) -> list[str]:
         character
         for character in spoken
         if _UNSAYABLE.match(character)
-        or unicodedata.decimal(character, None) is not None
+        or unicodedata.digit(character, None) is not None
         or "LATIN" in unicodedata.name(character, "")
         or unicodedata.normalize("NFKC", character).isascii()
         and unicodedata.normalize("NFKC", character).isalnum()
@@ -69,6 +69,10 @@ def test_mixed_russian_message_reads_every_latin_word() -> None:
         ("Код ꜰʀ готов.", "Код эф-ар готов."),
         ("𝘊𝘐 и м² и H₂O", "си-ай и м два и эйч два оу"),
         ("№ 5", "номер пять"),
+        ("Код Ƶ готов.", "Код зед готов."),
+        ("Номер ❶ готов.", "Номер один готов."),
+        ("C#/F#", "си шарп/эф шарп"),
+        ("https://пример.рф/заказ41", "пример точка рф слэш заказ сорок один"),
     ],
 )
 def test_rewrite_examples(text: str, expected: str) -> None:
@@ -106,6 +110,7 @@ def test_a_long_token_without_an_at_sign_stays_linear() -> None:
     started = time.perf_counter()
     speakable_russian_text("a" * 100_000 + " и " + "1" * 50_000)
     speakable_russian_text("https://x.io/" + "." * 100_000)
+    speakable_russian_text("Привет" + " " * 100_000 + "мир")
 
     assert time.perf_counter() - started < 5.0
 

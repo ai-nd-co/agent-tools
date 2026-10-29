@@ -131,6 +131,9 @@ _EMAIL = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]++@[A-Za-z0-9-]+(?:\.
 _TOKEN = re.compile(r"[A-Za-z0-9]+(?:[._'’-][A-Za-z0-9]+)*")
 _RUN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 _LATIN = re.compile(r"[A-Za-z]")
+_LATIN_NAME_LETTER = re.compile(
+    r"(?:LETTER|LIGATURE)(?: SMALL| CAPITAL)* ([A-Z]{1,2})(?: WITH .*)?$"
+)
 
 
 def speakable_russian_text(text: str) -> str:
@@ -139,14 +142,14 @@ def speakable_russian_text(text: str) -> str:
     text = _URL.sub(lambda match: _speak_url(match.group(0)), text)
     text = _EMAIL.sub(lambda match: _speak_email(match.group(0)), text)
     text = re.sub(r"#\s*(?=\d)", " номер ", text)
-    text = re.sub(r"(?<=[A-Za-z])#(?![\w/])", " шарп", text)
+    text = re.sub(r"(?<=[A-Za-z])#(?!\w)", " шарп", text)
     text = _TOKEN.sub(_speak_token_apart, text)
     text = text.replace("%", " процентов").replace("&", " и ").replace("+", " плюс ")
     text = text.replace("@", " эт ")
     # Unreachable by construction; a guard so no Latin letter can ever reach Silero.
     text = _LATIN.sub(lambda match: _SINGLE_LETTERS[match.group(0).lower()], text)
-    text = re.sub(r"[ \t]+([,.;:!?])", r"\1", text)
-    return re.sub(r"[ \t]{2,}", " ", text).strip()
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return re.sub(r"[ \t]([,.;:!?])", r"\1", text).strip()
 
 
 def _fold_foreign_characters(text: str) -> str:
@@ -156,7 +159,7 @@ def _fold_foreign_characters(text: str) -> str:
         if character.isascii():
             folded.append(character)
             continue
-        digit = unicodedata.decimal(character, None)
+        digit = unicodedata.digit(character, None)
         if digit is not None:
             folded.append(str(digit))
             continue
@@ -178,8 +181,9 @@ def _fold_foreign_characters(text: str) -> str:
         elif character.lower() in _LATIN_SPECIALS:
             folded.append(_LATIN_SPECIALS[character.lower()])
         else:
-            # "LATIN LETTER SMALL CAPITAL F" and the like: the letter is the name's last word.
-            letter = re.search(r"(?:LETTER|LIGATURE)(?: SMALL| CAPITAL)* ([A-Z]{1,2})$", name)
+            # "LATIN LETTER SMALL CAPITAL F", "LATIN CAPITAL LETTER Z WITH STROKE": the letter
+            # is named after LETTER and its size words.
+            letter = _LATIN_NAME_LETTER.search(name)
             folded.append(letter.group(1) if letter else "")
     return "".join(folded)
 
@@ -200,7 +204,7 @@ def _speak_email(address: str) -> str:
 def _speak_separated(text: str) -> str:
     text = re.sub(r"(?<=\w)\.(?=\w)", " точка ", text)
     text = re.sub(r"[_=&:~?#]", " ", text)
-    return _TOKEN.sub(lambda match: _speak_token(match.group(0)), text)
+    return _TOKEN.sub(_speak_token_apart, text)
 
 
 def _speak_token_apart(match: re.Match[str]) -> str:

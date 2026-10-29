@@ -64,6 +64,7 @@ _LEXICON: dict[str, str] = {
     "typescript": "тайпскрипт",
     "javascript": "джаваскрипт",
     "user": "юзер",
+    "view": "вью",
     "visa": "виза",
     "windows": "виндоус",
     "www": "дабл-ю дабл-ю дабл-ю",
@@ -91,9 +92,14 @@ _GRAPHEMES: tuple[tuple[str, str], ...] = (
     ("sh", "ш"), ("ch", "ч"), ("th", "т"), ("ph", "ф"), ("ck", "к"), ("qu", "кв"),
     ("ee", "и"), ("oo", "у"), ("ea", "и"), ("ai", "ей"), ("ay", "ей"), ("ey", "ей"),
     ("oi", "ой"), ("oy", "ой"), ("ou", "ау"), ("ow", "оу"), ("oa", "оу"), ("au", "о"),
-    ("aw", "о"), ("wh", "у"),
+    ("aw", "о"), ("ew", "ью"), ("wh", "у"),
 )
 
+# Latin letters NFKD cannot reduce to ASCII; keys are lowercase.
+_LATIN_SPECIALS: dict[str, str] = {
+    "ß": "ss", "ẞ": "ss", "œ": "oe", "æ": "ae", "ø": "o", "đ": "d", "ð": "d", "ł": "l",
+    "þ": "th", "ı": "i", "ŋ": "n", "ħ": "h", "ŧ": "t",
+}
 _VOWELS = frozenset("aeiouy")
 _MAGIC_E_VOWELS = {"a": "ей", "i": "ай", "o": "оу", "u": "ю"}
 
@@ -119,7 +125,8 @@ _SCALES = (
 _MAX_SPOKEN_DIGITS = 12
 
 _URL = re.compile(r"(?:https?://|www\.)[^\s<>\"'`)\]]+", re.IGNORECASE)
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+# Starts only at a token start and never backtracks, so a long token without "@" stays linear.
+_EMAIL = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]++@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 # A Latin/digit token, possibly joined by in-word separators (file.py, state-eld, snake_case).
 _TOKEN = re.compile(r"[A-Za-z0-9]+(?:[._'’-][A-Za-z0-9]+)*")
 _RUN = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
@@ -128,7 +135,8 @@ _LATIN = re.compile(r"[A-Za-z]")
 
 def speakable_russian_text(text: str) -> str:
     """Rewrite Latin words, digits and symbols in ``text`` into a Cyrillic reading."""
-    text = _fold_accented_latin(text)
+    text = _fold_foreign_characters(text)
+    text = re.sub(r"(?<=[A-Za-z])#", " шарп", text)
     text = re.sub(r"#\s*(?=\d)", " номер ", text)
     text = _URL.sub(lambda match: _speak_url(match.group(0)), text)
     text = _EMAIL.sub(lambda match: _speak_email(match.group(0)), text)
@@ -141,21 +149,29 @@ def speakable_russian_text(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
-def _fold_accented_latin(text: str) -> str:
+def _fold_foreign_characters(text: str) -> str:
+    """Fold non-ASCII Latin letters and digits to ASCII; drop Latin letters that cannot."""
     folded: list[str] = []
     for character in text:
-        if "À" <= character <= "ɏ":
-            if character in "ßẞ":
-                folded.append("ss")
-                continue
-            base = "".join(
-                part
-                for part in unicodedata.normalize("NFKD", character)
-                if not unicodedata.combining(part)
-            )
-            folded.append(base if base.isascii() else character)
-        else:
+        if character.isascii():
             folded.append(character)
+            continue
+        digit = unicodedata.decimal(character, None)
+        if digit is not None:
+            folded.append(str(digit))
+            continue
+        if "LATIN" not in unicodedata.name(character, ""):
+            folded.append(character)
+            continue
+        base = "".join(
+            part
+            for part in unicodedata.normalize("NFKD", character)
+            if not unicodedata.combining(part)
+        )
+        if base.isascii() and base.isalpha():
+            folded.append(base)
+        else:
+            folded.append(_LATIN_SPECIALS.get(character.lower(), ""))
     return "".join(folded)
 
 
@@ -165,7 +181,7 @@ def _speak_url(url: str) -> str:
         trailing = url[-1] + trailing
         url = url[:-1]
     url = re.sub(r"^https?://", "", url, flags=re.IGNORECASE)
-    url = re.split(r"[?#]", url, maxsplit=1)[0].rstrip("/")
+    url = url.split("#", 1)[0].rstrip("/?")
     spoken = url.replace("/", " слэш ")
     return _speak_separated(spoken) + trailing
 
@@ -177,7 +193,7 @@ def _speak_email(address: str) -> str:
 
 def _speak_separated(text: str) -> str:
     text = re.sub(r"(?<=\w)\.(?=\w)", " точка ", text)
-    text = re.sub(r"[_=&:~]", " ", text)
+    text = re.sub(r"[_=&:~?]", " ", text)
     return _TOKEN.sub(lambda match: _speak_token(match.group(0)), text)
 
 
@@ -187,9 +203,12 @@ def _speak_token(token: str) -> str:
         return lexical
     pieces = re.split(r"([._'’-])", token)
     spoken: list[str] = []
-    for piece in pieces:
+    for index, piece in enumerate(pieces):
         if piece == ".":
             spoken.append(" точка ")
+        elif piece == "-" and pieces[index - 1].isdigit() and pieces[index + 1].isdigit():
+            # A range or a difference ("10-20"): Russian reads it "десять-двадцать".
+            spoken.append("-")
         elif piece in {"_", "-"}:
             spoken.append(" ")
         elif piece in {"'", "’"}:

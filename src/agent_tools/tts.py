@@ -143,6 +143,12 @@ def synthesize_wav(
         language=language,
         speed=speed,
     )
+    spoken_text = text
+    if options.engine == "silero":
+        # Silero v5_5_ru drops Latin letters and digits without a sound; read them in Cyrillic.
+        from agent_tools.ru_speech import speakable_russian_text
+
+        spoken_text = speakable_russian_text(text)
 
     from agent_tools.remote_tts import (
         RemoteTtsError,
@@ -160,8 +166,13 @@ def synthesize_wav(
                 raise RemoteTtsError(
                     "the speech cluster is not configured (no speech.apiKey in the secrets file)"
                 )
+            from agent_tools.tts_server import MAX_TEXT_CHARACTERS
+
+            # The reading can be longer than the server accepts; the original fits wherever it
+            # did before, and a server with this fix rewrites it on its own side.
+            remote_text = spoken_text if len(spoken_text) <= MAX_TEXT_CHARACTERS else text
             return synthesize_remote_wav(
-                text, options=options, settings=settings, explicit_voice=voice
+                remote_text, options=options, settings=settings, explicit_voice=voice
             )
         except RemoteTtsError as exc:
             if effective_backend == "remote":
@@ -170,7 +181,7 @@ def synthesize_wav(
 
     device_resolution = resolve_torch_device(device)
     result = _SYNTHESIS_ENGINES[options.engine].synthesize(
-        text,
+        spoken_text,
         options=options,
         device_resolution=device_resolution,
     )

@@ -165,7 +165,8 @@ class LauncherTest(unittest.TestCase):
 
     def test_install_before_serving(self) -> None:
         try:
-            from gs_speech import ext, serve
+            # langid and punct before the sys.modules patch, so restoring it keeps them in place.
+            from gs_speech import ext, langid, punct, serve  # noqa: F401
         except ImportError as e:  # fastapi/uvicorn: present in the image, so never skipped there
             if IN_IMAGE:
                 raise
@@ -192,6 +193,7 @@ class LauncherTest(unittest.TestCase):
             mock.patch.object(ext, "Admission"),
             mock.patch.object(tts, "install", side_effect=lambda: order.append("tts")),
             mock.patch.object(serve, "bind"),
+            mock.patch.object(serve.uvicorn, "Config"),  # its logging setup is process-wide
             mock.patch.object(serve.uvicorn, "Server", return_value=server),
         ):
             serve.main()
@@ -235,6 +237,7 @@ class RealSpeachesTest(unittest.TestCase):
             ),
         ):
             self.assertTrue(tts.install({}, module=kokoro, ort=ort))
+            self.assertIs(ort.InferenceSession, Recorder)  # install() patched only the module
             kokoro.KokoroModelManager(ttl=-1, ort_opts=OrtOptions())._load_fn("kokoro")
         [sess] = got
         self.assertIsInstance(sess, Recorder)

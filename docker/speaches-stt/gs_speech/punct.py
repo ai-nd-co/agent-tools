@@ -40,11 +40,11 @@ sends the original (rejected); its punctuation is not reused, as it can put a st
 The log line has counts and the refusal's kind only.
 
 Fillers: after the guard, correction mode removes filler words from the top-level `text` in code,
-not by the model ("um", "you know", "like", "ну", "как бы" ...; FILLERS, with NOT_FILLER keeping a
-word where its neighbours give it meaning, as in "I like it", judged past any sound or other
-filler between them, as in "I, uh, like it"). Corrected, applied and unchanged answers lose every
-filler, a rejected one only the hesitation sounds in ALWAYS; segments and words keep them, and the
-outcome header stays as it was. The log line counts the removed tokens.
+not by the model, and only on positive evidence: hesitation sounds ("um", "э"; SOUNDS), and words
+like "like", "you know", "ну" or "как бы" (WORD_FILLERS) only where the text's own punctuation sets
+them off (", you know,"), so "I like it" or "Как бы ты решил?" stay. Corrected, applied and
+unchanged answers lose every filler, a rejected one only SOUNDS; segments and words keep them, and
+the outcome header stays as it was. The log line counts the removed tokens.
 
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
@@ -169,53 +169,27 @@ NUMBER_WORDS = frozenset(
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
 # Fillers, which correction mode removes in code (strip_fillers) and a correction may also drop.
-# Not "so", "well", "just", "actually", "basically", "right", "okay", "просто": in Davron's notes
-# they mostly carry meaning ("so" 38 times in 40 notes, "actually" 16, "right" 15). On those 40
-# notes (the model's accepted answers, 2026-10-30) the strip removed 28 tokens: uh 8, like 6, I mean
-# 4, you know 2, как бы 1, none of them a word with meaning. Before the rule for "like" it also took
-# "like" as "such as", "like three" (about three) and "feeling like".
-FILLERS = tuple(  # longest first, so "как бы" is one filler and not "как" left over
+# Default keep: a word is removed only on positive evidence that it is a filler.
+# SOUNDS are hesitation sounds that are no word, unit or abbreviation, in lower case or with a
+# capital ("Um"); all capitals, or a digit next to it, keeps one. Not "er" (ER), "mm" (5 mm), "ah"
+# or "eh", which can be words.
+SOUNDS = frozenset("uh um uhm umm erm hmm э эм ммм".split())
+# WORD_FILLERS are words with a meaning elsewhere ("I like it", "Как бы ты решил?", "путь короче"),
+# so one is removed only where the text's own punctuation sets it off: with its own comma or
+# ellipsis after it, and at a sentence's start or after a comma; or with a comma before it and the
+# sentence's end after it (", you know."); never "like" before a number ("like, three": about
+# three). Not "so", "well", "just", "actually", "basically", "right", "okay", "просто": in Davron's
+# notes they mostly carry meaning ("so" 38 times in 40 notes).
+WORD_FILLERS = tuple(  # longest first
     sorted(
-        {
-            tuple(p.split())
-            for p in "uh|um|uhm|er|erm|ah|eh|hmm|mm|like|you know|i mean"
-            "|э|эм|ну|типа|как бы|короче|вот".split("|")
-        },
+        (tuple(p.split()) for p in "like|you know|i mean|типа|как бы|короче|вот|ну".split("|")),
         key=len,
         reverse=True,
     )
 )
-# Some of them are often words that carry meaning: next to these words (before it | after it) one
-# is no filler and may not be dropped. "I like it", "looks like that", "do you know", "what I mean
-# is", "сделай короче", "какого типа", "вот так", "как бы не". "like" also has _like_is_filler.
-# The hesitation sounds, which carry nothing: the only fillers taken out of a refused answer.
-ALWAYS = frozenset((w,) for w in "uh um uhm er erm ah eh hmm mm э эм".split())
-WORD_FILLERS = tuple(p for p in FILLERS if p not in ALWAYS)
-PRONOUNS = frozenset("i you we he she they".split())
-LIKE_AS_SAID = frozenset(
-    "said say mentioned told explained wrote asked discussed suggested showed did do".split()
-)
-LIKE_AS_BEFORE = frozenset("before usual always earlier yesterday last".split())
-LIKE_AFTER = frozenset("and but or so then because we'll i'll you'll they'll he'll she'll".split())
+SENTENCE_END = ".?!…"
 OPENERS = "([{«“„\"'"
 CLOSERS = ")]}»”\"'"
-NOT_FILLER = {
-    tuple(phrase.split()): tuple(frozenset(side.split()) for side in sides.split("|"))
-    for phrase, sides in {
-        "like": "i you we they would i'd you'd we'd they'd do does did don't doesn't didn't to "
-        "look looks looked looking feel feels felt sound sounds sounded seem seems seemed "
-        "something anything nothing more less much exactly just kind sort"
-        "|this that these those it him her them me us",
-        "you know": "do did does don't didn't doesn't if as would will can could to let how"
-        "|what how why where when who which whether if that about",
-        "i mean": "what if do did|it that this what",
-        "короче": "сделай сделать сделаем сделайте будет стало стал стала стали гораздо намного "
-        "еще чуть немного все можно|чем",
-        "типа": "какого такого этого того другого одного нового любого данного|",
-        "вот": "|так такой такая такое такие это этот эта эти здесь тут где почему зачем как что",
-        "как бы": "|не ни то",
-    }.items()
-}
 APOSTROPHES = str.maketrans(dict.fromkeys("\u2018\u2019\u02bc\u02b9\u00b4\u0060\u2032\uff07", "'"))
 HYPHENS = re.compile("[-\u2010-\u2015\u2212\ufe63\uff0d]")
 DIGIT_NAMES = frozenset({"k3s"})  # names in SYSTEM_CORRECT with a digit: a fix to one is no number
@@ -332,12 +306,17 @@ def correction_message(text: str, context: str) -> str:
 
 def _bare(token: str) -> str:
     """A token for comparing wordings: lower case, without punctuation or symbols at its ends."""
+    return _trim(token).lower()
+
+
+def _trim(token: str) -> str:
+    """The token without punctuation or symbols at its ends."""
     i, j = 0, len(token)
     while i < j and unicodedata.category(token[i])[0] in "PS":
         i += 1
     while j > i and unicodedata.category(token[j - 1])[0] in "PS":
         j -= 1
-    return token[i:j].lower()
+    return token[i:j]
 
 
 def _key(token: str) -> str:
@@ -368,97 +347,88 @@ def same_numbers(src: list[str], got: list[str]) -> bool:
     )
 
 
-def _sound(token: str) -> bool:
-    return (_bare(token),) in ALWAYS
-
-
-def _filler_spans(src: list[str], everything: bool = True) -> list[list[int]]:
-    """The fillers in src, each as the positions of its tokens; only the sounds in ALWAYS unless
-    `everything`.
-
-    The sounds carry nothing and need no context. The other fillers are matched with the sounds
-    left out, and each is judged by its nearest neighbours that stay, so neither a sound nor another
-    filler can hide the word that gives it meaning ("do uh you know", "I, you know, like it").
-    Judging only ever keeps a word, so it repeats until nothing changes.
-    """
-    sounds = [[i] for i, t in enumerate(src) if _sound(t)]
+def _filler_spans(
+    tokens: list[str], seps: list[str] | None = None, everything: bool = True
+) -> list[list[int]]:
+    """The fillers among `tokens` (`seps`: the whitespace before each), each as the positions of its
+    tokens; only SOUNDS unless `everything`. See SOUNDS and WORD_FILLERS for what counts."""
+    n = len(tokens)
+    seps = seps if seps is not None else [""] + [" "] * (n - 1)
+    sound = [_is_sound(tokens, i) for i in range(n)]
+    spans = [[i] for i in range(n) if sound[i]]
     if not everything:
-        return sounds
-    view = [i for i, t in enumerate(src) if not _sound(t)]
-    words = [src[i] for i in view]
-    keys = [_bare(t) for t in words]
-    found, k = [], 0  # (start, end, phrase) in positions of `words`
-    while k < len(words):
-        phrase = next((p for p in WORD_FILLERS if tuple(keys[k : k + len(p)]) == p), None)
-        if phrase:
-            found.append((k, k + len(phrase), phrase))
-        k += len(phrase) if phrase else 1
-    while found:
-        marked = [False] * len(words)
-        for k1, k2, _ in found:
-            marked[k1:k2] = [True] * (k2 - k1)
-        left, last = [], -1  # left[k]: the nearest unmarked position before k
-        for k in range(len(words)):
-            left.append(last)
-            last = last if marked[k] else k
-        right, last = [0] * len(words), len(words)
-        for k in reversed(range(len(words))):
-            right[k] = last
-            last = last if marked[k] else k
-        kept = []
-        for k1, k2, phrase in found:
-            b, a = left[k1], right[k2 - 1]
-            cut = view[k1] - 1 != (view[b] if b >= 0 else -1)  # a sound or a filler in between
-            if _is_filler(words, phrase, k1, b, a, cut):
-                kept.append((k1, k2, phrase))
-        if len(kept) == len(found):
-            break
-        found = kept
-    return sounds + [[view[k] for k in range(k1, k2)] for k1, k2, _ in found]
+        return spans
+    keys = [_bare(t) for t in tokens]
+    i = 0
+    while i < n:
+        k = next((len(p) for p in WORD_FILLERS if tuple(keys[i : i + len(p)]) == p), 0)
+        if k and _plain(tokens, seps, i, i + k) and _set_off(tokens, seps, sound, i, i + k):
+            spans.append(list(range(i, i + k)))
+            i += k
+        else:
+            i += 1
+    return spans
 
 
-def _is_filler(  # noqa: PLR0913
-    words: list[str], phrase: tuple[str, ...], k: int, b: int, a: int, cut: bool
-) -> bool:
-    """Whether `phrase` at words[k] is a filler, with words[b] and words[a] the neighbours that
-    stay (out of range: none) and `cut` when something left out stood between words[b] and it.
-
-    "like" stands where a filler does only away from a number ("like three" is "about three") and
-    at a sentence's start, beside its own comma or an ellipsis, after a comma right before it, or
-    after one of LIKE_AFTER. Elsewhere it is often "such as" ("tools like Codex") or a verb, and
-    "like I said" or "like before" is "as"."""
-    before, after = NOT_FILLER.get(phrase, ((), ()))
-    prev, nxt = _word(words, b), _word(words, a)
-    if prev in before or nxt in after:
+def _is_sound(tokens: list[str], i: int) -> bool:
+    core = _trim(tokens[i])
+    if core.lower() not in SOUNDS or core not in (core.lower(), core.lower().capitalize()):
         return False
-    if phrase != ("like",):
-        return True
-    if nxt in NUMBER_WORDS or (any(c.isdigit() for c in nxt) and nxt not in DIGIT_NAMES):
-        return False
-    own_comma = words[k].rstrip(CLOSERS).endswith(",")  # "Like, I said no" is a filler
-    if not own_comma and (
-        nxt in LIKE_AS_BEFORE or (nxt in PRONOUNS and _word(words, a + 1) in LIKE_AS_SAID)
-    ):
-        return False  # "like before", "like I said": "as"
-    mark = words[b].rstrip(CLOSERS)[-1:] if b >= 0 else "."
-    return (
-        mark in ".?!…"
-        or (mark in ",;:" and not cut)  # a comma that set off something removed is not this one's
-        or words[k].rstrip(CLOSERS).endswith((",", "..", "…"))
-        or prev in LIKE_AFTER
+    return not any(c.isdigit() for t in tokens[max(0, i - 1) : i + 2] for c in t)
+
+
+def _plain(tokens: list[str], seps: list[str], i: int, j: int) -> bool:
+    """Whether tokens[i:j] are one phrase: no punctuation but after the last, on one line."""
+    return all(
+        _trim(tokens[k])[:1] == tokens[k][:1]
+        and (k == j - 1 or _trim(tokens[k]) == tokens[k])
+        and (k == i or "\n" not in seps[k])
+        for k in range(i, j)
     )
 
 
-def _word(src: list[str], i: int) -> str:
-    """src[i] as NOT_FILLER lists it, "" outside src."""
-    if not 0 <= i < len(src):
-        return ""
-    return _bare(src[i]).translate(APOSTROPHES).replace("ё", "е")
+def _set_off(tokens: list[str], seps: list[str], sound: list[bool], i: int, j: int) -> bool:
+    """Whether the punctuation around tokens[i:j] sets them off as a filler (see WORD_FILLERS).
+    Sounds before them are looked past; a mark after a sound counts as the sentence's end."""
+    last, core = tokens[j - 1], _trim(tokens[j - 1])
+    own = last[last.find(core) + len(core) :]
+    if any(c in CLOSERS for c in own):
+        return False  # a bracket or a quote ends here: keep it simple and keep the words
+    start, comma, k = "\n" in seps[i], False, i - 1
+    while k >= 0:
+        start = start or _ends(tokens[k], SENTENCE_END)
+        if not sound[k]:
+            comma = _ends(tokens[k], ",;:")
+            break
+        start = start or "\n" in seps[k]
+        k -= 1
+    start = start or k < 0
+    if _like_a_number(tokens, i, j):
+        return False  # "like three" is "about three"
+    if own.endswith((",", "..", "…")):
+        return start or comma
+    return _ends(own, ".?!") and comma and not start
+
+
+def _like_a_number(tokens: list[str], i: int, j: int) -> bool:
+    """Whether tokens[i:j] is "like" before a number."""
+    after = _bare(tokens[j]) if j < len(tokens) else ""
+    return (_bare(tokens[i]),) == ("like",) and (
+        after.replace("ё", "е") in NUMBER_WORDS
+        or (any(c.isdigit() for c in after) and after not in DIGIT_NAMES)
+    )
+
+
+def _ends(token: str, marks: str) -> bool:
+    """Whether the token, brackets and quotes aside, ends with one of `marks`."""
+    end = token.rstrip(CLOSERS)
+    return bool(end) and end[-1] in marks
 
 
 def _dropped_ok(src: list[str], i1: int, i2: int, spans: list[list[int]]) -> bool:
     """Whether src[i1:i2] may be dropped: whole fillers of `spans` (the strip would remove them
-    anyway), and what is left is nothing or a repeat of the words just before or after."""
+    from the transcript too), and what is left is nothing or a repeat of the words just before or
+    after."""
     filler = set()
     for span in spans:
         if i1 <= span[0] and span[-1] < i2:
@@ -471,58 +441,61 @@ def _dropped_ok(src: list[str], i1: int, i2: int, spans: list[list[int]]) -> boo
 
 
 def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:
-    """`text` without its fillers, and how many tokens were removed; only the sounds in ALWAYS
-    unless `everything`. Whitespace, paragraph breaks and every other token stay as they are.
+    """`text` without its fillers, and how many tokens were removed; only SOUNDS unless
+    `everything`. Every other token and every paragraph break stay. Text that is fillers only is
+    left as it is. Linear in the text's length.
 
-    Around a removed filler: a comma after it goes with it, but one before it stays, as dropping it
-    could join a word to the next clause ("Не, ну, давай." is not "Не давай."), so "I, uh, like it."
-    becomes "I, like it."; a sentence mark after it (. ? !) moves to the word before, replacing a
-    comma there; brackets and quotes stay with their neighbours;
-    and when it started a sentence with a capital, the next word takes the capital (a plain
-    lower-case word only, so `k3s` or `vox-flow` stay as written). Text that is fillers only is
-    left as it is.
+    Each removed token's own punctuation: a comma after it goes with it, but one before it stays,
+    as dropping it could join a word to the next clause ("Не, ну, давай." is not "Не давай."); a
+    sentence mark after it (. ? !) moves to the word before unless that one ends a sentence
+    already, and an ellipsis goes with it; brackets or quotes around it alone go with it, others
+    move to the word they belong to; a blank line before it moves to the next word; and when it
+    started a sentence with a capital, the next word takes the capital (a plain lower-case word
+    only, so `k3s` or `vox-flow` stay as written).
     """
-    items = [[m.group(1), m.group(2)] for m in re.finditer(r"(\s*)(\S+)", text)]
-    tokens = [t for _, t in items]
+    found = list(re.finditer(r"\S+", text))
+    tokens = [m.group() for m in found]
+    seps = [text[(found[k - 1].end() if k else 0) : m.start()] for k, m in enumerate(found)]
     gone = [False] * len(tokens)
-    for span in _filler_spans(tokens, everything):
+    for span in _filler_spans(tokens, seps, everything):
         for i in span:
             gone[i] = True
     if not any(gone) or all(gone):
         return text, 0
-    i = 0
-    while i < len(tokens):
+    nxt, upcoming = [0] * len(tokens), None  # nxt[i]: the next token kept after i
+    for i in reversed(range(len(tokens))):
+        nxt[i] = upcoming
+        upcoming = upcoming if gone[i] else i
+    last = None  # the last token kept so far
+    for i, tok in enumerate(tokens):
         if not gone[i]:
-            i += 1
+            last = i
             continue
-        j = i
-        while j < len(tokens) and gone[j]:
-            j += 1
-        prev, nxt = (i - 1 if i else None), (j if j < len(tokens) else None)
-        first, last = tokens[i], tokens[j - 1]
-        head = first[: len(first) - len(first.lstrip(OPENERS))]
-        body = last.rstrip(CLOSERS)
-        closers = last[len(body) :]
-        # An ellipsis after a filler is the hesitation itself and goes with it.
-        stop = None if body.endswith(("..", "…")) else re.search(r"[.?!]+\Z", body)
-        starts = prev is None or "\n" in items[i][0] or tokens[prev].rstrip(CLOSERS)[-1:] in ".?!…"
-        if prev is not None:
-            if stop and tokens[prev].rstrip(CLOSERS)[-1:] not in ".?!…":
-                tokens[prev] = tokens[prev].rstrip(",;:") + stop.group()
-            tokens[prev] += closers
-        if nxt is not None:
-            if starts and first[len(head) :][:1].isupper():
-                word = tokens[nxt].lstrip(OPENERS)
-                lead = tokens[nxt][: len(tokens[nxt]) - len(word)]
-                if word.rstrip(EDGE + CLOSERS).isalpha() and word.rstrip(EDGE + CLOSERS).islower():
-                    tokens[nxt] = lead + word[0].upper() + word[1:]
-            tokens[nxt] = head + tokens[nxt]
-            if prev is None or ("\n" in items[i][0] and "\n" not in items[nxt][0]):
-                items[nxt][0] = items[i][0]  # keep a leading space or a paragraph break
-        i = j
-    kept = "".join(sep + t for (sep, _), t, g in zip(items, tokens, gone, strict=True) if not g)
-    tail = text[len(text.rstrip()) :]
-    return kept + tail, sum(gone)
+        core = _trim(tok)
+        at = tok.find(core)
+        head, rest, r = tok[:at], tok[at + len(core) :], nxt[i]
+        opened = "".join(c for c in head if c in OPENERS)
+        closed = "".join(c for c in rest if c in CLOSERS)
+        if not (opened and closed):  # a pair around this token alone goes with it
+            if opened and r is not None:
+                tokens[r] = opened + tokens[r]
+            if closed and last is not None:
+                tokens[last] += closed
+        stop = None if (".." in rest or "…" in rest) else re.search(r"[.?!]+", rest)
+        if stop and last is not None and not _ends(tokens[last], SENTENCE_END):
+            tokens[last] = tokens[last].rstrip(",;:") + stop.group()
+        if r is not None and "\n" in seps[i] and "\n" not in seps[r]:
+            seps[r] = seps[i]
+        starts = last is None or "\n" in seps[i] or _ends(tokens[last], ".?!")
+        if r is not None and starts and (core[:1].isupper() or stop):
+            word = _trim(tokens[r])
+            if word.isalpha() and word.islower():
+                at = tokens[r].find(word)
+                tokens[r] = tokens[r][:at] + word[0].upper() + tokens[r][at + 1 :]
+    kept = [k for k in range(len(tokens)) if not gone[k]]
+    seps[kept[0]] = seps[0]
+    tail = text[found[-1].end() :]
+    return "".join(seps[k] + tokens[k] for k in kept) + tail, sum(gone)
 
 
 def _moved(sm: difflib.SequenceMatcher, src: list[str], got: list[str]) -> bool:
@@ -963,9 +936,12 @@ class Punctuate:
 
 # Correction mode removes fillers from the top-level text after the guard, so the guard sees the
 # model's answer as it came. Accepted answers (and an unchanged one, which the model read too) lose
-# every filler; a refused answer, which sends Whisper's own text, loses only the sounds in ALWAYS:
+# every filler; a refused answer, which sends Whisper's own text, loses only SOUNDS:
 # that path is the safety net, so it gets no change that could alter a word's meaning. Busy,
-# timeout, error and skipped keep Whisper's answer byte for byte.
+# timeout, error and skipped keep Whisper's answer byte for byte. strip_fillers is linear in the
+# text (at most GS_PUNCT_MAX_BYTES, GS_PUNCT_MAX_WORDS words), so it runs on the event loop: well
+# under a millisecond for a note, tens of milliseconds for 100,000 characters. Any error in it
+# sends the answer as it was.
 STRIPPED = ("corrected", "applied", "unchanged", "rejected")
 
 

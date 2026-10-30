@@ -39,13 +39,15 @@ not police person names: a context can make the model swap one name for another.
 sends the original (rejected); its punctuation is not reused, as it can put a stop mid-sentence.
 The log line has counts and the refusal's kind only.
 
-Fillers: after the guard, correction mode removes hesitation sounds ("um", "эм"; SOUNDS) from the
-top-level `text` in code, not by the model, and only on positive evidence: not next to a number,
-not mid-sentence with a capital, and not at all in a note that quotes something or talks about
-sounds or words. That applies to corrected, applied and unchanged answers and to Whisper's text
-after a refusal; segments and words keep the sounds, and the outcome header stays as it was. The
-guard lets a correction drop SOUNDS (except in such a note) and repeats only. The log line counts
-the removed tokens.
+Hesitation sounds: after the guard, correction mode removes hesitation sounds ("um", "эм"; SOUNDS)
+from the top-level `text` in code, not by the model, and only on positive evidence: not next to
+a number, not mid-sentence with a capital, and not at all in a note whose transcript or text
+quotes something, talks about sounds or words, or writes a sound as a name ("UM"). Word fillers
+("you know", "like", "ну") are kept: punctuation cannot tell them from their meaning. That
+applies to corrected, applied and unchanged answers and to Whisper's text after a refusal;
+segments and words keep the sounds, and the outcome header stays as it was. The guard lets a
+correction drop a run of sounds (except in such a note) or an exact repeat. The log line counts
+the removed sounds.
 
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
@@ -169,7 +171,7 @@ NUMBER_WORDS = frozenset(
     + [w.replace("ё", "е") for w in _russian_numbers()]  # compared with ё folded to е
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
-# Fillers, which correction mode removes in code (strip_fillers): hesitation sounds only, on
+# Sounds, which correction mode removes in code (strip_sounds): hesitation sounds only, on
 # positive evidence that one is no word, unit, letter or name. One goes in lower case, or with a
 # capital at a sentence's start ("Um,"), bare or in round or square brackets, with sentence marks
 # after it; in capitals ("UM"), mid-sentence with a capital, with another symbol ("@um") or next to
@@ -382,9 +384,25 @@ def _stops(token: str) -> bool:
     return end.endswith(("?", "!")) or (end.endswith(".") and not end.endswith(".."))
 
 
-def _meta(text: str, tokens: list[str]) -> bool:
-    """Whether the note quotes something or talks about sounds or words (see META_STEMS)."""
-    return bool(META_MARKS.search(text)) or any(_bare(t).startswith(META_STEMS) for t in tokens)
+def _keeps_sounds(text: str) -> bool:
+    """Whether no sound may go from this note: it quotes something or talks about sounds or words
+    (see META_STEMS), or writes a sound as a name ("UM", "@um")."""
+    if META_MARKS.search(text):
+        return True
+    for token in text.split():
+        bare = _bare(token)
+        if bare.startswith(META_STEMS):
+            return True
+        if bare in SOUNDS:
+            m = SOUND_SHAPE.fullmatch(token)
+            if not m or m.group(2) not in (bare, bare.capitalize()):
+                return True
+    return False
+
+
+def _ends(token: str, marks: str) -> bool:
+    end = token.rstrip(")]")
+    return bool(end) and end[-1] in marks
 
 
 def _dropped_ok(src: list[str], i1: int, i2: int, sounds: bool) -> bool:
@@ -400,34 +418,35 @@ def _dropped_ok(src: list[str], i1: int, i2: int, sounds: bool) -> bool:
     )
 
 
-def strip_fillers(text: str) -> tuple[str, int]:
+def strip_sounds(text: str) -> tuple[str, int]:
     """`text` without its hesitation sounds (SOUNDS), and how many were removed. Every other token
-    stays. Text that is sounds only, a meta note (_meta), longer than STRIP_MAX_CHARS or with a
-    space of over STRIP_MAX_SPACE is left as it is. Linear in the text's length.
+    stays. Text that is sounds only, a meta note (_keeps_sounds), longer than STRIP_MAX_CHARS or
+    with a space of over STRIP_MAX_SPACE is left as it is. Linear in the text's length.
 
     Each removed token's own punctuation: a comma after it goes with it, but one before it stays,
     as dropping it could join a word to the next clause ("No, um, do it." is not "No do it."); a
     sentence mark after it (. ? !) moves to the word before unless that one ends a sentence
-    already, and an ellipsis goes with it; brackets opened and closed within the removed words go
-    with them, as do the marks inside them, others move to the word they belong to; the larger
-    line break before it moves to the next word; and when it started a sentence with a capital,
-    the next word takes the capital (a plain lower-case word only, so `k3s` stays as written).
+    already, and so does a ; or : (in place of a comma there), while an ellipsis goes with it;
+    brackets opened and closed within the removed words go with them, as do the marks inside
+    them, others move to the word they belong to; the larger line break before it moves to the
+    next word; and when it started a sentence with a capital, the next word takes the capital (a
+    plain lower-case word only, so `k3s` stays as written).
     """
     if len(text) > STRIP_MAX_CHARS:
-        logger.info("punct: fillers not stripped, %d characters", len(text))
+        logger.info("punct: sounds not stripped, %d characters", len(text))
         return text, 0
     found = list(re.finditer(r"\S+", text))
     tokens = [m.group() for m in found]
     seps = [text[(found[k - 1].end() if k else 0) : m.start()] for k, m in enumerate(found)]
     if any(len(sep) > STRIP_MAX_SPACE for sep in seps):
-        logger.info("punct: fillers not stripped, a space of over %d characters", STRIP_MAX_SPACE)
+        logger.info("punct: sounds not stripped, a space of over %d characters", STRIP_MAX_SPACE)
         return text, 0
     n = len(tokens)
     gone = [_is_sound(tokens, i, seps) for i in range(n)]
     if not any(gone) or all(gone):
         return text, 0
-    if _meta(text, tokens):
-        logger.info("punct: fillers not stripped, the note quotes or talks about words")
+    if _keeps_sounds(text):
+        logger.info("punct: sounds not stripped, the note quotes or talks about words")
         return text, 0
     caps, last, i = set(), None, 0  # last: the last token kept so far
     lines = [sep.count("\n") for sep in seps]
@@ -462,10 +481,13 @@ def strip_fillers(text: str) -> tuple[str, int]:
         for k in range(i, j):
             marks = SOUND_SHAPE.fullmatch(tokens[k]).group(4)  # every removed token has this shape
             stop = None if (".." in marks or "…" in marks) else re.search(r"[.?!]+", marks)
-            stop = None if inside[k - i] else stop
+            pause = re.search(r"[;:]", marks)  # a clause break: kept, with no capital after it
+            stop, pause = (None, None) if inside[k - i] else (stop, pause)
             if stop and last is not None and not stops:
                 tokens[last] = tokens[last].rstrip(",;:") + stop.group()
                 stops = True
+            elif pause and last is not None and not stops and not _ends(tokens[last], ";:"):
+                tokens[last] = tokens[last].rstrip(",") + pause.group()
             if r is not None and lines[k] > lines[r]:
                 seps[r], lines[r] = seps[k], lines[k]
             starts = last is None or "\n" in seps[k] or stops
@@ -535,7 +557,7 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
             reason = "insertion"
         elif tag == "delete":
             if sounds is None:  # once, and only if needed
-                sounds = not _meta(" ".join(src), src)
+                sounds = not _keeps_sounds(" ".join(src))
             reason = "" if _dropped_ok(src, i1, i2, sounds) else "deletion"
         elif tag == "replace" and max(i2 - i1, j2 - j1) > MAX_REPLACE:
             reason = "replacement"
@@ -844,9 +866,9 @@ class Punctuate:
                 self.inflight -= 1
         removed = 0
         if context is not None and outcome in STRIPPED:
-            out, removed = _without_fillers(out)
+            out, removed = _without_sounds(out, text)
         logger.info(
-            "punct: %s, %d words, longest unpunctuated %d, %d fillers removed, %.0f ms",
+            "punct: %s, %d words, longest unpunctuated %d, %d sounds removed, %.0f ms",
             outcome,
             len(tokens),
             longest_unpunctuated(tokens),
@@ -923,23 +945,28 @@ class Punctuate:
 
 # Correction mode removes hesitation sounds from the top-level text after the guard, so the guard
 # sees the model's answer as it came: from a corrected, applied or unchanged answer, and from
-# Whisper's own text when the answer was refused (rejected). Busy, timeout, error and skipped keep
-# Whisper's answer byte for byte. strip_fillers is linear in the
+# Whisper's own text when the answer was refused (rejected). Nothing goes if Whisper's transcript
+# or the text itself keeps its sounds (_keeps_sounds): an answer may have dropped the quotes or
+# capitals that made a sound a literal or a name. Busy, timeout, error and skipped keep
+# Whisper's answer byte for byte. strip_sounds is linear in the
 # text and skips one past STRIP_MAX_CHARS, so it runs on the event loop: well under a millisecond
 # for a note, about 50 ms at the bound. Any error in it sends the answer as it was.
 STRIPPED = ("corrected", "applied", "unchanged", "rejected")
 
 
-def _without_fillers(body: bytes) -> tuple[bytes, int]:
+def _without_sounds(body: bytes, transcript: str) -> tuple[bytes, int]:
     """The answer with fillers removed from its top-level `text`; segments and words unchanged."""
     try:
         payload = json.loads(body)
-        text, removed = strip_fillers(payload["text"])
+        if _keeps_sounds(transcript):  # what Whisper heard decides too, not only the answer
+            logger.info("punct: sounds not stripped, the transcript quotes or names them")
+            return body, 0
+        text, removed = strip_sounds(payload["text"])
         if not removed:
             return body, 0
         return json.dumps({**payload, "text": text}, ensure_ascii=False).encode(), removed
     except Exception as e:  # noqa: BLE001 - the answer as it was
-        logger.warning("punct: fillers: %s", type(e).__name__)
+        logger.warning("punct: sounds: %s", type(e).__name__)
         return body, 0
 
 

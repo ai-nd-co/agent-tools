@@ -1074,11 +1074,11 @@ class Correction(unittest.TestCase):
 class Fillers(unittest.TestCase):
     def check(self, cases: tuple) -> None:
         for text, want in cases:
-            self.assertEqual(punct.strip_fillers(text)[0], want, text)
+            self.assertEqual(punct.strip_sounds(text)[0], want, text)
 
     def keep(self, *texts: str) -> None:
         for text in texts:
-            self.assertEqual(punct.strip_fillers(text), (text, 0), text)
+            self.assertEqual(punct.strip_sounds(text), (text, 0), text)
 
     def test_sounds_are_removed(self) -> None:
         for sound in "uh um uhm erm hmm эм ммм".split():
@@ -1207,6 +1207,19 @@ class Fillers(unittest.TestCase):
             )
         )
 
+    def test_a_clause_break_on_a_sound_moves_to_the_word_before(self) -> None:  # Codex round 7
+        self.check(
+            (
+                (
+                    "Do not deploy um; restart the database instead.",
+                    "Do not deploy; restart the database instead.",
+                ),
+                ("Note um: deploy now.", "Note: deploy now."),
+                ("We deploy, um; restart.", "We deploy; restart."),  # in place of the comma
+                ("We deploy; um, restart.", "We deploy; restart."),
+            )
+        )
+
     def test_a_sound_never_hides_the_words_around_it(self) -> None:  # review
         self.check(
             (
@@ -1238,7 +1251,7 @@ class Fillers(unittest.TestCase):
     def test_numbers_and_negations_are_never_removed(self) -> None:
         for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:
             for template in ("uh, {}, um,", "{}, um, hmm,", "Um, {} uh"):
-                got = punct.strip_fillers(template.format(word))[0]
+                got = punct.strip_sounds(template.format(word))[0]
                 self.assertEqual(_words(got).count(word), 1, template.format(word))
 
     def test_long_or_odd_text_is_left_alone(self) -> None:  # Codex review
@@ -1250,7 +1263,7 @@ class Fillers(unittest.TestCase):
             "Um " * 2999 + "a" * 8_000_000,
         ):
             t0 = time.perf_counter()
-            self.assertEqual(punct.strip_fillers(text), (text, 0), text[:20])
+            self.assertEqual(punct.strip_sounds(text), (text, 0), text[:20])
             self.assertLess(time.perf_counter() - t0, 1, text[:20])
 
     def test_linear_time(self) -> None:  # Codex review
@@ -1261,7 +1274,7 @@ class Fillers(unittest.TestCase):
             ("ok " + "um " * 2997 + " " * 999 + "done", 2997),
         ):
             t0 = time.perf_counter()
-            self.assertEqual(punct.strip_fillers(text)[1], removed, text[:20])
+            self.assertEqual(punct.strip_sounds(text)[1], removed, text[:20])
             self.assertLess(time.perf_counter() - t0, 1, text[:20])
 
 
@@ -1299,6 +1312,20 @@ class FillersInThePass(unittest.TestCase):
         out = r.json()
         self.assertEqual(out["text"], " we should merge the codec branch you know today")
         self.assertEqual({**out, "text": None}, {**self.PAYLOAD, "text": None})
+
+    def test_the_transcript_keeps_its_sounds_too(self) -> None:  # Codex round 7
+        for whisper, model in (
+            ("UM sent the report yesterday.", "Um sent the report yesterday."),
+            ('Search for "um" in the transcript.', "Search for um in the transcript."),
+            ("Replace um with uh.", "Replace um with uh."),
+            ("Ask @um about it.", "Ask um about it."),
+        ):
+            r = self.run_pass(model, {"text": whisper})
+            self.assertEqual(
+                r.json()["text"], model, whisper
+            )  # the model's own text, no sound gone
+        r = self.run_pass("Um, we merge it.", {"text": "um we merge it"})
+        self.assertEqual(r.json()["text"], "We merge it.")
 
     def test_failures_and_the_normal_pass_keep_the_answer(self) -> None:
         r = self.run_pass(RuntimeError("down"))

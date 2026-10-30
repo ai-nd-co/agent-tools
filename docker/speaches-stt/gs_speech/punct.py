@@ -191,6 +191,11 @@ FILLERS = tuple(  # longest first, so "как бы" is one filler and not "ка�
 # The hesitation sounds, which carry nothing: the only fillers taken out of a refused answer.
 ALWAYS = frozenset((w,) for w in "uh um uhm er erm ah eh hmm mm э эм".split())
 WORD_FILLERS = tuple(p for p in FILLERS if p not in ALWAYS)
+PRONOUNS = frozenset("i you we he she they".split())
+LIKE_AS_SAID = frozenset(
+    "said say mentioned told explained wrote asked discussed suggested showed did do".split()
+)
+LIKE_AS_BEFORE = frozenset("before usual always earlier yesterday last".split())
 LIKE_AFTER = frozenset("and but or so then because we'll i'll you'll they'll he'll she'll".split())
 OPENERS = "([{«“„\"'"
 CLOSERS = ")]}»”\"'"
@@ -420,7 +425,8 @@ def _is_filler(  # noqa: PLR0913
 
     "like" stands where a filler does only away from a number ("like three" is "about three") and
     at a sentence's start, beside its own comma or an ellipsis, after a comma right before it, or
-    after one of LIKE_AFTER. Elsewhere it is often "such as" ("tools like Codex") or a verb."""
+    after one of LIKE_AFTER. Elsewhere it is often "such as" ("tools like Codex") or a verb, and
+    "like I said" or "like before" is "as"."""
     before, after = NOT_FILLER.get(phrase, ((), ()))
     prev, nxt = _word(words, b), _word(words, a)
     if prev in before or nxt in after:
@@ -429,6 +435,11 @@ def _is_filler(  # noqa: PLR0913
         return True
     if nxt in NUMBER_WORDS or (any(c.isdigit() for c in nxt) and nxt not in DIGIT_NAMES):
         return False
+    own_comma = words[k].rstrip(CLOSERS).endswith(",")  # "Like, I said no" is a filler
+    if not own_comma and (
+        nxt in LIKE_AS_BEFORE or (nxt in PRONOUNS and _word(words, a + 1) in LIKE_AS_SAID)
+    ):
+        return False  # "like before", "like I said": "as"
     mark = words[b].rstrip(CLOSERS)[-1:] if b >= 0 else "."
     return (
         mark in ".?!…"
@@ -463,9 +474,10 @@ def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:
     """`text` without its fillers, and how many tokens were removed; only the sounds in ALWAYS
     unless `everything`. Whitespace, paragraph breaks and every other token stay as they are.
 
-    Around a removed filler: a comma after it goes with it, and so does one before it if both set
-    it off; a sentence mark after it (. ? !) moves
-    to the word before, replacing a comma there; brackets and quotes stay with their neighbours;
+    Around a removed filler: a comma after it goes with it, but one before it stays, as dropping it
+    could join a word to the next clause ("Не, ну, давай." is not "Не давай."), so "I, uh, like it."
+    becomes "I, like it."; a sentence mark after it (. ? !) moves to the word before, replacing a
+    comma there; brackets and quotes stay with their neighbours;
     and when it started a sentence with a capital, the next word takes the capital (a plain
     lower-case word only, so `k3s` or `vox-flow` stay as written). Text that is fillers only is
     left as it is.
@@ -497,8 +509,6 @@ def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:
         if prev is not None:
             if stop and tokens[prev].rstrip(CLOSERS)[-1:] not in ".?!…":
                 tokens[prev] = tokens[prev].rstrip(",;:") + stop.group()
-            elif body.endswith((",", "..", "…")) and tokens[prev].endswith(","):  # set it off
-                tokens[prev] = tokens[prev][:-1]
             tokens[prev] += closers
         if nxt is not None:
             if starts and first[len(head) :][:1].isupper():

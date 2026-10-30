@@ -1100,7 +1100,7 @@ class Fillers(unittest.TestCase):
     def test_punctuation_around_a_removal(self) -> None:
         for text, want in (
             ("Um, so we merge it.", "So we merge it."),
-            ("So, um, we merge it.", "So we merge it."),  # commas that set it off go
+            ("So, um, we merge it.", "So, we merge it."),  # the comma before stays
             ("It works, you know.", "It works."),
             ("Is it ready, like?", "Is it ready?"),
             ("Okay. I mean, we merge.", "Okay. We merge."),
@@ -1109,7 +1109,7 @@ class Fillers(unittest.TestCase):
             ("Like, k3s is down.", "k3s is down."),  # names keep their case
             ("«Um, yes», she said.", "«Yes», she said."),
             ("Ну, короче, давай проверим.", "Давай проверим."),
-            ("Мы, типа, закончили.", "Мы закончили."),
+            ("Мы, типа, закончили.", "Мы, закончили."),
             (" uh we merge", " we merge"),  # Whisper's leading space stays
             ("We merge.\n\nUm, then we test.", "We merge.\n\nThen we test."),
             ("Um.\n\nWe merge.", "We merge."),
@@ -1122,20 +1122,20 @@ class Fillers(unittest.TestCase):
             ("Do uh you know the answer?", "Do you know the answer?"),
             ("I um like the new layout.", "I like the new layout."),
             ("Looks uh like rain.", "Looks like rain."),
-            ("What, um, I mean is this.", "What I mean is this."),
-            ("I, uh, like it.", "I like it."),
+            ("What, um, I mean is this.", "What, I mean is this."),
+            ("I, uh, like it.", "I, like it."),
             # several sounds, punctuation between them, an ellipsis
             ("Do uh um you know the answer?", "Do you know the answer?"),
             ("I uh, uh, like it.", "I like it."),
-            ("Do, um... you know the answer?", "Do you know the answer?"),
-            ("It is, uh, like a bug.", "It is like a bug."),  # the comma was the sound's
+            ("Do, um... you know the answer?", "Do, you know the answer?"),
+            ("It is, uh, like a bug.", "It is, like a bug."),  # the comma was the sound's
             ("We'd um like a review.", "We'd like a review."),
             # another filler in between
-            ("I, you know, like it.", "I like it."),
-            ("Do it like, you know, this.", "Do it like this."),
-            ("Looks, um, you know, like rain.", "Looks like rain."),
+            ("I, you know, like it.", "I, like it."),
+            ("Do it like, you know, this.", "Do it like, this."),  # its comma is kept
+            ("Looks, um, you know, like rain.", "Looks, like rain."),
             ("It took like uh 15 minutes.", "It took like 15 minutes."),
-            ("We ran like, you know, three rounds.", "We ran like three rounds."),
+            ("We ran like, you know, three rounds.", "We ran like, three rounds."),
             # sentence boundaries and capitals
             ("Done. Uh, like this.", "Done. Like this."),
             ("Stop. Um, I mean it.", "Stop. I mean it."),
@@ -1144,13 +1144,41 @@ class Fillers(unittest.TestCase):
             # Russian
             ("Сделай э короче.", "Сделай короче."),
             ("Это э короче, чем вчера.", "Это короче, чем вчера."),
-            ("Какого, э, типа это поле?", "Какого типа это поле?"),
+            ("Какого, э, типа это поле?", "Какого, типа это поле?"),
             ("Вот э так и сделаем.", "Вот так и сделаем."),
             ("Как э бы не сломать.", "Как бы не сломать."),
             # a filler phrase split by a sound is still one
             ("You uh know, we merge.", "We merge."),
         ):
             self.assertEqual(punct.strip_fillers(text)[0], want, text)
+
+    def test_a_comma_before_a_removed_filler_stays(self) -> None:  # review: no joined clauses
+        for text, want in (
+            ("Не, ну, давай.", "Не, давай."),  # not "Не давай." (don't give)
+            ("No, um, do it.", "No, do it."),
+            ("No, like, merge it.", "No, merge it."),
+            ("No, you know, merge it.", "No, merge it."),
+            ("Нет, э, не надо.", "Нет, не надо."),
+            ("Yes, uh, deploy it.", "Yes, deploy it."),
+            ("Да, короче, мерджим.", "Да, мерджим."),
+            ("Well, um, wait.", "Well, wait."),
+            ("Stop, uh, deploying.", "Stop, deploying."),
+        ):
+            self.assertEqual(punct.strip_fillers(text)[0], want, text)
+
+    def test_like_as_as_is_kept(self) -> None:  # review
+        for text in (
+            "Like I said, like, three things.",  # the second one is before a number
+            "Like I said, we merge.",
+            "Like you said, we merge.",
+            "Like I told you, no.",
+            "Like we discussed, merge it.",
+            "Like before, we merge.",
+            "As usual, like always.",
+            "It works like I said.",
+        ):
+            self.assertEqual(punct.strip_fillers(text), (text, 0), text)
+        self.assertEqual(punct.strip_fillers("Like, I said no."), ("I said no.", 1))
 
     def test_judging_a_long_run_of_fillers_is_fast(self) -> None:
         text = " ".join(["I"] + ["like", "uh", "you", "know"] * 750)  # a Whisper loop, 3,001 words
@@ -1168,7 +1196,7 @@ class Fillers(unittest.TestCase):
         text = "Uh, you know, we like, um, merge it, ну, вот."
         self.assertEqual(
             punct.strip_fillers(text, everything=False),
-            ("You know, we like merge it, ну, вот.", 2),
+            ("You know, we like, merge it, ну, вот.", 2),
         )
 
     def test_numbers_and_negations_are_never_removed(self) -> None:
@@ -1198,7 +1226,7 @@ class FillersInThePass(unittest.TestCase):
     def test_corrected_text_loses_fillers_after_the_guard(self) -> None:
         r = self.run_pass("Uh, we should, um, merge the Codex branch today, you know.")
         self.assertEqual(r.headers["x-gs-punctuated"], "corrected")
-        self.assertEqual(r.json()["text"], "We should merge the Codex branch today.")
+        self.assertEqual(r.json()["text"], "We should, merge the Codex branch today.")
         self.assertEqual(r.json()["segments"], self.PAYLOAD["segments"])
         self.assertEqual(r.json()["words"], self.PAYLOAD["words"])
 

@@ -1112,7 +1112,7 @@ class Fillers(unittest.TestCase):
             "Э, давай.",
             "(Um.) We merge.",
         )
-        self.check((("Uh, Um, we merge.", "Um, we merge."),))  # a capital mid-sentence stays
+        self.keep("Uh, Um, we merge.")  # a capital mid-sentence: a name, maybe; the note stays
 
     def test_word_fillers_all_stay(self) -> None:
         self.keep(
@@ -1174,8 +1174,8 @@ class Fillers(unittest.TestCase):
                 ("First. Uh,\n\nUm, second.", "First.\n\nSecond."),
                 ("First.\n\nUm,\nsecond.", "First.\n\nSecond."),  # the blank line wins
                 ("We merge.\n\nUm, then we test.", "We merge.\n\nThen we test."),
-                ("Um.\n\nWe merge.", "We merge."),
-                ("Hmm. Okay.", "Okay."),
+                ("Um,\n\nwe merge.", "We merge."),
+                ("Hmm, okay.", "Okay."),
                 ("We merge uh.", "We merge."),
             )
         )
@@ -1185,7 +1185,7 @@ class Fillers(unittest.TestCase):
             (
                 ("We (um) agree.", "We agree."),
                 ("We (uh um) agree.", "We agree."),
-                ("We (uh. Um) agree.", "We agree."),  # the stop inside the brackets goes too
+                ("We (uh. um) agree.", "We agree."),  # the stop inside the brackets goes too
                 ("We merge, (um) today.", "We merge, today."),
                 ("We (um, so) agree.", "We (so) agree."),
                 ("(uh. we agree)", "(we agree)"),
@@ -1248,6 +1248,31 @@ class Fillers(unittest.TestCase):
         )
         self.keep("um", "Uh, um.", " Hmm")
 
+    def test_a_capitalised_sound_goes_only_as_a_pause_at_a_start(self) -> None:  # Codex r8
+        self.keep(
+            "Please ask Dr. Um to review the report.",
+            "Ask Um to send the report.",
+            "Um we merge.",
+            "Um. We merge.",
+            "Hmm. Okay.",
+        )
+        self.check(
+            (
+                ("Um, we merge.", "We merge."),
+                ("Um... we merge.", "We merge."),
+                ("Done. Uh, then we test.", "Done. Then we test."),
+            )
+        )
+
+    def test_only_the_notes_own_language_loses_sounds(self) -> None:  # Codex round 8
+        en, ru = punct.SOUNDS_BY_LANGUAGE["en"], punct.SOUNDS_BY_LANGUAGE["ru"]
+        self.assertEqual(punct.strip_sounds("we um merge, эм, now", en)[0], "we merge, эм, now")
+        self.assertEqual(punct.strip_sounds("we um merge, эм, now", ru)[0], "we um merge, now")
+        for language, want in (("en", en), ("english", en), ("ru", ru), ("Russian", ru)):
+            self.assertEqual(punct.note_sounds({"language": language}), want, language)
+        for payload in ({"language": "pt"}, {"language": None}, {}):
+            self.assertEqual(punct.note_sounds(payload), frozenset(), payload)
+
     def test_numbers_and_negations_are_never_removed(self) -> None:
         for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:
             for template in ("uh, {}, um,", "{}, um, hmm,", "Um, {} uh"):
@@ -1270,7 +1295,7 @@ class Fillers(unittest.TestCase):
         for text, removed in (
             ("we uh agree" + " " * 999, 1),
             ("um " * 16_000 + "x", 16_000),
-            ("Um " * 2999 + "a" * 40_000, 1),
+            ("um " * 2999 + "a" * 40_000, 2999),
             ("ok " + "um " * 2997 + " " * 999 + "done", 2997),
         ):
             t0 = time.perf_counter()
@@ -1301,10 +1326,10 @@ class FillersInThePass(unittest.TestCase):
         self.assertEqual(r.headers["x-gs-punctuated"], "applied")
         self.assertEqual(r.json()["text"], "We should merge the codec branch, you know, today.")
         self.assertEqual(r.json()["segments"][0]["text"].split()[0], "Uh,")  # punctuated only
-        payload = {"text": "Uh, we merge it, you know, today."}
+        payload = {"text": "Uh, we merge it, you know, today.", "language": "en"}
         r = self.run_pass(payload["text"], payload)
         self.assertEqual(r.headers["x-gs-punctuated"], "unchanged")
-        self.assertEqual(r.json(), {"text": "We merge it, you know, today."})
+        self.assertEqual(r.json(), {**payload, "text": "We merge it, you know, today."})
 
     def test_refused_answer_loses_its_sounds(self) -> None:
         r = self.run_pass("A short summary of the note.")
@@ -1320,12 +1345,28 @@ class FillersInThePass(unittest.TestCase):
             ("Replace um with uh.", "Replace um with uh."),
             ("Ask @um about it.", "Ask um about it."),
         ):
-            r = self.run_pass(model, {"text": whisper})
+            r = self.run_pass(model, {"text": whisper, "language": "en"})
             self.assertEqual(
                 r.json()["text"], model, whisper
             )  # the model's own text, no sound gone
-        r = self.run_pass("Um, we merge it.", {"text": "um we merge it"})
+        r = self.run_pass("Um, we merge it.", {"text": "um we merge it", "language": "en"})
         self.assertEqual(r.json()["text"], "We merge it.")
+
+    def test_no_language_or_another_keeps_the_sounds(self) -> None:  # Codex round 8
+        for payload in (
+            {"text": "Envie um euro para Maria.", "language": "pt"},
+            {"text": "we um merge it today"},  # plain json: no language
+        ):
+            r = self.run_pass(payload["text"], payload)
+            self.assertEqual(r.json(), payload, payload)
+        # nor may the model drop a sound of another language
+        payload = {"text": "envie um euro para maria", "language": "pt"}
+        r = self.run_pass("Envie euro para Maria.", payload)
+        self.assertEqual(r.headers["x-gs-punctuated"], "rejected")
+        r = self.run_pass(
+            "Ask um to send the report.", {"text": "Ask Um to send the report.", "language": "en"}
+        )
+        self.assertEqual(r.json()["text"], "Ask um to send the report.")
 
     def test_failures_and_the_normal_pass_keep_the_answer(self) -> None:
         r = self.run_pass(RuntimeError("down"))

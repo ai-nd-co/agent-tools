@@ -872,6 +872,13 @@ class Correction(unittest.TestCase):
             ("i like the new layout", "I the new layout.", "deletion"),
             ("do it like this please", "Do it this please.", "deletion"),
             ("so we merge it", "We merge it.", "deletion"),
+            # a sound or another filler between does not hide the word that protects one
+            ("do uh you know the answer", "Do the answer?", "deletion"),
+            ("i um like the new layout", "I the new layout.", "deletion"),
+            ("looks uh like rain today", "Looks rain today.", "deletion"),
+            ("what um i mean is this", "What is this.", "deletion"),
+            ("i you know like it a lot", "I it a lot.", "deletion"),
+            ("do uh you know the answer", "Do you know the answer?", ""),
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], why, (src, got))
 
@@ -1093,7 +1100,7 @@ class Fillers(unittest.TestCase):
     def test_punctuation_around_a_removal(self) -> None:
         for text, want in (
             ("Um, so we merge it.", "So we merge it."),
-            ("So, um, we merge it.", "So, we merge it."),
+            ("So, um, we merge it.", "So we merge it."),  # commas that set it off go
             ("It works, you know.", "It works."),
             ("Is it ready, like?", "Is it ready?"),
             ("Okay. I mean, we merge.", "Okay. We merge."),
@@ -1102,12 +1109,56 @@ class Fillers(unittest.TestCase):
             ("Like, k3s is down.", "k3s is down."),  # names keep their case
             ("«Um, yes», she said.", "«Yes», she said."),
             ("Ну, короче, давай проверим.", "Давай проверим."),
-            ("Мы, типа, закончили.", "Мы, закончили."),
+            ("Мы, типа, закончили.", "Мы закончили."),
             (" uh we merge", " we merge"),  # Whisper's leading space stays
             ("We merge.\n\nUm, then we test.", "We merge.\n\nThen we test."),
             ("Um.\n\nWe merge.", "We merge."),
         ):
             self.assertEqual(punct.strip_fillers(text)[0], want, text)
+
+    def test_removed_words_never_hide_a_protecting_neighbour(self) -> None:  # Codex review
+        for text, want in (
+            # a hesitation between a filler word and the word that gives it meaning
+            ("Do uh you know the answer?", "Do you know the answer?"),
+            ("I um like the new layout.", "I like the new layout."),
+            ("Looks uh like rain.", "Looks like rain."),
+            ("What, um, I mean is this.", "What I mean is this."),
+            ("I, uh, like it.", "I like it."),
+            # several sounds, punctuation between them, an ellipsis
+            ("Do uh um you know the answer?", "Do you know the answer?"),
+            ("I uh, uh, like it.", "I like it."),
+            ("Do, um... you know the answer?", "Do you know the answer?"),
+            ("It is, uh, like a bug.", "It is like a bug."),  # the comma was the sound's
+            ("We'd um like a review.", "We'd like a review."),
+            # another filler in between
+            ("I, you know, like it.", "I like it."),
+            ("Do it like, you know, this.", "Do it like this."),
+            ("Looks, um, you know, like rain.", "Looks like rain."),
+            ("It took like uh 15 minutes.", "It took like 15 minutes."),
+            ("We ran like, you know, three rounds.", "We ran like three rounds."),
+            # sentence boundaries and capitals
+            ("Done. Uh, like this.", "Done. Like this."),
+            ("Stop. Um, I mean it.", "Stop. I mean it."),
+            ("Uh, I like it.", "I like it."),
+            ("DO UH YOU KNOW it?", "DO YOU KNOW it?"),
+            # Russian
+            ("Сделай э короче.", "Сделай короче."),
+            ("Это э короче, чем вчера.", "Это короче, чем вчера."),
+            ("Какого, э, типа это поле?", "Какого типа это поле?"),
+            ("Вот э так и сделаем.", "Вот так и сделаем."),
+            ("Как э бы не сломать.", "Как бы не сломать."),
+            # a filler phrase split by a sound is still one
+            ("You uh know, we merge.", "We merge."),
+        ):
+            self.assertEqual(punct.strip_fillers(text)[0], want, text)
+
+    def test_judging_a_long_run_of_fillers_is_fast(self) -> None:
+        text = " ".join(["I"] + ["like", "uh", "you", "know"] * 750)  # a Whisper loop, 3,001 words
+        t0 = time.perf_counter()
+        got, removed = punct.strip_fillers(text)
+        self.assertLess(time.perf_counter() - t0, 1)
+        # every "like" keeps "I" as its nearest neighbour that stays, so all of them stay
+        self.assertEqual((got.split(), removed), (["I"] + ["like"] * 750, 2250))
 
     def test_text_of_fillers_only_is_kept(self) -> None:
         for text in ("um", "Uh, um.", " you know"):
@@ -1117,7 +1168,7 @@ class Fillers(unittest.TestCase):
         text = "Uh, you know, we like, um, merge it, ну, вот."
         self.assertEqual(
             punct.strip_fillers(text, everything=False),
-            ("You know, we like, merge it, ну, вот.", 2),
+            ("You know, we like merge it, ну, вот.", 2),
         )
 
     def test_numbers_and_negations_are_never_removed(self) -> None:
@@ -1147,7 +1198,7 @@ class FillersInThePass(unittest.TestCase):
     def test_corrected_text_loses_fillers_after_the_guard(self) -> None:
         r = self.run_pass("Uh, we should, um, merge the Codex branch today, you know.")
         self.assertEqual(r.headers["x-gs-punctuated"], "corrected")
-        self.assertEqual(r.json()["text"], "We should, merge the Codex branch today.")
+        self.assertEqual(r.json()["text"], "We should merge the Codex branch today.")
         self.assertEqual(r.json()["segments"], self.PAYLOAD["segments"])
         self.assertEqual(r.json()["words"], self.PAYLOAD["words"])
 

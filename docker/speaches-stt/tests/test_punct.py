@@ -1081,14 +1081,14 @@ class Fillers(unittest.TestCase):
             self.assertEqual(punct.strip_sounds(text), (text, 0), text)
 
     def test_sounds_are_removed(self) -> None:
-        for sound in "uh um uhm erm hmm эм ммм".split():
+        for sound in "uh um uhm erm hmm ммм мммм".split():
             self.check(
                 (
                     (f"we {sound} merge", "we merge"),
                     (f"{sound.capitalize()}, we merge.", "We merge."),
                 )
             )
-        self.assertEqual(punct.SOUNDS, frozenset("uh um uhm erm hmm эм ммм".split()))
+        self.assertEqual(punct.SOUNDS, frozenset("uh um uhm erm hmm ммм".split()))
 
     def test_words_units_names_and_numbers_are_no_sounds(self) -> None:  # Codex review
         self.keep(
@@ -1199,9 +1199,9 @@ class Fillers(unittest.TestCase):
         self.check(
             (
                 ("No, um, do it.", "No, do it."),
-                ("Нет, эм, не надо.", "Нет, не надо."),
+                ("Нет, ммм, не надо.", "Нет, не надо."),
                 ("Yes, uh, deploy it.", "Yes, deploy it."),
-                ("Да, эм, мерджим.", "Да, мерджим."),
+                ("Да, ммм, мерджим.", "Да, мерджим."),
                 ("Stop, uh, deploying.", "Stop, deploying."),
                 ("I, uh, like it.", "I, like it."),
             )
@@ -1228,8 +1228,8 @@ class Fillers(unittest.TestCase):
                 ("Looks uh like rain.", "Looks like rain."),
                 ("What, um, I mean is this.", "What, I mean is this."),
                 ("It is, uh, like a bug.", "It is, like a bug."),
-                ("Сделай эм короче.", "Сделай короче."),
-                ("Как эм бы не сломать.", "Как бы не сломать."),
+                ("Сделай ммм короче.", "Сделай короче."),
+                ("Как ммм бы не сломать.", "Как бы не сломать."),
                 ("Uh, I like it.", "I like it."),
                 ("Uh, you know, we merge.", "You know, we merge."),
                 ("We uh merge, um, today.", "We merge, today."),
@@ -1243,7 +1243,7 @@ class Fillers(unittest.TestCase):
                 ("Um, k3s is down.", "k3s is down."),  # names keep their case
                 (" uh we merge", " we merge"),  # Whisper's leading space stays
                 ("we uh merge  \n", "we merge  \n"),
-                ("Эм, давай.", "Давай."),
+                ("Ммм, давай.", "Давай."),
             )
         )
         self.keep("um", "Uh, um.", " Hmm")
@@ -1266,12 +1266,29 @@ class Fillers(unittest.TestCase):
 
     def test_only_the_notes_own_language_loses_sounds(self) -> None:  # Codex round 8
         en, ru = punct.SOUNDS_BY_LANGUAGE["en"], punct.SOUNDS_BY_LANGUAGE["ru"]
-        self.assertEqual(punct.strip_sounds("we um merge, эм, now", en)[0], "we merge, эм, now")
-        self.assertEqual(punct.strip_sounds("we um merge, эм, now", ru)[0], "we um merge, now")
+        self.assertEqual(punct.strip_sounds("we um merge, ммм, now", en)[0], "we merge, ммм, now")
+        self.assertEqual(punct.strip_sounds("we um merge, ммм, now", ru)[0], "we um merge, now")
         for language, want in (("en", en), ("english", en), ("ru", ru), ("Russian", ru)):
             self.assertEqual(punct.note_sounds({"language": language}), want, language)
         for payload in ({"language": "pt"}, {"language": None}, {}):
             self.assertEqual(punct.note_sounds(payload), frozenset(), payload)
+
+    def test_codex_round_9(self) -> None:
+        self.keep(
+            "Нажми эм, чтобы открыть карту.",  # the letter М
+            "Отрежь 5 мм ленты.",
+            "Отрежь мм ленты.",  # millimetres
+            "Эм, давай.",
+        )
+        self.check(
+            (
+                ("Can we deploy, um…? I need to know.", "Can we deploy? I need to know."),
+                ("Can we deploy, um...? I need to know.", "Can we deploy? I need to know."),
+                ("Stop, um…! Now.", "Stop! Now."),
+                ("We wait, um… then go.", "We wait, then go."),
+                ("Это мммм вкусно.", "Это вкусно."),
+            )
+        )
 
     def test_numbers_and_negations_are_never_removed(self) -> None:
         for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:

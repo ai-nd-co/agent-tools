@@ -39,7 +39,7 @@ not police person names: a context can make the model swap one name for another.
 sends the original (rejected); its punctuation is not reused, as it can put a stop mid-sentence.
 The log line has counts and the refusal's kind only.
 
-Hesitation sounds: after the guard, correction mode removes hesitation sounds ("um", "эм"; SOUNDS)
+Hesitation sounds: after the guard, correction mode removes hesitation sounds ("um", "ммм"; SOUNDS)
 from the top-level `text` in code, not by the model, and only on positive evidence: those of the
 answer's own "language" (verbose_json; none without it), not next to a number, with a capital
 only as "Um," at a sentence's start, and not at all in a note whose transcript or text quotes
@@ -179,12 +179,13 @@ NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни н�
 # square brackets, with sentence marks after it; in capitals ("UM"), with a capital otherwise ("Ask
 # Um", "Dr. Um", "Um we merge"), with another symbol ("@um") or next to a number ("five um", "half
 # um", "½ um") it stays, and a note about sounds or with quotes is left alone (META_STEMS).
-# Left out: "er" (ER), "mm" (5 mm), "ah", "eh", "umm" (Umm Al Quwain), "э" (a letter), and every
-# word filler: "you know" ("if you know, you know"), "I mean" ("fifty, I mean, fifteen"), "like"
-# ("like, a hundred"), типа, как бы, вот, ну, короче, so, well, just, actually.
+# Left out: "er" (ER), "mm" (5 mm), "мм" (millimetres), "ah", "eh", "umm" (Umm Al Quwain), "э"
+# and "эм" (the letters Э and М: "Нажми эм"), and every word filler: "you know" ("if you know, you
+# know"), "I mean" ("fifty, I mean, fifteen"), "like" ("like, a hundred"), типа, как бы, вот, ну,
+# короче, so, well, just, actually.
 SOUNDS_BY_LANGUAGE = {
     "en": frozenset("uh um uhm erm hmm".split()),
-    "ru": frozenset("эм ммм".split()),
+    "ru": frozenset({"ммм"}),  # "м" three times or more; "мм" is millimetres
 }
 SOUNDS = frozenset().union(*SOUNDS_BY_LANGUAGE.values())
 LANGUAGES = {"en": "en", "english": "en", "ru": "ru", "russian": "ru"}  # Speaches' "language"
@@ -373,7 +374,7 @@ def _is_sound(
     """Whether tokens[i] is one of `sounds` that may go (see SOUNDS); the note is no meta note."""
     m = SOUND_SHAPE.fullmatch(tokens[i])
     core = m.group(2) if m else ""
-    if core.lower() not in sounds or core not in (core.lower(), core.lower().capitalize()):
+    if _sound_key(core) not in sounds or core not in (core.lower(), core.lower().capitalize()):
         return False
     if core != core.lower():  # "Um, we merge." only: at a sentence's start, with its own pause
         start = i == 0 or (seps is not None and "\n" in seps[i])
@@ -381,6 +382,12 @@ def _is_sound(
         if not start or not m.group(4).startswith((",", "..", "…")):
             return False
     return not any(_number(t) for t in tokens[max(0, i - 1) : i] + tokens[i + 1 : i + 2])
+
+
+def _sound_key(word: str) -> str:
+    """The word as SOUNDS lists it: lower case, "м" three times or more as "ммм"."""
+    word = word.lower()
+    return "ммм" if len(word) >= 3 and set(word) == {"м"} else word
 
 
 def _number(token: str) -> bool:
@@ -411,7 +418,8 @@ def _keeps_sounds(text: str) -> bool:
         bare = _bare(token)
         if bare.startswith(META_STEMS):
             return True
-        if bare in SOUNDS and bare != _trim(token) and not _is_sound(tokens, i, seps):
+        bare = _sound_key(bare)
+        if bare in SOUNDS and _bare(token) != _trim(token) and not _is_sound(tokens, i, seps):
             return True  # not in lower case, and not a removable "Um,"
         if bare in SOUNDS and not SOUND_SHAPE.fullmatch(token):
             return True
@@ -452,7 +460,8 @@ def strip_sounds(text: str, sounds: frozenset[str] = SOUNDS) -> tuple[str, int]:
     Each removed token's own punctuation: a comma after it goes with it, but one before it stays,
     as dropping it could join a word to the next clause ("No, um, do it." is not "No do it."); a
     sentence mark after it (. ? !) moves to the word before unless that one ends a sentence
-    already, and so does a ; or : (in place of a comma there), while an ellipsis goes with it;
+    already, and so does a ; or : (in place of a comma there), while an ellipsis goes with it (a
+    ? or ! after it still moves);
     brackets opened and closed within the removed words go with them, as do the marks inside
     them, others move to the word they belong to; the larger line break before it moves to the
     next word; and when it started a sentence with a capital, the next word takes the capital (a
@@ -506,7 +515,9 @@ def strip_sounds(text: str, sounds: frozenset[str] = SOUNDS) -> tuple[str, int]:
         stops = last is not None and _stops(tokens[last])  # kept up to date, not rescanned
         for k in range(i, j):
             marks = SOUND_SHAPE.fullmatch(tokens[k]).group(4)  # every removed token has this shape
-            stop = None if (".." in marks or "…" in marks) else re.search(r"[.?!]+", marks)
+            # An ellipsis is the hesitation and goes; a ? or ! after it ends the sentence ("um…?").
+            ellipsis = ".." in marks or "…" in marks
+            stop = re.search(r"[?!]+\Z" if ellipsis else r"[.?!]+", marks)
             pause = re.search(r"[;:]", marks)  # a clause break: kept, with no capital after it
             stop, pause = (None, None) if inside[k - i] else (stop, pause)
             if stop and last is not None and not stops:

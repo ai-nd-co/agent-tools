@@ -39,13 +39,13 @@ not police person names: a context can make the model swap one name for another.
 sends the original (rejected); its punctuation is not reused, as it can put a stop mid-sentence.
 The log line has counts and the refusal's kind only.
 
-Fillers: after the guard, correction mode removes filler words from the top-level `text` in code,
-not by the model, and only on positive evidence: hesitation sounds ("um", "эм"; SOUNDS), and
-"you know" (WORD_FILLERS) only mid-sentence where commas set it off on both sides (", you know,"),
-so "You know the password." stays. Corrected, applied and
-unchanged answers lose every filler, a rejected one only SOUNDS; segments and words keep them, and
-the outcome header stays as it was. The guard lets a correction drop SOUNDS and repeats only. The
-log line counts the removed tokens.
+Fillers: after the guard, correction mode removes hesitation sounds ("um", "эм"; SOUNDS) from the
+top-level `text` in code, not by the model, and only on positive evidence: not next to a number,
+not mid-sentence with a capital, and not at all in a note that quotes something or talks about
+sounds or words. That applies to corrected, applied and unchanged answers and to Whisper's text
+after a refusal; segments and words keep the sounds, and the outcome header stays as it was. The
+guard lets a correction drop SOUNDS (except in such a note) and repeats only. The log line counts
+the removed tokens.
 
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
@@ -169,34 +169,27 @@ NUMBER_WORDS = frozenset(
     + [w.replace("ё", "е") for w in _russian_numbers()]  # compared with ё folded to е
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
-# Fillers, which correction mode removes in code (strip_fillers). Default keep: a word goes only
-# on positive evidence that it is a filler, so the list is short on purpose.
-# SOUNDS are hesitation sounds that are no word, unit, letter or name. One goes in lower case, or
-# with a capital at a sentence's start ("Um,"), bare or in brackets, with sentence marks after it;
-# in capitals ("UM"), mid-sentence with a capital, inside quotes or code ("um" as a literal), with
-# another symbol ("@um"), after a word that names it ("the letter um") or next to a number ("five
-# um", "half um", "½ um") it stays. Left out: "er" (ER), "mm" (5 mm), "ah", "eh", "umm" (Umm Al
-# Quwain) and "э" (a letter: "Замени э на е").
+# Fillers, which correction mode removes in code (strip_fillers): hesitation sounds only, on
+# positive evidence that one is no word, unit, letter or name. One goes in lower case, or with a
+# capital at a sentence's start ("Um,"), bare or in round or square brackets, with sentence marks
+# after it; in capitals ("UM"), mid-sentence with a capital, with another symbol ("@um") or next to
+# a number ("five um", "half um", "½ um") it stays, and a note about sounds or with quotes is left
+# alone (META_STEMS). Left out: "er" (ER), "mm" (5 mm), "ah", "eh", "umm" (Umm Al Quwain), "э" (a
+# letter), and every word filler: "you know" ("if you know, you know"), "I mean" ("fifty, I mean,
+# fifteen"), "like" ("like, a hundred"), типа, как бы, вот, ну, короче, so, well, just, actually.
 SOUNDS = frozenset("uh um uhm erm hmm эм ммм".split())
 SOUND_SHAPE = re.compile(r"([(\[]*)([^\W\d_]+)([)\]]*)([,.?!…;:]*)")
-# WORD_FILLERS go only mid-sentence where commas or ellipses set them off on both sides (", you
-# know,"), and not before "and", "or" or a word ending in a comma (a list). Left out, because they
-# carry meaning too often to tell from punctuation: "I mean" ("fifty, I mean, fifteen" corrects),
-# "like" ("like, a hundred", "comment, like, then subscribe"), типа, как бы, вот, ну, короче, so,
-# well, just, actually, basically, right, okay, просто.
-WORD_FILLERS = (("you", "know"),)
-WORD_SHAPE = re.compile(r"([^\W\d_]+)([,.…]*)")
 PAIRS = {"(": ")", "[": "]"}
-LIST_WORDS = frozenset("and or".split())  # ", you know, and": a list, not a filler
-# Words after which a sound is named, not made ("the letter um", "the sounds um and uh", "звуки эм
-# и ммм"); the protection runs on through a list of sounds after one, up to NAMED_LIST tokens.
-NAMING = frozenset(
-    """буква букву буквы буквой букве букв буквам буквами буквах символ символа символы символов
-    символом звук звука звуки звуков звуком звуками звукам слово слова слов словом словами
-    междометие междометия letter letters sound sounds word words filler fillers""".split()
+# A note that talks about sounds or words, or quotes something, is left alone as a whole: there a
+# sound may be the subject ("Replace um with uh", "звуке эм") or a literal ("'um'"). It does so on
+# any quote or backtick character, an apostrophe that is not inside a word, or a word starting with
+# one of META_STEMS. 7 of the 40 test notes match (word, replace, quote, transcribe, quote marks),
+# which kept 1 of their sounds.
+META_STEMS = tuple(
+    "sound word letter filler replac transcri spell quot звук слов букв символ междомет замен "
+    "транскри цитат".split()
 )
-NAMED_LIST = 10
-LIST_JOINS = frozenset("and or и или".split())
+META_MARKS = re.compile(r'["“”«»‘`]|(?<![^\W_])[\'’]|[\'’](?![^\W_])')
 FRACTIONS = frozenset(
     "half halves quarter quarters third thirds dozen dozens половина половину половины половиной "
     "пол четверть четверти треть трети".split()
@@ -205,7 +198,6 @@ FRACTIONS = frozenset(
 # has 1,897 characters, and 3,000 words (GS_PUNCT_MAX_WORDS) of speech are about 20,000.
 STRIP_MAX_CHARS = 50_000
 STRIP_MAX_SPACE = 1_000
-QUOTED = re.compile(r'"[^"]*"|“[^”]*”|«[^»]*»|`[^`]*`|\*\*[^*]*\*\*')  # single quotes: _quoted
 APOSTROPHES = str.maketrans(dict.fromkeys("\u2018\u2019\u02bc\u02b9\u00b4\u0060\u2032\uff07", "'"))
 HYPHENS = re.compile("[-\u2010-\u2015\u2212\ufe63\uff0d]")
 DIGIT_NAMES = frozenset({"k3s"})  # names in SYSTEM_CORRECT with a digit: a fix to one is no number
@@ -363,32 +355,16 @@ def same_numbers(src: list[str], got: list[str]) -> bool:
     )
 
 
-def _is_sound(
-    tokens: list[str], i: int, seps: list[str] | None = None, quoted: list[bool] | None = None
-) -> bool:
-    """Whether tokens[i] is one of SOUNDS that may go (see there); not inside quotes (`quoted`),
-    not after a word that names it, and with a capital only at a sentence's start ("Umm Al
-    Quwain")."""
+def _is_sound(tokens: list[str], i: int, seps: list[str] | None = None) -> bool:
+    """Whether tokens[i] is one of SOUNDS that may go (see there); the note is no meta note."""
     m = SOUND_SHAPE.fullmatch(tokens[i])
-    if not m or not _sound_shaped(tokens[i]) or (quoted and quoted[i]):
+    core = m.group(2) if m else ""
+    if core.lower() not in SOUNDS or core not in (core.lower(), core.lower().capitalize()):
         return False
     start = i == 0 or (seps is not None and "\n" in seps[i]) or _stops(tokens[i - 1])
-    if m.group(2) != m.group(2).lower() and not start:
-        return False
-    k = i - 1  # past a list of sounds ("the sounds um, uh and hmm")
-    while k >= max(0, i - NAMED_LIST) and (
-        _sound_shaped(tokens[k]) or _bare(tokens[k]) in LIST_JOINS
-    ):
-        k -= 1
-    if k >= 0 and _bare(tokens[k]) in NAMING:
+    if core != core.lower() and not start:
         return False
     return not any(_number(t) for t in tokens[max(0, i - 1) : i] + tokens[i + 1 : i + 2])
-
-
-def _sound_shaped(token: str) -> bool:
-    m = SOUND_SHAPE.fullmatch(token)
-    core = m.group(2) if m else ""
-    return core.lower() in SOUNDS and core in (core.lower(), core.lower().capitalize())
 
 
 def _number(token: str) -> bool:
@@ -400,85 +376,21 @@ def _number(token: str) -> bool:
     return any(part in NUMBER_WORDS or part in FRACTIONS for part in HYPHENS.split(bare))
 
 
-def _quoted(text: str, found: list[re.Match]) -> list[bool]:
-    """For each token of `found`, whether it lies in a quoted or code span of `text`."""
-    out = [False] * len(found)
-    for spans in ([q.span() for q in QUOTED.finditer(text)], _single_quoted(text)):
-        k = 0
-        for start, end in spans:
-            while k < len(found) and found[k].end() <= start:
-                k += 1
-            j = k
-            while j < len(found) and found[j].start() < end:
-                out[j] = True
-                j += 1
-    return out
-
-
-def _single_quoted(text: str) -> list[tuple[int, int]]:
-    """The spans in ' ' or ‘ ’, in one pass. An apostrophe between two letters or digits (I'm,
-    I’m, don't) is part of the word: it neither opens nor closes one."""
-    spans, open_at = [], {"'": None, "‘": None}
-    for i, c in enumerate(text):
-        if c not in "'‘’":
-            continue
-        before = text[i - 1] if i else " "
-        after = text[i + 1] if i + 1 < len(text) else " "
-        if c in "'’" and before.isalnum() and after.isalnum():
-            continue
-        kind = "‘" if c in "‘’" else "'"
-        start = open_at[kind]
-        if start is None and c != "’" and not before.isalnum() and not after.isspace():
-            open_at[kind] = i
-        elif start is not None and c != "‘" and not before.isspace() and not after.isalnum():
-            spans.append((start, i + 1))
-            open_at[kind] = None
-    return sorted(spans)
-
-
 def _stops(token: str) -> bool:
     """Whether the token ends a sentence (. ? !), brackets aside; an ellipsis does not."""
     end = token.rstrip(")]")
     return end.endswith(("?", "!")) or (end.endswith(".") and not end.endswith(".."))
 
 
-def _word_filler(tokens: list[str], seps: list[str], sound: list[bool], i: int) -> int:
-    """The length of the word filler at tokens[i] (see WORD_FILLERS), 0 if there is none."""
-    for phrase in WORD_FILLERS:
-        j = i + len(phrase)
-        if tuple(_bare(t) for t in tokens[i:j]) != phrase:
-            continue
-        last = WORD_SHAPE.fullmatch(tokens[j - 1])
-        if (
-            not last
-            or not last.group(2).endswith((",", "..", "…"))
-            or not all(WORD_SHAPE.fullmatch(t) and t.isalpha() for t in tokens[i : j - 1])
-            or any("\n" in seps[k] for k in range(i + 1, j))
-        ):
-            return 0  # a phrase on one line, plain words, a comma or an ellipsis after it
-        k, start = i - 1, "\n" in seps[i]
-        while k >= 0 and sound[k]:  # sounds are looked past
-            start = start or _stops(tokens[k]) or "\n" in seps[k]
-            k -= 1
-        start = start or k < 0 or _stops(tokens[k])
-        if start:
-            return 0
-        if not tokens[k].endswith((",", "..", "…")):
-            return 0
-        k = j
-        while k < len(tokens) and _sound_shaped(tokens[k]):
-            k += 1
-        if k < len(tokens) and (_bare(tokens[k]) in LIST_WORDS or tokens[k].endswith(",")):
-            return 0  # a list
-        return j - i
-    return 0
+def _meta(text: str, tokens: list[str]) -> bool:
+    """Whether the note quotes something or talks about sounds or words (see META_STEMS)."""
+    return bool(META_MARKS.search(text)) or any(_bare(t).startswith(META_STEMS) for t in tokens)
 
 
-def _dropped_ok(src: list[str], i1: int, i2: int, quoted: list[bool]) -> bool:
-    """Whether src[i1:i2] may be dropped: all of it SOUNDS (outside quotes), or a repeat of the
-    words just before or after. Word fillers are not: the prompt keeps them, and the strip takes
-    them out of the answer after the guard."""
-    if all(_is_sound(src, i, quoted=quoted) for i in range(i1, i2)):
+def _dropped_ok(src: list[str], i1: int, i2: int, sounds: bool) -> bool:
+    """Whether src[i1:i2] may be dropped: all of it SOUNDS (if `sounds`: not in a meta note), or
+    a repeat of the words just before or after."""
+    if sounds and all(_is_sound(src, i) for i in range(i1, i2)):
         return True
     run = [_bare(t) for t in src[i1:i2]]
     k = len(run)
@@ -488,19 +400,18 @@ def _dropped_ok(src: list[str], i1: int, i2: int, quoted: list[bool]) -> bool:
     )
 
 
-def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:
-    """`text` without its fillers, and how many tokens were removed; only SOUNDS unless
-    `everything`. Every other token stays, and nothing inside quotes or code spans goes. Text that
-    is fillers only, longer than STRIP_MAX_CHARS or with a space of over STRIP_MAX_SPACE is left
-    as it is. Linear in the text's length.
+def strip_fillers(text: str) -> tuple[str, int]:
+    """`text` without its hesitation sounds (SOUNDS), and how many were removed. Every other token
+    stays. Text that is sounds only, a meta note (_meta), longer than STRIP_MAX_CHARS or with a
+    space of over STRIP_MAX_SPACE is left as it is. Linear in the text's length.
 
     Each removed token's own punctuation: a comma after it goes with it, but one before it stays,
     as dropping it could join a word to the next clause ("No, um, do it." is not "No do it."); a
     sentence mark after it (. ? !) moves to the word before unless that one ends a sentence
     already, and an ellipsis goes with it; brackets opened and closed within the removed words go
-    with them, others move to the word they belong to; the larger line break before it moves to
-    the next word; and when it started a sentence with a capital, the next word takes the capital
-    (a plain lower-case word only, so `k3s` or `vox-flow` stay as written).
+    with them, as do the marks inside them, others move to the word they belong to; the larger
+    line break before it moves to the next word; and when it started a sentence with a capital,
+    the next word takes the capital (a plain lower-case word only, so `k3s` stays as written).
     """
     if len(text) > STRIP_MAX_CHARS:
         logger.info("punct: fillers not stripped, %d characters", len(text))
@@ -512,16 +423,11 @@ def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:
         logger.info("punct: fillers not stripped, a space of over %d characters", STRIP_MAX_SPACE)
         return text, 0
     n = len(tokens)
-    quoted = _quoted(text, found)
-    gone = [_is_sound(tokens, i, seps, quoted) for i in range(n)]
-    sound = list(gone)
-    i = 0
-    while everything and i < n:
-        k = 0 if gone[i] else _word_filler(tokens, seps, sound, i)
-        k = 0 if any(quoted[i : i + k]) else k
-        gone[i : i + k] = [True] * k
-        i += max(k, 1)
+    gone = [_is_sound(tokens, i, seps) for i in range(n)]
     if not any(gone) or all(gone):
+        return text, 0
+    if _meta(text, tokens):
+        logger.info("punct: fillers not stripped, the note quotes or talks about words")
         return text, 0
     caps, last, i = set(), None, 0  # last: the last token kept so far
     lines = [sep.count("\n") for sep in seps]
@@ -617,7 +523,7 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
     sm = difflib.SequenceMatcher(
         None, [_key(t) for t in src], [_key(t) for t in got], autojunk=False
     )
-    kept, reason, quoted = 0, "", None
+    kept, reason, sounds = 0, "", None
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             kept += i2 - i1
@@ -628,10 +534,9 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
         elif tag == "insert" and j2 - j1 > 1:
             reason = "insertion"
         elif tag == "delete":
-            if quoted is None:  # once, and only if needed
-                text = " ".join(src)
-                quoted = _quoted(text, list(re.finditer(r"\S+", text)))
-            reason = "" if _dropped_ok(src, i1, i2, quoted) else "deletion"
+            if sounds is None:  # once, and only if needed
+                sounds = not _meta(" ".join(src), src)
+            reason = "" if _dropped_ok(src, i1, i2, sounds) else "deletion"
         elif tag == "replace" and max(i2 - i1, j2 - j1) > MAX_REPLACE:
             reason = "replacement"
     dropped, added = len(src) - kept, len(got) - kept
@@ -939,7 +844,7 @@ class Punctuate:
                 self.inflight -= 1
         removed = 0
         if context is not None and outcome in STRIPPED:
-            out, removed = _without_fillers(out, everything=outcome != "rejected")
+            out, removed = _without_fillers(out)
         logger.info(
             "punct: %s, %d words, longest unpunctuated %d, %d fillers removed, %.0f ms",
             outcome,
@@ -1016,21 +921,20 @@ class Punctuate:
         return "rejected", body
 
 
-# Correction mode removes fillers from the top-level text after the guard, so the guard sees the
-# model's answer as it came. Accepted answers (and an unchanged one, which the model read too) lose
-# every filler; a refused answer, which sends Whisper's own text, loses only SOUNDS:
-# that path is the safety net, so it gets no change that could alter a word's meaning. Busy,
-# timeout, error and skipped keep Whisper's answer byte for byte. strip_fillers is linear in the
+# Correction mode removes hesitation sounds from the top-level text after the guard, so the guard
+# sees the model's answer as it came: from a corrected, applied or unchanged answer, and from
+# Whisper's own text when the answer was refused (rejected). Busy, timeout, error and skipped keep
+# Whisper's answer byte for byte. strip_fillers is linear in the
 # text and skips one past STRIP_MAX_CHARS, so it runs on the event loop: well under a millisecond
 # for a note, about 50 ms at the bound. Any error in it sends the answer as it was.
 STRIPPED = ("corrected", "applied", "unchanged", "rejected")
 
 
-def _without_fillers(body: bytes, everything: bool) -> tuple[bytes, int]:
+def _without_fillers(body: bytes) -> tuple[bytes, int]:
     """The answer with fillers removed from its top-level `text`; segments and words unchanged."""
     try:
         payload = json.loads(body)
-        text, removed = strip_fillers(payload["text"], everything)
+        text, removed = strip_fillers(payload["text"])
         if not removed:
             return body, 0
         return json.dumps({**payload, "text": text}, ensure_ascii=False).encode(), removed

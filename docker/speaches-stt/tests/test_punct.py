@@ -883,6 +883,13 @@ class Correction(unittest.TestCase):
             ("send ER the report", "Send the report.", "deletion"),
             ("message @um tomorrow", "Message tomorrow.", "deletion"),
             ("it costs like um three dollars", "It costs three dollars.", "deletion"),
+            # Codex round 3
+            ("Call Alice. Um, Alice needs the report.", "Call Alice needs the report.", "deletion"),
+            ("Search for “well um actually” here", "Search for “well actually” here.", "deletion"),
+            ("Book a hotel in Umm Al Quwain", "Book a hotel in Al Quwain.", "deletion"),
+            ("Напиши букву э в начале", "Напиши букву в начале.", "deletion"),
+            ("use half um filters", "Use half filters.", "deletion"),
+            ("the the um tests pass", "The tests pass.", ""),  # one sentence: a repeat
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], why, (src, got))
 
@@ -1107,7 +1114,7 @@ class Fillers(unittest.TestCase):
                 ("Okay, I mean, we merge.", "Okay, we merge."),
                 ("Мы, типа, закончили.", "Мы, закончили."),
                 ("Это, как бы, готово.", "Это, готово."),
-                ("Ну, короче, давай проверим.", "Давай проверим."),  # "Ну," at a start, then mid
+                ("Ну, типа, давай проверим.", "Давай проверим."),  # "Ну," at a start, then mid
                 ("Ну, давай.", "Давай."),
                 ("Не, ну, давай.", "Не, давай."),
             )
@@ -1183,7 +1190,7 @@ class Fillers(unittest.TestCase):
                 ("No, you know, merge it.", "No, merge it."),
                 ("Нет, э, не надо.", "Нет, не надо."),
                 ("Yes, uh, deploy it.", "Yes, deploy it."),
-                ("Да, короче, мерджим.", "Да, мерджим."),
+                ("Да, вот, мерджим.", "Да, мерджим."),
                 ("Stop, uh, deploying.", "Stop, deploying."),
                 ("I, uh, like it.", "I, like it."),
             )
@@ -1216,6 +1223,57 @@ class Fillers(unittest.TestCase):
         )
         self.keep("um", "Uh, um.", " Hmm")
 
+    def test_codex_round_3(self) -> None:
+        self.keep(
+            # lists
+            "Remember to comment, like, and subscribe.",
+            "Remember to comment, like, share, and subscribe.",
+            "Этот маршрут дешевле, короче, безопаснее.",
+            "Мы, типа, и они.",
+            # quoted and code spans
+            "Search for “well um actually” in the transcript.",
+            'Search for "well um actually" in it.',
+            "Search for «ну э вот» in it.",
+            "Search for ‘well um actually’ in it.",
+            "I said 'um' twice.",
+            "Run `git um status` now.",
+            "Use **um uh** here.",
+            "Say “so, like, you know,” twice.",
+            # capitalised names, named letters and sounds
+            "Book a hotel in Umm Al Quwain.",
+            "Напиши букву э в начале слова.",
+            "It is the letter um.",
+            "Say the word uh slowly.",
+            # fractions
+            "Use half um filters.",
+            "Use ½ um filters.",
+            "Add a quarter uh cup.",
+            "Возьми половину э порции.",
+        )
+        self.check(
+            (
+                ("We (uh. Um) agree.", "We agree."),  # the stop inside the brackets goes too
+                ("(uh. we agree)", "(we agree)"),
+                ("Uh, Um, we merge.", "Um, we merge."),  # a capital mid-sentence stays
+                ("Don't um go, it's fine.", "Don't go, it's fine."),
+            )
+        )
+
+    def test_long_or_odd_text_is_left_alone(self) -> None:  # Codex round 3
+        for text in (
+            "ok " + "um " * 2997 + " " * 8_000_000 + "done",
+            "(" * 1_000_000 + "ok" + ")" * 1_000_000 + " um" * 2999,
+            "we um merge " * 5_000,  # 60,000 characters
+            "we um" + " " * 1_001 + "merge",
+        ):
+            t0 = time.perf_counter()
+            self.assertEqual(punct.strip_fillers(text), (text, 0), text[:20])
+            self.assertLess(time.perf_counter() - t0, 1, text[:20])
+        text = "ok " + "um " * 2997 + " " * 999 + "done"  # just inside the bounds: fast
+        t0 = time.perf_counter()
+        self.assertEqual(punct.strip_fillers(text), ("ok" + " " * 1_000 + "done", 2997))
+        self.assertLess(time.perf_counter() - t0, 1)
+
     def test_numbers_and_negations_are_never_removed(self) -> None:
         for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:
             for template in ("uh, {}, like, you know,", "{}, um, like,", "Like, {} um"):
@@ -1226,8 +1284,9 @@ class Fillers(unittest.TestCase):
         for text in (
             "we uh agree" + " " * 100_000,
             "um " * 50_000 + "x",
-            "a, like," * 30_000,
-            "Um " * 2999 + "a" * 8_000_000,  # one capital for one word, once
+            "a, like," * 6_000,
+            "Um " * 2999 + "a" * 40_000,
+            "Um " * 2999 + "a" * 8_000_000,  # past the bound: left alone
         ):
             t0 = time.perf_counter()
             punct.strip_fillers(text)

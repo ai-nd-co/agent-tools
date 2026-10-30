@@ -24,22 +24,26 @@ The log line has counts and timings only, never text.
 Correction mode: the extra header `X-GS-Correct: context` (with `X-GS-Punctuate: llm`) asks the
 model also to fix misheard words, names above all, using the chat's recent messages from
 `X-GS-Context` (standard base64 of UTF-8 text, at most 4,000 characters; when invalid it is ignored,
-when longer only its end is kept, and it is never logged), and to remove filler words ("um", "you
-know", "like", "ну", "как бы" ...) and words repeated by accident. The pass then runs on any
-transcript of at least GS_PUNCT_CORRECT_MIN_WORDS (3) words. The word guard is replaced by a looser
-one against rewriting: the answer is aligned with the transcript (difflib on lower-case tokens
-without edge punctuation; tokens with a digit keep everything but sentence marks), and besides the
-dropped fillers at most max(2, 10%) of the transcript's tokens may be dropped and as many added,
-and the answer must keep at least half as many tokens. A correction replaces only the top-level
+when longer only its end is kept, and it is never logged). The pass then runs on any transcript of
+at least GS_PUNCT_CORRECT_MIN_WORDS (3) words. The word guard is replaced by a looser one against
+rewriting: the answer is aligned with the transcript (difflib on lower-case tokens without edge
+punctuation; tokens with a digit keep everything but sentence marks), and at most max(2, 10%) of
+the transcript's tokens may be dropped and as many added, and the answer must keep at least half
+as many tokens. A correction replaces only the top-level
 `text` (`X-GS-Punctuated: corrected`); segments and words stay as Whisper wrote them, since their
 timings belong to Whisper's words. An answer that changed no word is used as in the normal pass
 (applied or unchanged). It also refuses any change to a number (digits compared exactly, so a sign,
 currency or percent counts) or to a negation, an insertion of more than one token, a deletion of
-anything but repeats and the fillers in FILLERS, and a replacement of more than 2 tokens on either
-side (fillers at its ends not counted). It does not police person names: a context can make the
-model swap one name for another. A refused answer sends the original (rejected); its punctuation is
-not reused, as it can put a stop mid-sentence.
+anything but a repeat or a filler, and a replacement of more than 2 tokens on either side. It does
+not police person names: a context can make the model swap one name for another. A refused answer
+sends the original (rejected); its punctuation is not reused, as it can put a stop mid-sentence.
 The log line has counts and the refusal's kind only.
+
+Fillers: after the guard, correction mode removes filler words from the top-level `text` in code,
+not by the model ("um", "you know", "like", "ну", "как бы" ...; FILLERS, with NOT_FILLER keeping a
+word where its neighbours give it meaning, as in "I like it"). Corrected, applied and unchanged
+answers lose every filler, a rejected one only the hesitation sounds in ALWAYS; segments and words
+keep them, and the outcome header stays as it was. The log line counts the removed tokens.
 
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
@@ -95,11 +99,6 @@ MAX_CONTEXT_HEADER = 24 * 1024
 # previous notes as context: 17 notes changed, by at most 6 tokens (of 324): names (Codex, Claude,
 # k3s, Anthropic), repeated words dropped, a missing article or pronoun, hyphenation. No rephrasing.
 # Without the context two of the name fixes were missed.
-# Removing fillers (Davron, 2026-10-30), tested with Gemma 4 31B UD-IQ2_M on the same 40 notes:
-# 14 corrected and 16 refused, against 18 and 5 when keeping fillers. The accepted answers dropped
-# 11 filler tokens and 6 repeated ones and no other word; asked to remove anything, the model also
-# drops false starts in about 7 notes, which the guard refuses. Two wordings that also listed false
-# starts as words to keep each returned one note without any punctuation.
 SYSTEM_CORRECT = (
     "You correct transcripts of voice notes made by speech recognition, which often mishears "
     "names and technical terms. Fix misheard words, punctuation and capitalization, and split the "
@@ -108,19 +107,16 @@ SYSTEM_CORRECT = (
     "use; never copy anything else from them. Names that come up often: Codex, Claude, Claude "
     "Code, claude-tools, k3s, Whisper, vox-flow, agent-hub, Telegram, Asana, Terraform, GPU. Keep "
     "the speaker's own words, word order and language: do not rephrase, summarise, translate, "
-    'explain, add or remove anything. The only words you remove are fillers (um, uh, er, "you '
-    'know", "I mean", and "like" when it is only a filler; in Russian ну, э, типа, как бы, '
-    'короче, вот when they are only fillers) and a word said twice by accident ("the the"); keep '
-    "every other word, even one that seems unnecessary. Output only the corrected transcript."
+    "explain, add or remove anything, and keep filler words and repeats. Output only the "
+    "corrected transcript."
 )
 # The guard against rewriting. On the same notes the corrections changed at most 5.8% of the tokens
 # of a note of 50+ words (2 of a 16-word note); prompts asking to clean up, paraphrase or summarise
 # changed 11.8-100% (33 of 36 answers; the other 3 changed 1 token of a 14-word note). Short notes
 # may change 2 tokens, as one name can be two words ("cloud code"). On top of the share: no number
 # or negation may change, an insertion is one token at most, a deletion only drops a repeat or a
-# filler (dropped fillers do not count to the share), and one replacement spans at most MAX_REPLACE
-# tokens on either side, fillers at its ends not counted. Person names are not policed: the owner
-# chose free correction, and a context can talk the model into another name.
+# filler, and one replacement spans at most MAX_REPLACE tokens on either side. Person names are not
+# policed: the owner chose free correction, and a context can talk the model into another name.
 CORRECT_MAX_SHARE = 0.10
 CORRECT_MIN_ALLOWED = 2
 CORRECT_MIN_COUNT_RATIO = 0.5
@@ -171,10 +167,12 @@ NUMBER_WORDS = frozenset(
     + [w.replace("ё", "е") for w in _russian_numbers()]  # compared with ё folded to е
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
-# What a correction may drop besides repeats: SYSTEM_CORRECT's fillers and a few hesitation sounds.
+# Fillers, which correction mode removes in code (strip_fillers) and a correction may also drop.
 # Not "so", "well", "just", "actually", "basically", "right", "okay", "просто": in Davron's notes
-# they mostly carry meaning ("so" 38 times in the 40 notes, "actually" 16, "right" 15), and allowing
-# one would let a correction drop it where it does.
+# they mostly carry meaning ("so" 38 times in 40 notes, "actually" 16, "right" 15). On those 40
+# notes (the model's accepted answers, 2026-10-30) the strip removed 28 tokens: uh 8, like 6, I mean
+# 4, you know 2, как бы 1, none of them a word with meaning. Before the rule for "like" it also took
+# "like" as "such as", "like three" (about three) and "feeling like".
 FILLERS = tuple(  # longest first, so "как бы" is one filler and not "как" left over
     sorted(
         {
@@ -188,8 +186,12 @@ FILLERS = tuple(  # longest first, so "как бы" is one filler and not "ка�
 )
 # Some of them are often words that carry meaning: next to these words (before it | after it) one
 # is no filler and may not be dropped. "I like it", "looks like that", "do you know", "what I mean
-# is", "сделай короче", "какого типа", "вот так", "как бы не". In the 2026-10-30 test the model
-# dropped "like" before "this" once; this list refused it.
+# is", "сделай короче", "какого типа", "вот так", "как бы не". "like" also has _like_is_filler.
+# The hesitation sounds, which carry nothing: the only fillers taken out of a refused answer.
+ALWAYS = frozenset((w,) for w in "uh um uhm er erm ah eh hmm mm э эм".split())
+LIKE_AFTER = frozenset("and but or so then because we'll i'll you'll they'll he'll she'll".split())
+OPENERS = "([{«“„\"'"
+CLOSERS = ")]}»”\"'"
 NOT_FILLER = {
     tuple(phrase.split()): tuple(frozenset(side.split()) for side in sides.split("|"))
     for phrase, sides in {
@@ -359,18 +361,41 @@ def same_numbers(src: list[str], got: list[str]) -> bool:
     )
 
 
-def _filler(src: list[str], i: int, j: int, at_end: bool = False) -> int:
-    """The length of the filler starting at src[i] (ending at src[j - 1] if `at_end`) within
-    src[i:j], 0 if there is none."""
-    for phrase in FILLERS:
+def _filler(
+    src: list[str], i: int, j: int | None = None, phrases: tuple[tuple[str, ...], ...] = FILLERS
+) -> int:
+    """The length of the filler starting at src[i] and ending before src[j], 0 if there is none.
+    Its neighbours are read from the whole of src."""
+    for phrase in phrases:
         n = len(phrase)
-        start = j - n if at_end else i
-        if n > j - i or tuple(_bare(t) for t in src[start : start + n]) != phrase:
+        if (
+            i + n > (len(src) if j is None else j)
+            or tuple(_bare(t) for t in src[i : i + n]) != phrase
+        ):
             continue
         before, after = NOT_FILLER.get(phrase, ((), ()))
-        if _word(src, start - 1) not in before and _word(src, start + n) not in after:
-            return n
+        if _word(src, i - 1) in before or _word(src, i + n) in after:
+            continue
+        if phrase == ("like",) and not _like_is_filler(src, i):
+            continue
+        return n
     return 0
+
+
+def _like_is_filler(src: list[str], i: int) -> bool:
+    """Whether "like" at src[i] stands where a filler does: not before a number ("like three" is
+    "about three"), and at a sentence's start, beside a comma or an ellipsis, or after one of
+    LIKE_AFTER. Elsewhere it is often "such as" ("tools like Codex") or a verb, so it stays."""
+    after = _word(src, i + 1)
+    if after in NUMBER_WORDS or (any(c.isdigit() for c in after) and after not in DIGIT_NAMES):
+        return False
+    prev = src[i - 1].rstrip(CLOSERS) if i else "."
+    return (
+        prev[-1:] in ",.?!…;:"
+        or src[i].rstrip(CLOSERS).endswith((",", "..", "…"))
+        or _word(src, i - 1) in LIKE_AFTER
+        or (_word(src, i - 1),) in ALWAYS
+    )
 
 
 def _word(src: list[str], i: int) -> str:
@@ -380,14 +405,13 @@ def _word(src: list[str], i: int) -> str:
     return _bare(src[i]).translate(APOSTROPHES).replace("ё", "е")
 
 
-def _dropped_ok(src: list[str], i1: int, i2: int) -> tuple[bool, int]:
-    """Whether src[i1:i2] may be dropped, and how many of its tokens are fillers: fillers, and
-    what is left is nothing or a repeat of the words just before or after."""
-    rest, fillers, i = [], 0, i1
+def _dropped_ok(src: list[str], i1: int, i2: int) -> bool:
+    """Whether src[i1:i2] may be dropped: fillers (which the strip would remove anyway), and what
+    is left is nothing or a repeat of the words just before or after."""
+    rest, i = [], i1
     while i < i2:
         n = _filler(src, i, i2)
         if n:
-            fillers += n
             i += n
         else:
             rest.append(_bare(src[i]))
@@ -395,16 +419,62 @@ def _dropped_ok(src: list[str], i1: int, i2: int) -> tuple[bool, int]:
     k = len(rest)
     before = [_bare(t) for t in src[max(0, i1 - k) : i1]]
     after = [_bare(t) for t in src[i2 : i2 + k]]
-    return (not rest or rest in (before, after)), fillers
+    return not rest or rest in (before, after)
 
 
-def _peeled(src: list[str], i1: int, i2: int) -> tuple[int, int]:
-    """src[i1:i2] without the fillers at its two ends: the bounds of what is left."""
-    while n := _filler(src, i1, i2):
-        i1 += n
-    while n := _filler(src, i1, i2, at_end=True):
-        i2 -= n
-    return i1, i2
+def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:
+    """`text` without its fillers, and how many tokens were removed; only the sounds in ALWAYS
+    unless `everything`. Whitespace, paragraph breaks and every other token stay as they are.
+
+    Around a removed filler: a comma after it goes with it; a sentence mark after it (. ? !) moves
+    to the word before, replacing a comma there; brackets and quotes stay with their neighbours;
+    and when it started a sentence with a capital, the next word takes the capital (a plain
+    lower-case word only, so `k3s` or `vox-flow` stay as written). Text that is fillers only is
+    left as it is.
+    """
+    items = [[m.group(1), m.group(2)] for m in re.finditer(r"(\s*)(\S+)", text)]
+    tokens = [t for _, t in items]
+    phrases = FILLERS if everything else tuple(p for p in FILLERS if p in ALWAYS)
+    gone, i = [False] * len(tokens), 0
+    while i < len(tokens):
+        n = _filler(tokens, i, phrases=phrases)
+        gone[i : i + max(n, 1)] = [n > 0] * max(n, 1)
+        i += max(n, 1)
+    if not any(gone) or all(gone):
+        return text, 0
+    i = 0
+    while i < len(tokens):
+        if not gone[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(tokens) and gone[j]:
+            j += 1
+        prev, nxt = (i - 1 if i else None), (j if j < len(tokens) else None)
+        first, last = tokens[i], tokens[j - 1]
+        head = first[: len(first) - len(first.lstrip(OPENERS))]
+        body = last.rstrip(CLOSERS)
+        closers = last[len(body) :]
+        # An ellipsis after a filler is the hesitation itself and goes with it.
+        stop = None if body.endswith(("..", "…")) else re.search(r"[.?!]+\Z", body)
+        starts = prev is None or "\n" in items[i][0] or tokens[prev].rstrip(CLOSERS)[-1:] in ".?!…"
+        if prev is not None:
+            if stop and tokens[prev].rstrip(CLOSERS)[-1:] not in ".?!…":
+                tokens[prev] = tokens[prev].rstrip(",;:") + stop.group()
+            tokens[prev] += closers
+        if nxt is not None:
+            if starts and first[len(head) :][:1].isupper():
+                word = tokens[nxt].lstrip(OPENERS)
+                lead = tokens[nxt][: len(tokens[nxt]) - len(word)]
+                if word.rstrip(EDGE + CLOSERS).isalpha() and word.rstrip(EDGE + CLOSERS).islower():
+                    tokens[nxt] = lead + word[0].upper() + word[1:]
+            tokens[nxt] = head + tokens[nxt]
+            if prev is None or ("\n" in items[i][0] and "\n" not in items[nxt][0]):
+                items[nxt][0] = items[i][0]  # keep a leading space or a paragraph break
+        i = j
+    kept = "".join(sep + t for (sep, _), t, g in zip(items, tokens, gone, strict=True) if not g)
+    tail = text[len(text.rstrip()) :]
+    return kept + tail, sum(gone)
 
 
 def _moved(sm: difflib.SequenceMatcher, src: list[str], got: list[str]) -> bool:
@@ -446,12 +516,8 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
     sm = difflib.SequenceMatcher(
         None, [_key(t) for t in src], [_key(t) for t in got], autojunk=False
     )
-    kept, fillers, reason = 0, 0, ""
+    kept, reason = 0, ""
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
-        if tag == "replace":  # difflib can merge a dropped filler with the fix next to it
-            a, b = _peeled(src, i1, i2)
-            fillers += (a - i1) + (i2 - b)
-            tag, i1, i2 = ("replace", a, b) if a < b else ("insert", a, a)
         if tag == "equal":
             kept += i2 - i1
         elif reason:
@@ -460,15 +526,12 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
             reason = "number or negation"
         elif tag == "insert" and j2 - j1 > 1:
             reason = "insertion"
-        elif tag == "delete":
-            ok, n = _dropped_ok(src, i1, i2)
-            fillers += n
-            reason = "" if ok else "deletion"
+        elif tag == "delete" and not _dropped_ok(src, i1, i2):
+            reason = "deletion"
         elif tag == "replace" and max(i2 - i1, j2 - j1) > MAX_REPLACE:
             reason = "replacement"
     dropped, added = len(src) - kept, len(got) - kept
-    # Dropped fillers are what the prompt asks for: only the other changes count to the share.
-    if not reason and (dropped - fillers > allowed or added > allowed):
+    if not reason and (dropped > allowed or added > allowed):
         reason = "share"
     if not reason and _moved(sm, src, got):
         reason = "move"
@@ -770,11 +833,15 @@ class Punctuate:
                 outcome, out = await self._ask(payload, tokens, body, begin, context)
             finally:
                 self.inflight -= 1
+        removed = 0
+        if context is not None and outcome in STRIPPED:
+            out, removed = _without_fillers(out, everything=outcome != "rejected")
         logger.info(
-            "punct: %s, %d words, longest unpunctuated %d, %.0f ms",
+            "punct: %s, %d words, longest unpunctuated %d, %d fillers removed, %.0f ms",
             outcome,
             len(tokens),
             longest_unpunctuated(tokens),
+            removed,
             (time.perf_counter() - begin) * 1000,
         )
         return outcome, out
@@ -843,6 +910,27 @@ class Punctuate:
         if ok:
             return "corrected", json.dumps({**payload, "text": text}, ensure_ascii=False).encode()
         return "rejected", body
+
+
+# Correction mode removes fillers from the top-level text after the guard, so the guard sees the
+# model's answer as it came. Accepted answers (and an unchanged one, which the model read too) lose
+# every filler; a refused answer, which sends Whisper's own text, loses only the sounds in ALWAYS:
+# that path is the safety net, so it gets no change that could alter a word's meaning. Busy,
+# timeout, error and skipped keep Whisper's answer byte for byte.
+STRIPPED = ("corrected", "applied", "unchanged", "rejected")
+
+
+def _without_fillers(body: bytes, everything: bool) -> tuple[bytes, int]:
+    """The answer with fillers removed from its top-level `text`; segments and words unchanged."""
+    try:
+        payload = json.loads(body)
+        text, removed = strip_fillers(payload["text"], everything)
+        if not removed:
+            return body, 0
+        return json.dumps({**payload, "text": text}, ensure_ascii=False).encode(), removed
+    except Exception as e:  # noqa: BLE001 - the answer as it was
+        logger.warning("punct: fillers: %s", type(e).__name__)
+        return body, 0
 
 
 async def _send_error(send, status: int, detail: bytes) -> None:  # noqa: ANN001

@@ -864,75 +864,14 @@ class Correction(unittest.TestCase):
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], "", (src, got))
 
-    def test_filler_words_and_phrases_may_be_dropped(self) -> None:
-        for src, got in (
-            ("you know we should merge it today", "We should merge it today."),
-            ("i mean the build is green", "The build is green."),
-            ("the node is like down again", "The node is down again."),
-            ("um so you know i mean we merge it now", "So we merge it now."),
-            ("uh like the the tests pass", "The tests pass."),  # fillers and a repeat in one run
-            ("it is uh you know broken", "It is broken."),
-            ("ну короче давай проверим", "Давай проверим."),
-            ("это как бы уже готово", "Это уже готово."),
-            ("и вот мы э закончили типа", "И мы закончили."),
-        ):
-            self.assertEqual(punct.is_correction(src.split(), got.split())[3], "", (src, got))
-
-    def test_meaningful_words_are_not_fillers(self) -> None:
-        for src, got in (
-            ("so we merge it", "We merge it."),
-            ("well it works now", "It works now."),
-            ("just restart the node", "Restart the node."),
-            ("actually the build failed", "The build failed."),
-            # filler words where they carry meaning
-            ("i like the new layout", "I the new layout."),
-            ("it looks like rain today", "It looks rain today."),
-            ("do it like this please", "Do it this please."),
-            ("do you know the answer", "Do the answer."),
-            ("that is what i mean here", "That is what here."),
-            ("сделай короче пожалуйста", "Сделай пожалуйста."),
-            ("какого типа это поле", "Какого это поле."),
-            ("вот так и сделаем", "Так и сделаем."),
-            ("смотри как бы то ни было", "Смотри то ни было."),
-            # a filler next to other dropped words is no excuse for them
-            ("you know the deploy step we skip", "The step we skip."),
-        ):
-            ok, _, _, why = punct.is_correction(src.split(), got.split())
-            self.assertFalse(ok, (src, got))
-            self.assertIn(why, ("deletion", "replacement"), (src, got))
-        # a negation next to a filler stays protected
-        self.assertEqual(
-            punct.is_correction("like don't deploy it".split(), "Deploy it.".split())[3],
-            "number or negation",
-        )
-
-    def test_dropped_fillers_do_not_count_to_the_share(self) -> None:
-        words = [f"w{chr(97 + i // 26)}{chr(97 + i % 26)}" for i in range(30)]  # share: 3
-        src = list(words)
-        for i in (25, 20, 15, 10, 5, 0):  # 6 fillers, 8 tokens
-            src[i:i] = ["you", "know"] if i % 2 else ["um"]
-        self.assertEqual(punct.is_correction(src, words), (True, 9, 0, ""))
-        for fixes, ok in ((3, True), (4, False)):  # the other changes keep their budget
-            got = [t + "x" if i % 7 == 3 and i // 7 < fixes else t for i, t in enumerate(words)]
-            self.assertEqual(punct.is_correction(src, got)[0], ok, fixes)
-        self.assertEqual(punct.is_correction(src, got)[3], "share")
-
-    def test_fillers_next_to_a_fix(self) -> None:
-        for src, got, counts in (
-            ("um cloud code is down", "Claude Code is down.", (2, 1)),
-            ("you know cloud code is down", "Claude Code is down.", (3, 1)),
-            ("ask the codec like now", "Ask the Codex now.", (2, 1)),
-            ("ask codec you know uh to merge", "Ask Codex to merge.", (4, 1)),
-            ("ну кодекс э проверит", "Codex проверит.", (3, 1)),
-            ("uh you know deploy now", "Please deploy now.", (3, 1)),  # one inserted token
-        ):
-            self.assertEqual(
-                punct.is_correction(src.split(), got.split()), (True, *counts, ""), (src, got)
-            )
-        # what the fillers leave beside the fix is still bounded
+    def test_guard_accepts_what_the_strip_would_remove(self) -> None:
         for src, got, why in (
-            ("you know deploy now", "Please do deploy now.", "insertion"),
-            ("um ask the codec now", "Tell all of the Codex now.", "replacement"),
+            ("you know we should merge it today", "We should merge it today.", ""),
+            ("like the the tests pass", "The tests pass.", ""),
+            ("ну короче давай проверим", "Давай проверим.", ""),
+            ("i like the new layout", "I the new layout.", "deletion"),
+            ("do it like this please", "Do it this please.", "deletion"),
+            ("so we merge it", "We merge it.", "deletion"),
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], why, (src, got))
 
@@ -1107,6 +1046,135 @@ class Correction(unittest.TestCase):
             complete = punct.make_complete("http://llm/v1", "m", transport=t, system=system)
             asyncio.run(complete("hi", 10, 5))
         self.assertEqual(seen, [punct.SYSTEM, punct.SYSTEM_CORRECT])
+
+
+class Fillers(unittest.TestCase):
+    def test_each_filler_is_removed(self) -> None:
+        english = "uh um uhm er erm ah eh hmm mm like".split() + ["you know", "i mean"]
+        russian = "э эм ну типа короче вот".split() + ["как бы"]
+        for fillers, sentence in ((english, "then {}we merge it"), (russian, "мы {}проверим")):
+            for filler in fillers:
+                got = punct.strip_fillers(sentence.format(filler + " "))
+                self.assertEqual(got, (sentence.format(""), len(filler.split())), filler)
+        self.assertEqual(
+            {f for (f,) in punct.ALWAYS}, set("uh um uhm er erm ah eh hmm mm э эм".split())
+        )
+        self.assertEqual(
+            {" ".join(p) for p in punct.FILLERS}, set(english + russian), "a filler without a test"
+        )
+
+    def test_neighbour_exceptions_keep_the_word(self) -> None:
+        for text in (
+            "I like the new layout.",
+            "We'd like a review.",
+            "It looks like rain.",
+            "It feels like a bug.",
+            "Tools like Codex work.",  # "like" only where a filler stands: _like_is_filler
+            "It took like 15 minutes.",
+            "We ran like three rounds.",
+            "I am feeling like we can merge.",
+            "the build like failed again",
+            "Something like that.",
+            "Do it like this.",
+            "Do you know the answer?",
+            "If you know a fix, say so.",
+            "You know what to do.",
+            "That is what I mean.",
+            "I mean it.",
+            "Сделай короче.",
+            "Это короче, чем вчера.",
+            "Какого типа это поле?",
+            "Вот так и сделаем.",
+            "Вот это работает.",
+            "Как бы не сломать.",
+        ):
+            self.assertEqual(punct.strip_fillers(text), (text, 0), text)
+
+    def test_punctuation_around_a_removal(self) -> None:
+        for text, want in (
+            ("Um, so we merge it.", "So we merge it."),
+            ("So, um, we merge it.", "So, we merge it."),
+            ("It works, you know.", "It works."),
+            ("Is it ready, like?", "Is it ready?"),
+            ("Okay. I mean, we merge.", "Okay. We merge."),
+            ("Done. Uh, like, the tests pass.", "Done. The tests pass."),
+            ("This is like... not sure.", "This is not sure."),
+            ("Like, k3s is down.", "k3s is down."),  # names keep their case
+            ("«Um, yes», she said.", "«Yes», she said."),
+            ("Ну, короче, давай проверим.", "Давай проверим."),
+            ("Мы, типа, закончили.", "Мы, закончили."),
+            (" uh we merge", " we merge"),  # Whisper's leading space stays
+            ("We merge.\n\nUm, then we test.", "We merge.\n\nThen we test."),
+            ("Um.\n\nWe merge.", "We merge."),
+        ):
+            self.assertEqual(punct.strip_fillers(text)[0], want, text)
+
+    def test_text_of_fillers_only_is_kept(self) -> None:
+        for text in ("um", "Uh, um.", " you know"):
+            self.assertEqual(punct.strip_fillers(text), (text, 0))
+
+    def test_sounds_only(self) -> None:
+        text = "Uh, you know, we like, um, merge it, ну, вот."
+        self.assertEqual(
+            punct.strip_fillers(text, everything=False),
+            ("You know, we like, merge it, ну, вот.", 2),
+        )
+
+    def test_numbers_and_negations_are_never_removed(self) -> None:
+        for word in sorted(punct.NEGATIONS) + [
+            "15",
+            "1.5",
+            "-3",
+            "fifty",
+            "пять",
+            "don't",
+            "won't",
+        ]:
+            for template in ("uh {} like you know", "like {} um", "{} like", "you know {} i mean"):
+                text = template.format(word)
+                got = punct.strip_fillers(text)[0].split()
+                self.assertIn(word, got, text)
+                self.assertEqual(got.count(word), 1, text)
+
+
+class FillersInThePass(unittest.TestCase):
+    PAYLOAD = verbose("uh we should um merge the codec branch today you know")
+
+    def run_pass(self, answer: str | Exception, payload: dict | None = None):  # noqa: ANN201
+        app = punct.Punctuate(whisper_app(payload or self.PAYLOAD), Fake(), correct=Fake(answer))
+        return call_correct(app, b64(CONTEXT))
+
+    def test_corrected_text_loses_fillers_after_the_guard(self) -> None:
+        r = self.run_pass("Uh, we should, um, merge the Codex branch today, you know.")
+        self.assertEqual(r.headers["x-gs-punctuated"], "corrected")
+        self.assertEqual(r.json()["text"], "We should, merge the Codex branch today.")
+        self.assertEqual(r.json()["segments"], self.PAYLOAD["segments"])
+        self.assertEqual(r.json()["words"], self.PAYLOAD["words"])
+
+    def test_applied_and_unchanged_lose_fillers_in_text_only(self) -> None:
+        r = self.run_pass("Uh, we should um merge the codec branch today, you know.")
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+        self.assertEqual(r.json()["text"], "We should merge the codec branch today.")
+        self.assertEqual(r.json()["segments"][0]["text"].split()[0], "Uh,")  # punctuated only
+        payload = {"text": "Uh, we merge it today, you know."}
+        r = self.run_pass(payload["text"], payload)
+        self.assertEqual(r.headers["x-gs-punctuated"], "unchanged")
+        self.assertEqual(r.json(), {"text": "We merge it today."})
+
+    def test_refused_answer_loses_sounds_only(self) -> None:
+        r = self.run_pass("A short summary of the note.")
+        self.assertEqual(r.headers["x-gs-punctuated"], "rejected")
+        out = r.json()
+        self.assertEqual(out["text"], " we should merge the codec branch today you know")
+        self.assertEqual({**out, "text": None}, {**self.PAYLOAD, "text": None})
+
+    def test_failures_and_the_normal_pass_keep_the_answer(self) -> None:
+        r = self.run_pass(RuntimeError("down"))
+        self.assertEqual(r.headers["x-gs-punctuated"], "error")
+        self.assertEqual(r.content, json.dumps(self.PAYLOAD).encode())
+        bare = BARE.replace("word3 ", "um word3 ")
+        r = call(punct.Punctuate(whisper_app({"text": bare}), Fake(bare.replace("um ", "um, "))))
+        self.assertIn("um,", r.json()["text"])  # no correction mode: nothing removed
 
 
 if __name__ == "__main__":

@@ -865,7 +865,9 @@ class Correction(unittest.TestCase):
 
     def test_guard_drops_only_sounds_and_repeats(self) -> None:
         for src, got, why in (
-            ("uh the the tests pass", "The tests pass.", ""),
+            ("uh the the tests pass", "The tests pass.", "deletion"),  # a sound and a repeat: no
+            ("the the tests pass", "The tests pass.", ""),
+            ("uh um the tests pass", "The tests pass.", ""),
             ("do uh you know the answer", "Do you know the answer?", ""),
             ("Um, we merge it today.", "We merge it today.", ""),
             # word fillers are the strip's, after the guard; the prompt keeps them
@@ -885,11 +887,17 @@ class Correction(unittest.TestCase):
             ("it costs like um three dollars", "It costs three dollars.", "deletion"),
             # Codex round 3
             ("Call Alice. Um, Alice needs the report.", "Call Alice needs the report.", "deletion"),
+            (
+                "Call Alice\n\num Alice needs the report.",
+                "Call Alice needs the report.",
+                "deletion",
+            ),
+            ("Umm Al Quwain is cheaper", "Al Quwain is cheaper.", "deletion"),
+            ("замени э на е", "Замени на е.", "deletion"),
             ("Search for “well um actually” here", "Search for “well actually” here.", "deletion"),
             ("Book a hotel in Umm Al Quwain", "Book a hotel in Al Quwain.", "deletion"),
             ("Напиши букву э в начале", "Напиши букву в начале.", "deletion"),
             ("use half um filters", "Use half filters.", "deletion"),
-            ("the the um tests pass", "The tests pass.", ""),  # one sentence: a repeat
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], why, (src, got))
 
@@ -1076,13 +1084,13 @@ class Fillers(unittest.TestCase):
             self.assertEqual(punct.strip_fillers(text), (text, 0), text)
 
     def test_sounds_are_removed_everywhere(self) -> None:
-        for sound in "uh um uhm umm erm hmm э эм ммм".split():
+        for sound in "uh um uhm erm hmm эм ммм".split():
             for text, want in (
                 (f"we {sound} merge", "we merge"),
                 (f"{sound.capitalize()}, we merge.", "We merge."),
             ):
                 self.assertEqual(punct.strip_fillers(text, everything=False)[0], want, text)
-        self.assertEqual(punct.SOUNDS, frozenset("uh um uhm umm erm hmm э эм ммм".split()))
+        self.assertEqual(punct.SOUNDS, frozenset("uh um uhm erm hmm эм ммм".split()))
 
     def test_words_units_names_and_literals_are_no_sounds(self) -> None:  # Codex review
         self.keep(
@@ -1109,14 +1117,9 @@ class Fillers(unittest.TestCase):
         self.check(
             (
                 ("So, you know, we merge.", "So, we merge."),  # the comma before stays
-                ("We merge, like, today.", "We merge, today."),
-                ("We merge... like, today.", "We merge... today."),
+                ("We merge, you know, today.", "We merge, today."),
+                ("We merge... I mean, today.", "We merge... today."),
                 ("Okay, I mean, we merge.", "Okay, we merge."),
-                ("Мы, типа, закончили.", "Мы, закончили."),
-                ("Это, как бы, готово.", "Это, готово."),
-                ("Ну, типа, давай проверим.", "Давай проверим."),  # "Ну," at a start, then mid
-                ("Ну, давай.", "Давай."),
-                ("Не, ну, давай.", "Не, давай."),
             )
         )
 
@@ -1138,6 +1141,16 @@ class Fillers(unittest.TestCase):
             "That is what I mean.",
             "Tools like Codex work.",
             "Ну давай.",
+            # left out of WORD_FILLERS: they stay even where commas set them off
+            "We merge, like, today.",
+            "It costs, like, a hundred dollars.",
+            "Remember to comment, like, then subscribe.",
+            "Мы, типа, закончили.",
+            "Это, как бы, готово.",
+            "Ну, давай.",
+            "Не, ну, давай.",
+            "Да, вот, мерджим.",
+            "Это дешевле, короче, лучше.",
             "this is like... not sure",
             "We merge (like, today).",
             # "like" before a number, also past a sound or in a compound
@@ -1146,7 +1159,7 @@ class Fillers(unittest.TestCase):
             "It costs, like, twenty-five dollars.",
             "We ran, like, 15 rounds.",
         )
-        self.assertEqual(punct.strip_fillers("We use, like, k3s here."), ("We use, k3s here.", 1))
+        self.assertEqual(punct.strip_fillers("We use, I mean, k3s."), ("We use, k3s.", 2))
 
     def test_no_phrase_across_a_sentence_or_a_line(self) -> None:  # Codex review
         self.keep(
@@ -1175,7 +1188,7 @@ class Fillers(unittest.TestCase):
                 ("We (um) agree.", "We agree."),
                 ("We (uh um) agree.", "We agree."),
                 ("We merge, (um) today.", "We merge, today."),
-                ("We (um, like) agree.", "We (like) agree."),
+                ("We (um, I mean) agree.", "We (I mean) agree."),
                 ("x (um y", "x (y"),
                 ("a um) b", "a) b"),
             )
@@ -1186,11 +1199,11 @@ class Fillers(unittest.TestCase):
         self.check(
             (
                 ("No, um, do it.", "No, do it."),
-                ("No, like, merge it.", "No, merge it."),
+                ("No, I mean, merge it.", "No, merge it."),
                 ("No, you know, merge it.", "No, merge it."),
-                ("Нет, э, не надо.", "Нет, не надо."),
+                ("Нет, эм, не надо.", "Нет, не надо."),
                 ("Yes, uh, deploy it.", "Yes, deploy it."),
-                ("Да, вот, мерджим.", "Да, мерджим."),
+                ("Да, эм, мерджим.", "Да, мерджим."),
                 ("Stop, uh, deploying.", "Stop, deploying."),
                 ("I, uh, like it.", "I, like it."),
             )
@@ -1204,11 +1217,11 @@ class Fillers(unittest.TestCase):
                 ("Looks uh like rain.", "Looks like rain."),
                 ("What, um, I mean is this.", "What, I mean is this."),
                 ("It is, uh, like a bug.", "It is, like a bug."),
-                ("Сделай э короче.", "Сделай короче."),
-                ("Как э бы не сломать.", "Как бы не сломать."),
+                ("Сделай эм короче.", "Сделай короче."),
+                ("Как эм бы не сломать.", "Как бы не сломать."),
                 ("Uh, I like it.", "I like it."),
-                ("Uh, like, we merge.", "Like, we merge."),  # sentence start: "like" stays
-                ("So uh, like, we merge.", "So like, we merge."),  # the comma was the sound's
+                ("Uh, you know, we merge.", "You know, we merge."),  # sentence start: it stays
+                ("So uh, you know, we merge.", "So you know, we merge."),  # the sound's comma
             )
         )
 
@@ -1272,6 +1285,30 @@ class Fillers(unittest.TestCase):
         text = "ok " + "um " * 2997 + " " * 999 + "done"  # just inside the bounds: fast
         t0 = time.perf_counter()
         self.assertEqual(punct.strip_fillers(text), ("ok" + " " * 1_000 + "done", 2997))
+        self.assertLess(time.perf_counter() - t0, 1)
+
+    def test_codex_round_4(self) -> None:
+        self.keep(
+            "Search for 'I'm um stuck' in the transcript.",
+            "Search for ‘I’m um stuck’ in the transcript.",
+            "Search for 'don't um go' here.",
+            "It's 'um' and 'uh'.",
+            "It costs, like, a hundred dollars.",
+            "Remember to comment, like, then subscribe.",
+            "Umm Al Quwain is cheaper than Dubai.",
+            "Book a hotel in Umm Al Quwain.",
+            "Замени э на е в этом слове.",
+            "Э, давай.",
+        )
+        self.check(
+            (
+                ("I'm um stuck, don't uh go.", "I'm stuck, don't go."),  # apostrophes: no quotes
+                ("The dogs' um toys.", "The dogs' toys."),
+                ("Эм, давай.", "Давай."),
+            )
+        )
+        t0 = time.perf_counter()
+        punct.strip_fillers("'a " * 16_000)  # quote openers without a close: one pass
         self.assertLess(time.perf_counter() - t0, 1)
 
     def test_numbers_and_negations_are_never_removed(self) -> None:

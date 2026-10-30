@@ -40,9 +40,9 @@ sends the original (rejected); its punctuation is not reused, as it can put a st
 The log line has counts and the refusal's kind only.
 
 Fillers: after the guard, correction mode removes filler words from the top-level `text` in code,
-not by the model, and only on positive evidence: hesitation sounds ("um", "э"; SOUNDS), and words
-like "like", "you know" or "как бы" (WORD_FILLERS) only mid-sentence where commas set them off on
-both sides (", you know,"), so "I like it" or "Как бы ты решил?" stay. Corrected, applied and
+not by the model, and only on positive evidence: hesitation sounds ("um", "эм"; SOUNDS), and
+"you know" and "I mean" (WORD_FILLERS) only mid-sentence where commas set them off on both sides
+(", you know,"), so "You know the password." stays. Corrected, applied and
 unchanged answers lose every filler, a rejected one only SOUNDS; segments and words keep them, and
 the outcome header stays as it was. The guard lets a correction drop SOUNDS and repeats only. The
 log line counts the removed tokens.
@@ -170,33 +170,25 @@ NUMBER_WORDS = frozenset(
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
 # Fillers, which correction mode removes in code (strip_fillers). Default keep: a word goes only
-# on positive evidence that it is a filler.
-# SOUNDS are hesitation sounds that are no word, unit or abbreviation. One goes in lower case, or
+# on positive evidence that it is a filler, so the list is short on purpose.
+# SOUNDS are hesitation sounds that are no word, unit, letter or name. One goes in lower case, or
 # with a capital at a sentence's start ("Um,"), bare or in brackets, with sentence marks after it;
-# in capitals ("UM"), mid-sentence with a capital ("Umm Al Quwain"), inside quotes or code ("um" as
-# a literal), with another symbol ("@um"), after a word that names it ("букву э") or next to a
-# number ("five um", "half um", "½ um") it stays.
-# Not "er" (ER), "mm" (5 mm), "ah" or "eh", which can be words.
-SOUNDS = frozenset("uh um uhm umm erm hmm э эм ммм".split())
+# in capitals ("UM"), mid-sentence with a capital, inside quotes or code ("um" as a literal), with
+# another symbol ("@um"), after a word that names it ("the letter um") or next to a number ("five
+# um", "half um", "½ um") it stays. Left out: "er" (ER), "mm" (5 mm), "ah", "eh", "umm" (Umm Al
+# Quwain) and "э" (a letter: "Замени э на е").
+SOUNDS = frozenset("uh um uhm erm hmm эм ммм".split())
 SOUND_SHAPE = re.compile(r"([(\[]*)([^\W\d_]+)([)\]]*)([,.?!…;:]*)")
-# WORD_FILLERS have a meaning elsewhere ("Like, share, and subscribe.", "I like it", "Как бы ты
-# решил?"), so one goes only mid-sentence where commas or ellipses set it off on both sides (", you
-# know," or "..., like,"), and not in a list (", like, and subscribe", ", like, share,") or before a
-# number ("like, three" is about three). Not "короче": "дешевле, короче, безопаснее" is a list of
-# comparatives. The one exception is "Ну," at a sentence's start, an interjection only. Not "so",
-# "well", "just", "actually", "basically", "right", "okay", "просто": in Davron's notes they mostly
-# carry meaning ("so" 38 times in 40 notes).
-WORD_FILLERS = tuple(  # longest first
-    sorted(
-        (tuple(p.split()) for p in "like|you know|i mean|типа|как бы|вот|ну".split("|")),
-        key=len,
-        reverse=True,
-    )
-)
+# WORD_FILLERS go only mid-sentence where commas or ellipses set them off on both sides (", you
+# know," or "..., I mean,"), and not before "and", "or" or a word ending in a comma (a list). Left
+# out, because they carry meaning too often to tell from punctuation: "like" ("like, a hundred",
+# "comment, like, then subscribe"), типа, как бы, вот, ну, короче, so, well, just, actually,
+# basically, right, okay, просто. In the 40 test notes none of these left out was removed anyway.
+WORD_FILLERS = (("you", "know"), ("i", "mean"))
 WORD_SHAPE = re.compile(r"([^\W\d_]+)([,.…]*)")
 PAIRS = {"(": ")", "[": "]"}
-LIST_WORDS = frozenset("and or и или".split())  # ", like, and subscribe": a list, not a filler
-# Words after which a sound is named, not made ("букву э", "the letter um").
+LIST_WORDS = frozenset("and or".split())  # ", you know, and": a list, not a filler
+# Words after which a sound is named, not made ("the letter um").
 NAMING = frozenset(
     "буква букву буквы буквой букве символ символа звук звука слово letter sound word".split()
 )
@@ -208,9 +200,7 @@ FRACTIONS = frozenset(
 # has 1,897 characters, and 3,000 words (GS_PUNCT_MAX_WORDS) of speech are about 20,000.
 STRIP_MAX_CHARS = 50_000
 STRIP_MAX_SPACE = 1_000
-QUOTED = re.compile(
-    r'"[^"]*"|“[^”]*”|«[^»]*»|‘[^’]*’|`[^`]*`|\*\*[^*]*\*\*|(?<!\w)\'[^\']*\'(?!\w)'
-)
+QUOTED = re.compile(r'"[^"]*"|“[^”]*”|«[^»]*»|`[^`]*`|\*\*[^*]*\*\*')  # single quotes: _quoted
 APOSTROPHES = str.maketrans(dict.fromkeys("\u2018\u2019\u02bc\u02b9\u00b4\u0060\u2032\uff07", "'"))
 HYPHENS = re.compile("[-\u2010-\u2015\u2212\ufe63\uff0d]")
 DIGIT_NAMES = frozenset({"k3s"})  # names in SYSTEM_CORRECT with a digit: a fix to one is no number
@@ -402,15 +392,38 @@ def _number(token: str) -> bool:
 
 def _quoted(text: str, found: list[re.Match]) -> list[bool]:
     """For each token of `found`, whether it lies in a quoted or code span of `text`."""
-    out, k = [False] * len(found), 0
-    for q in QUOTED.finditer(text):
-        while k < len(found) and found[k].end() <= q.start():
-            k += 1
-        j = k
-        while j < len(found) and found[j].start() < q.end():
-            out[j] = True
-            j += 1
+    out = [False] * len(found)
+    for spans in ([q.span() for q in QUOTED.finditer(text)], _single_quoted(text)):
+        k = 0
+        for start, end in spans:
+            while k < len(found) and found[k].end() <= start:
+                k += 1
+            j = k
+            while j < len(found) and found[j].start() < end:
+                out[j] = True
+                j += 1
     return out
+
+
+def _single_quoted(text: str) -> list[tuple[int, int]]:
+    """The spans in ' ' or ‘ ’, in one pass. An apostrophe between two letters or digits (I'm,
+    I’m, don't) is part of the word: it neither opens nor closes one."""
+    spans, open_at = [], {"'": None, "‘": None}
+    for i, c in enumerate(text):
+        if c not in "'‘’":
+            continue
+        before = text[i - 1] if i else " "
+        after = text[i + 1] if i + 1 < len(text) else " "
+        if c in "'’" and before.isalnum() and after.isalnum():
+            continue
+        kind = "‘" if c in "‘’" else "'"
+        start = open_at[kind]
+        if start is None and c != "’" and not before.isalnum() and not after.isspace():
+            open_at[kind] = i
+        elif start is not None and c != "‘" and not before.isspace() and not after.isalnum():
+            spans.append((start, i + 1))
+            open_at[kind] = None
+    return sorted(spans)
 
 
 def _stops(token: str) -> bool:
@@ -439,35 +452,30 @@ def _word_filler(tokens: list[str], seps: list[str], sound: list[bool], i: int) 
             k -= 1
         start = start or k < 0 or _stops(tokens[k])
         if start:
-            return j - i if phrase == ("ну",) else 0
+            return 0
         if not tokens[k].endswith((",", "..", "…")):
             return 0
         k = j
         while k < len(tokens) and _sound_shaped(tokens[k]):
             k += 1
-        if k < len(tokens) and (
-            _bare(tokens[k]) in LIST_WORDS
-            or tokens[k].endswith(",")
-            or (phrase == ("like",) and _number(tokens[k]))
-        ):
-            return 0  # a list ("comment, like, and subscribe") or a number ("like, three")
+        if k < len(tokens) and (_bare(tokens[k]) in LIST_WORDS or tokens[k].endswith(",")):
+            return 0  # a list
         return j - i
     return 0
 
 
 def _dropped_ok(src: list[str], i1: int, i2: int, quoted: list[bool]) -> bool:
-    """Whether src[i1:i2] may be dropped: sounds (see SOUNDS), and what is left is nothing or a
-    repeat of the words just before or after; with sounds and a repeat, within one sentence
-    ("Call Alice. Um, Alice needs" is no repeat). Word fillers are not: the prompt keeps them,
-    and the strip takes them out of the answer after the guard."""
-    sounds = [_is_sound(src, i, quoted=quoted) for i in range(i1, i2)]
-    rest = [_bare(src[i]) for i, s in zip(range(i1, i2), sounds, strict=True) if not s]
-    if rest and any(sounds) and any(_stops(src[i]) for i in range(i1, i2)):
-        return False
-    k = len(rest)
-    before = [_bare(t) for t in src[max(0, i1 - k) : i1]]
-    after = [_bare(t) for t in src[i2 : i2 + k]]
-    return not rest or rest in (before, after)
+    """Whether src[i1:i2] may be dropped: all of it SOUNDS (outside quotes), or a repeat of the
+    words just before or after. Word fillers are not: the prompt keeps them, and the strip takes
+    them out of the answer after the guard."""
+    if all(_is_sound(src, i, quoted=quoted) for i in range(i1, i2)):
+        return True
+    run = [_bare(t) for t in src[i1:i2]]
+    k = len(run)
+    return run in (
+        [_bare(t) for t in src[max(0, i1 - k) : i1]],
+        [_bare(t) for t in src[i2 : i2 + k]],
+    )
 
 
 def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:

@@ -1290,6 +1290,14 @@ class Fillers(unittest.TestCase):
             )
         )
 
+    def test_a_mark_after_an_abbreviation_keeps_its_sound(self) -> None:  # Codex round 10
+        self.keep(
+            "Meet me at five p.m. um; bring the report.",
+            "Use a tool, e.g. um: this one.",
+            "Is it at 5 p.m. uh?",
+        )
+        self.check((("Meet me at five p.m. um, then go.", "Meet me at five p.m. then go."),))
+
     def test_numbers_and_negations_are_never_removed(self) -> None:
         for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:
             for template in ("uh, {}, um,", "{}, um, hmm,", "Um, {} uh"):

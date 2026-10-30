@@ -478,6 +478,11 @@ def strip_sounds(text: str, sounds: frozenset[str] = SOUNDS) -> tuple[str, int]:
         return text, 0
     n = len(tokens)
     gone = [_is_sound(tokens, i, seps, sounds) for i in range(n)]
+    kept = None  # a sound with ; : ? or ! after a word ending in "." ("p.m. um;") stays
+    for i in range(n):
+        if gone[i] and kept is not None and tokens[kept].rstrip(")]").endswith("."):
+            gone[i] = not re.search(r"[;:?!]", SOUND_SHAPE.fullmatch(tokens[i]).group(4))
+        kept = kept if gone[i] else i
     if not any(gone) or all(gone):
         return text, 0
     if _keeps_sounds(text):

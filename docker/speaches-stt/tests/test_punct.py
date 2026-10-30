@@ -863,26 +863,26 @@ class Correction(unittest.TestCase):
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], "", (src, got))
 
-    def test_guard_accepts_only_what_the_strip_would_remove(self) -> None:
+    def test_guard_drops_only_sounds_and_repeats(self) -> None:
         for src, got, why in (
-            ("You know, we should merge it today.", "We should merge it today.", ""),
             ("uh the the tests pass", "The tests pass.", ""),
-            ("Ну, короче, давай проверим.", "Давай проверим.", ""),
-            ("ну давай проверим", "Давай проверим.", "deletion"),  # main took "ну" as a sound
             ("do uh you know the answer", "Do you know the answer?", ""),
-            # no punctuation that sets them off: words, kept
-            ("you know we should merge it today", "We should merge it today.", "deletion"),
+            ("Um, we merge it today.", "We merge it today.", ""),
+            # word fillers are the strip's, after the guard; the prompt keeps them
+            ("so, you know, we merge it today", "So, we merge it today.", "deletion"),
+            ("ну давай проверим", "Давай проверим.", "deletion"),  # main took "ну" as a sound
             ("i like the new layout", "I the new layout.", "deletion"),
             ("so we merge it", "We merge it.", "deletion"),
-            ("do uh you know the answer", "Do the answer?", "deletion"),
-            ("i um like the new layout", "I the new layout.", "deletion"),
-            ("what um i mean is this", "What is this.", "deletion"),
-            # Codex review of ddb1f75
+            # Codex review: units, names, literals, lines, numbers
             ("как бы ты решил эту задачу", "Ты решил эту задачу?", "deletion"),
             ("I trust you. Know your limits.", "I trust your limits.", "deletion"),
+            ("You\n\nknow, the password is secret.", "The password is secret.", "deletion"),
+            ("Like, share, and subscribe.", "Share, and subscribe.", "deletion"),
             ("use 5 mm screws now", "Use 5 screws now.", "deletion"),
+            ("use five um screws now", "Use five screws now.", "deletion"),
             ("send ER the report", "Send the report.", "deletion"),
-            ("We'll like the new layout.", "We'll the new layout.", "deletion"),
+            ("message @um tomorrow", "Message tomorrow.", "deletion"),
+            ("it costs like um three dollars", "It costs three dollars.", "deletion"),
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], why, (src, got))
 
@@ -1064,6 +1064,10 @@ class Fillers(unittest.TestCase):
         for text, want in cases:
             self.assertEqual(punct.strip_fillers(text, everything)[0], want, text)
 
+    def keep(self, *texts: str) -> None:
+        for text in texts:
+            self.assertEqual(punct.strip_fillers(text), (text, 0), text)
+
     def test_sounds_are_removed_everywhere(self) -> None:
         for sound in "uh um uhm umm erm hmm э эм ммм".split():
             for text, want in (
@@ -1073,38 +1077,50 @@ class Fillers(unittest.TestCase):
                 self.assertEqual(punct.strip_fillers(text, everything=False)[0], want, text)
         self.assertEqual(punct.SOUNDS, frozenset("uh um uhm umm erm hmm э эм ммм".split()))
 
-    def test_words_and_units_are_no_sounds(self) -> None:  # Codex review
-        self.check(
-            (
-                ("Use 5 mm screws.", "Use 5 mm screws."),
-                ("Send ER the report.", "Send ER the report."),
-                ("UM is a school.", "UM is a school."),  # all capitals: an abbreviation
-                ("The 5 umm screws.", "The 5 umm screws."),  # next to a digit
-                ("Ah, I see.", "Ah, I see."),
-                ("Eh, fine.", "Eh, fine."),
-                ("um-hmm, yes", "um-hmm, yes"),
-            )
+    def test_words_units_names_and_literals_are_no_sounds(self) -> None:  # Codex review
+        self.keep(
+            "Use 5 mm screws.",
+            "Send ER the report.",
+            "UM is a school.",  # capitals: an abbreviation
+            "The 5 umm screws.",  # next to a number
+            "Use five um screws.",
+            "It is twenty-five um wide.",
+            "Ah, I see.",
+            "Eh, fine.",
+            "um-hmm, yes",
+            "Message @um tomorrow.",
+            "Tag #um here.",
+            'Replace "um" with "uh".',  # quoted: a literal
+            "‘Um, yes’, she said.",
+            "«Um, yes», she said.",
+            "**Um, we agree.**",
+            "Use `um` here.",
+            "(Um.) We merge.",
         )
 
-    def test_word_fillers_need_punctuation_that_sets_them_off(self) -> None:
+    def test_word_fillers_go_only_set_off_mid_sentence(self) -> None:
         self.check(
             (
                 ("So, you know, we merge.", "So, we merge."),  # the comma before stays
-                ("It works, you know.", "It works."),
-                ("Is it ready, like?", "Is it ready?"),
-                ("Like, I said no.", "I said no."),
-                ("And, like, we merge.", "And, we merge."),
-                ("Okay. I mean, we merge.", "Okay. We merge."),
-                ("Done... like, we merge.", "Done... we merge."),
-                ("Ну, короче, давай проверим.", "Давай проверим."),
-                ("Вот, смотри.", "Смотри."),
+                ("We merge, like, today.", "We merge, today."),
+                ("We merge... like, today.", "We merge... today."),
+                ("Okay, I mean, we merge.", "Okay, we merge."),
                 ("Мы, типа, закончили.", "Мы, закончили."),
                 ("Это, как бы, готово.", "Это, готово."),
+                ("Ну, короче, давай проверим.", "Давай проверим."),  # "Ну," at a start, then mid
+                ("Ну, давай.", "Давай."),
+                ("Не, ну, давай.", "Не, давай."),
             )
         )
 
-    def test_word_fillers_without_that_punctuation_stay(self) -> None:  # Codex review
-        for text in (
+    def test_word_fillers_stay_otherwise(self) -> None:  # Codex review
+        self.keep(
+            "Like, share, and subscribe.",
+            "Короче, дешевле и безопаснее — такой маршрут нам нужен.",
+            "Вот, смотри.",
+            "Like, I said no.",
+            "It works, you know.",
+            "Is it ready, like?",
             "You know the password.",
             "Как бы ты решил эту задачу?",
             "Этот путь короче.",
@@ -1114,29 +1130,30 @@ class Fillers(unittest.TestCase):
             "Do you know the answer?",
             "That is what I mean.",
             "Tools like Codex work.",
-            "It feels like a bug.",
-            "Вот так и сделаем.",
             "Ну давай.",
-            "this is like... not sure",  # an ellipsis after it, but nothing before
-            "We merge (like, today).",  # a bracket ends it
-            "Like I said, like, three things.",  # "like" before a number
+            "this is like... not sure",
+            "We merge (like, today).",
+            # "like" before a number, also past a sound or in a compound
+            "It costs, like, three dollars.",
+            "It costs, like, um, three dollars.",
+            "It costs, like, twenty-five dollars.",
             "We ran, like, 15 rounds.",
-        ):
-            self.assertEqual(punct.strip_fillers(text), (text, 0), text)
+        )
+        self.assertEqual(punct.strip_fillers("We use, like, k3s here."), ("We use, k3s here.", 1))
 
-    def test_no_phrase_across_a_sentence_or_a_paragraph(self) -> None:  # Codex review
-        for text in (
+    def test_no_phrase_across_a_sentence_or_a_line(self) -> None:  # Codex review
+        self.keep(
             "I trust you.\n\nKnow your limits.",
-            "I trust you. Know, your limits.",
-            "Ask me\n\nmean, it",
-        ):
-            self.assertEqual(punct.strip_fillers(text), (text, 0), text)
+            "So, you\nknow, we merge.",
+            "So, you. Know, we merge.",
+        )
 
     def test_each_removed_token_keeps_its_boundaries(self) -> None:  # Codex review
         self.check(
             (
                 ("No uh. Um, deploy now.", "No. Deploy now."),
                 ("First. Uh,\n\nUm, second.", "First.\n\nSecond."),
+                ("First.\n\nUm,\nsecond.", "First.\n\nSecond."),  # the blank line wins
                 ("We merge.\n\nUm, then we test.", "We merge.\n\nThen we test."),
                 ("Um.\n\nWe merge.", "We merge."),
                 ("Hmm. Okay.", "Okay."),
@@ -1145,21 +1162,22 @@ class Fillers(unittest.TestCase):
             everything=False,
         )
 
-    def test_brackets_and_quotes_stay_balanced(self) -> None:  # Codex review
+    def test_brackets_stay_balanced(self) -> None:  # Codex review
         self.check(
             (
                 ("We (um) agree.", "We agree."),
+                ("We (uh um) agree.", "We agree."),
                 ("We merge, (um) today.", "We merge, today."),
                 ("We (um, like) agree.", "We (like) agree."),
-                ("«Um, yes», she said.", "«Yes», she said."),
-                ("He said “uh”.", "He said."),
+                ("x (um y", "x (y"),
+                ("a um) b", "a) b"),
             )
         )
+        self.keep("x (um", "um) x", "(um uh)")  # no word for the bracket to go to
 
     def test_the_comma_before_a_removed_filler_stays(self) -> None:  # review: no joined clauses
         self.check(
             (
-                ("Не, ну, давай.", "Не, давай."),  # not "Не давай." (don't give)
                 ("No, um, do it.", "No, do it."),
                 ("No, like, merge it.", "No, merge it."),
                 ("No, you know, merge it.", "No, merge it."),
@@ -1182,8 +1200,8 @@ class Fillers(unittest.TestCase):
                 ("Сделай э короче.", "Сделай короче."),
                 ("Как э бы не сломать.", "Как бы не сломать."),
                 ("Uh, I like it.", "I like it."),
-                ("Uh, like, we merge.", "We merge."),  # a sound's comma counts as no comma
-                ("So uh, like, we merge.", "So like, we merge."),
+                ("Uh, like, we merge.", "Like, we merge."),  # sentence start: "like" stays
+                ("So uh, like, we merge.", "So like, we merge."),  # the comma was the sound's
             )
         )
 
@@ -1191,13 +1209,12 @@ class Fillers(unittest.TestCase):
         self.check(
             (
                 ("Um, so we merge it.", "So we merge it."),
-                ("Like, k3s is down.", "k3s is down."),  # names keep their case
+                ("Um, k3s is down.", "k3s is down."),  # names keep their case
                 (" uh we merge", " we merge"),  # Whisper's leading space stays
                 ("we uh merge  \n", "we merge  \n"),
             )
         )
-        for text in ("um", "Uh, um.", " Hmm"):
-            self.assertEqual(punct.strip_fillers(text), (text, 0))
+        self.keep("um", "Uh, um.", " Hmm")
 
     def test_numbers_and_negations_are_never_removed(self) -> None:
         for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:
@@ -1205,8 +1222,13 @@ class Fillers(unittest.TestCase):
                 got = punct.strip_fillers(template.format(word))[0]
                 self.assertEqual(_words(got).count(word), 1, template.format(word))
 
-    def test_linear_time(self) -> None:  # Codex review: no regex backtracking
-        for text in ("we uh agree" + " " * 100_000, "um " * 50_000 + "x", ", like," * 30_000):
+    def test_linear_time(self) -> None:  # Codex review
+        for text in (
+            "we uh agree" + " " * 100_000,
+            "um " * 50_000 + "x",
+            "a, like," * 30_000,
+            "Um " * 2999 + "a" * 8_000_000,  # one capital for one word, once
+        ):
             t0 = time.perf_counter()
             punct.strip_fillers(text)
             self.assertLess(time.perf_counter() - t0, 2, text[:20])
@@ -1217,34 +1239,34 @@ def _words(text: str) -> list[str]:
 
 
 class FillersInThePass(unittest.TestCase):
-    PAYLOAD = verbose("uh we should um merge the codec branch today you know")
+    PAYLOAD = verbose("uh we should um merge the codec branch you know today")
 
     def run_pass(self, answer: str | Exception, payload: dict | None = None):  # noqa: ANN201
         app = punct.Punctuate(whisper_app(payload or self.PAYLOAD), Fake(), correct=Fake(answer))
         return call_correct(app, b64(CONTEXT))
 
     def test_corrected_text_loses_fillers_after_the_guard(self) -> None:
-        r = self.run_pass("Uh, we should, um, merge the Codex branch today, you know.")
+        r = self.run_pass("Uh, we should, um, merge the Codex branch, you know, today.")
         self.assertEqual(r.headers["x-gs-punctuated"], "corrected")
-        self.assertEqual(r.json()["text"], "We should, merge the Codex branch today.")
+        self.assertEqual(r.json()["text"], "We should, merge the Codex branch, today.")
         self.assertEqual(r.json()["segments"], self.PAYLOAD["segments"])
         self.assertEqual(r.json()["words"], self.PAYLOAD["words"])
 
     def test_applied_and_unchanged_lose_fillers_in_text_only(self) -> None:
-        r = self.run_pass("Uh, we should um merge the codec branch today, you know.")
+        r = self.run_pass("Uh, we should um merge the codec branch, you know, today.")
         self.assertEqual(r.headers["x-gs-punctuated"], "applied")
-        self.assertEqual(r.json()["text"], "We should merge the codec branch today.")
+        self.assertEqual(r.json()["text"], "We should merge the codec branch, today.")
         self.assertEqual(r.json()["segments"][0]["text"].split()[0], "Uh,")  # punctuated only
-        payload = {"text": "Uh, we merge it today, you know."}
+        payload = {"text": "Uh, we merge it, you know, today."}
         r = self.run_pass(payload["text"], payload)
         self.assertEqual(r.headers["x-gs-punctuated"], "unchanged")
-        self.assertEqual(r.json(), {"text": "We merge it today."})
+        self.assertEqual(r.json(), {"text": "We merge it, today."})
 
     def test_refused_answer_loses_sounds_only(self) -> None:
         r = self.run_pass("A short summary of the note.")
         self.assertEqual(r.headers["x-gs-punctuated"], "rejected")
         out = r.json()
-        self.assertEqual(out["text"], " we should merge the codec branch today you know")
+        self.assertEqual(out["text"], " we should merge the codec branch you know today")
         self.assertEqual({**out, "text": None}, {**self.PAYLOAD, "text": None})
 
     def test_failures_and_the_normal_pass_keep_the_answer(self) -> None:

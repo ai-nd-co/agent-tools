@@ -10,7 +10,8 @@ thread per host core gets throttled.
 
 - GS_KOKORO_THREADS (default 4): onnxruntime intra-op threads for Kokoro's session, which runs on
   CPUExecutionProvider only, with one inter-op thread. 0 turns this off: Speaches' own providers
-  (CUDA first on this image) and default threads.
+  (CUDA first on this image) and default threads. A malformed or negative value logs a warning
+  and uses 4, so a typo never takes Whisper down with it.
 
 How: Speaches builds Kokoro's session in KokoroModelManager._load_fn, calling the name
 InferenceSession from speaches.executors.kokoro. install() rebinds that one module global, so
@@ -42,7 +43,7 @@ def parse_threads(raw: str | None) -> int:
         return DEFAULT_THREADS
     threads = int(raw)
     if threads < 0:
-        raise ValueError(f"GS_KOKORO_THREADS must be 0 (off) or more, got {threads}")
+        raise ValueError(f"must be 0 (off) or more, got {threads}")
     return threads
 
 
@@ -85,7 +86,11 @@ def install(
 ) -> bool:
     """Put Kokoro's session on the CPU. True if installed (now or before); False if left alone."""
     env = os.environ if env is None else env
-    threads = parse_threads(env.get("GS_KOKORO_THREADS"))
+    try:
+        threads = parse_threads(env.get("GS_KOKORO_THREADS"))
+    except ValueError as e:
+        logger.warning("gs_speech: GS_KOKORO_THREADS: %s; using %d", e, DEFAULT_THREADS)
+        threads = DEFAULT_THREADS
     if threads == 0:
         logger.info("gs_speech: Kokoro on Speaches' own providers (GS_KOKORO_THREADS=0)")
         return False

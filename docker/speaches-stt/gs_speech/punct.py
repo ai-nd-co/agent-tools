@@ -41,8 +41,8 @@ The log line has counts and the refusal's kind only.
 
 Fillers: after the guard, correction mode removes filler words from the top-level `text` in code,
 not by the model, and only on positive evidence: hesitation sounds ("um", "эм"; SOUNDS), and
-"you know" and "I mean" (WORD_FILLERS) only mid-sentence where commas set them off on both sides
-(", you know,"), so "You know the password." stays. Corrected, applied and
+"you know" (WORD_FILLERS) only mid-sentence where commas set it off on both sides (", you know,"),
+so "You know the password." stays. Corrected, applied and
 unchanged answers lose every filler, a rejected one only SOUNDS; segments and words keep them, and
 the outcome header stays as it was. The guard lets a correction drop SOUNDS and repeats only. The
 log line counts the removed tokens.
@@ -180,18 +180,23 @@ NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни н�
 SOUNDS = frozenset("uh um uhm erm hmm эм ммм".split())
 SOUND_SHAPE = re.compile(r"([(\[]*)([^\W\d_]+)([)\]]*)([,.?!…;:]*)")
 # WORD_FILLERS go only mid-sentence where commas or ellipses set them off on both sides (", you
-# know," or "..., I mean,"), and not before "and", "or" or a word ending in a comma (a list). Left
-# out, because they carry meaning too often to tell from punctuation: "like" ("like, a hundred",
-# "comment, like, then subscribe"), типа, как бы, вот, ну, короче, so, well, just, actually,
-# basically, right, okay, просто. In the 40 test notes none of these left out was removed anyway.
-WORD_FILLERS = (("you", "know"), ("i", "mean"))
+# know,"), and not before "and", "or" or a word ending in a comma (a list). Left out, because they
+# carry meaning too often to tell from punctuation: "I mean" ("fifty, I mean, fifteen" corrects),
+# "like" ("like, a hundred", "comment, like, then subscribe"), типа, как бы, вот, ну, короче, so,
+# well, just, actually, basically, right, okay, просто.
+WORD_FILLERS = (("you", "know"),)
 WORD_SHAPE = re.compile(r"([^\W\d_]+)([,.…]*)")
 PAIRS = {"(": ")", "[": "]"}
 LIST_WORDS = frozenset("and or".split())  # ", you know, and": a list, not a filler
-# Words after which a sound is named, not made ("the letter um").
+# Words after which a sound is named, not made ("the letter um", "the sounds um and uh", "звуки эм
+# и ммм"); the protection runs on through a list of sounds after one, up to NAMED_LIST tokens.
 NAMING = frozenset(
-    "буква букву буквы буквой букве символ символа звук звука слово letter sound word".split()
+    """буква букву буквы буквой букве букв буквам буквами буквах символ символа символы символов
+    символом звук звука звуки звуков звуком звуками звукам слово слова слов словом словами
+    междометие междометия letter letters sound sounds word words filler fillers""".split()
 )
+NAMED_LIST = 10
+LIST_JOINS = frozenset("and or и или".split())
 FRACTIONS = frozenset(
     "half halves quarter quarters third thirds dozen dozens половина половину половины половиной "
     "пол четверть четверти треть трети".split()
@@ -370,7 +375,12 @@ def _is_sound(
     start = i == 0 or (seps is not None and "\n" in seps[i]) or _stops(tokens[i - 1])
     if m.group(2) != m.group(2).lower() and not start:
         return False
-    if i and _bare(tokens[i - 1]) in NAMING:
+    k = i - 1  # past a list of sounds ("the sounds um, uh and hmm")
+    while k >= max(0, i - NAMED_LIST) and (
+        _sound_shaped(tokens[k]) or _bare(tokens[k]) in LIST_JOINS
+    ):
+        k -= 1
+    if k >= 0 and _bare(tokens[k]) in NAMING:
         return False
     return not any(_number(t) for t in tokens[max(0, i - 1) : i] + tokens[i + 1 : i + 2])
 
@@ -485,7 +495,7 @@ def strip_fillers(text: str, everything: bool = True) -> tuple[str, int]:
     as it is. Linear in the text's length.
 
     Each removed token's own punctuation: a comma after it goes with it, but one before it stays,
-    as dropping it could join a word to the next clause ("Не, ну, давай." is not "Не давай."); a
+    as dropping it could join a word to the next clause ("No, um, do it." is not "No do it."); a
     sentence mark after it (. ? !) moves to the word before unless that one ends a sentence
     already, and an ellipsis goes with it; brackets opened and closed within the removed words go
     with them, others move to the word they belong to; the larger line break before it moves to

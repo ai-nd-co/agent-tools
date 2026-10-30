@@ -894,6 +894,9 @@ class Correction(unittest.TestCase):
             ),
             ("Umm Al Quwain is cheaper", "Al Quwain is cheaper.", "deletion"),
             ("замени э на е", "Замени на е.", "deletion"),
+            ("keep the sounds um and uh here", "Keep the sounds and here.", "deletion"),
+            ("оставь звуки эм и ммм в тексте", "Оставь звуки и в тексте.", "deletion"),
+            ("keep the sounds um and uh", "Keep the sounds and uh.", "deletion"),
             ("Search for “well um actually” here", "Search for “well actually” here.", "deletion"),
             ("Book a hotel in Umm Al Quwain", "Book a hotel in Al Quwain.", "deletion"),
             ("Напиши букву э в начале", "Напиши букву в начале.", "deletion"),
@@ -1118,8 +1121,8 @@ class Fillers(unittest.TestCase):
             (
                 ("So, you know, we merge.", "So, we merge."),  # the comma before stays
                 ("We merge, you know, today.", "We merge, today."),
-                ("We merge... I mean, today.", "We merge... today."),
-                ("Okay, I mean, we merge.", "Okay, we merge."),
+                ("We merge... you know, today.", "We merge... today."),
+                ("Okay, you know, we merge.", "Okay, we merge."),
             )
         )
 
@@ -1159,7 +1162,7 @@ class Fillers(unittest.TestCase):
             "It costs, like, twenty-five dollars.",
             "We ran, like, 15 rounds.",
         )
-        self.assertEqual(punct.strip_fillers("We use, I mean, k3s."), ("We use, k3s.", 2))
+        self.assertEqual(punct.strip_fillers("We use, you know, k3s."), ("We use, k3s.", 2))
 
     def test_no_phrase_across_a_sentence_or_a_line(self) -> None:  # Codex review
         self.keep(
@@ -1199,7 +1202,6 @@ class Fillers(unittest.TestCase):
         self.check(
             (
                 ("No, um, do it.", "No, do it."),
-                ("No, I mean, merge it.", "No, merge it."),
                 ("No, you know, merge it.", "No, merge it."),
                 ("Нет, эм, не надо.", "Нет, не надо."),
                 ("Yes, uh, deploy it.", "Yes, deploy it."),
@@ -1310,6 +1312,21 @@ class Fillers(unittest.TestCase):
         t0 = time.perf_counter()
         punct.strip_fillers("'a " * 16_000)  # quote openers without a close: one pass
         self.assertLess(time.perf_counter() - t0, 1)
+
+    def test_codex_round_5(self) -> None:
+        self.keep(
+            # "I mean" corrects as often as it fills
+            "Transfer fifty, I mean, fifteen dollars.",
+            "Send it to Alice, I mean, Bob.",
+            "Okay, I mean, we merge.",
+            # sounds named by an inflected cue, through a list of them
+            "Keep the sounds um and uh in the transcript.",
+            "Оставь звуки эм и ммм в тексте.",
+            "Remove the fillers um, uh, and hmm.",
+            "Say the words um or uh.",
+            "Убери междометия эм, ммм и hmm.",
+        )
+        self.check((("We uh merge, um, today.", "We merge, today."),))
 
     def test_numbers_and_negations_are_never_removed(self) -> None:
         for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:

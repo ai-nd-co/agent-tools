@@ -34,10 +34,21 @@ as many tokens. A correction replaces only the top-level
 timings belong to Whisper's words. An answer that changed no word is used as in the normal pass
 (applied or unchanged). It also refuses any change to a number (digits compared exactly, so a sign,
 currency or percent counts) or to a negation, an insertion of more than one token, a deletion of
-anything but a repeat or a filler, and a replacement of more than 2 tokens on either side. It does
+anything but a repeat or a sound, and a replacement of more than 2 tokens on either side. It does
 not police person names: a context can make the model swap one name for another. A refused answer
 sends the original (rejected); its punctuation is not reused, as it can put a stop mid-sentence.
 The log line has counts and the refusal's kind only.
+
+Hesitation sounds: after the guard, correction mode removes hesitation sounds ("um", "ммм"; SOUNDS)
+from the top-level `text` in code, not by the model, and only on positive evidence: those of the
+answer's own "language" (verbose_json; none without it), not next to a number, with a capital
+only as "Um," at a sentence's start, and not at all in a note whose transcript or text quotes
+something, talks about sounds or words, or writes a sound as a name ("UM", "Ask Um"). Word fillers
+("you know", "like", "ну") are kept: punctuation cannot tell them from their meaning. That applies
+to corrected, applied and unchanged answers and to Whisper's text after a refusal; segments and
+words keep the sounds, and the outcome header stays as it was. The guard lets a correction drop a
+run of that language's sounds (except in such a note) or an exact repeat. The log line counts the
+removed sounds.
 
 It wraps Admission from outside, so the LLM call happens after the Whisper permit is released: the
 inner app runs as its own task, and once its answer is complete it has GS_PUNCT_APP_GRACE_S (5) to
@@ -109,7 +120,7 @@ SYSTEM_CORRECT = (
 # changed 11.8-100% (33 of 36 answers; the other 3 changed 1 token of a 14-word note). Short notes
 # may change 2 tokens, as one name can be two words ("cloud code"). On top of the share: no number
 # or negation may change, an insertion is one token at most, a deletion only drops a repeat or a
-# filler, and one replacement spans at most MAX_REPLACE tokens on either side. Person names are not
+# sound, and one replacement spans at most MAX_REPLACE tokens on either side. Person names are not
 # policed: the owner chose free correction, and a context can talk the model into another name.
 CORRECT_MAX_SHARE = 0.10
 CORRECT_MIN_ALLOWED = 2
@@ -161,7 +172,45 @@ NUMBER_WORDS = frozenset(
     + [w.replace("ё", "е") for w in _russian_numbers()]  # compared with ё folded to е
 )
 NEGATIONS = frozenset("not no never nor none nothing cannot не нет ни никогда ничего".split())
-FILLERS = frozenset("uh um er erm ah э ну".split())
+# Sounds, which correction mode removes in code (strip_sounds): hesitation sounds only, on
+# positive evidence that one is no word, unit, letter or name, and only in the note's own language
+# (SOUNDS_BY_LANGUAGE: "um" is a Portuguese word). One goes in lower case, or with a capital only
+# at a sentence's start and with its own comma or ellipsis ("Um, we merge."), bare or in round or
+# square brackets, with sentence marks after it; in capitals ("UM"), with a capital otherwise ("Ask
+# Um", "Dr. Um", "Um we merge"), with another symbol ("@um") or next to a number ("five um", "half
+# um", "½ um") it stays, and a note about sounds or with quotes is left alone (META_STEMS).
+# Left out: "er" (ER), "mm" (5 mm), "мм" (millimetres), "ah", "eh", "umm" (Umm Al Quwain), "э"
+# and "эм" (the letters Э and М: "Нажми эм"), and every word filler: "you know" ("if you know, you
+# know"), "I mean" ("fifty, I mean, fifteen"), "like" ("like, a hundred"), типа, как бы, вот, ну,
+# короче, so, well, just, actually.
+SOUNDS_BY_LANGUAGE = {
+    "en": frozenset("uh um uhm erm hmm".split()),
+    "ru": frozenset({"ммм"}),  # "м" three times or more; "мм" is millimetres
+}
+SOUNDS = frozenset().union(*SOUNDS_BY_LANGUAGE.values())
+LANGUAGES = {"en": "en", "english": "en", "ru": "ru", "russian": "ru"}  # Speaches' "language"
+# Abbreviations whose stop ends no sentence ("Dr. Um" is a name).
+ABBREVIATIONS = frozenset("dr. mr. mrs. ms. prof. st. vs. etc. e.g. i.e. г. т.е.".split())
+SOUND_SHAPE = re.compile(r"([(\[]*)([^\W\d_]+)([)\]]*)([,.?!…;:]*)")
+PAIRS = {"(": ")", "[": "]"}
+# A note that talks about sounds or words, or quotes something, is left alone as a whole: there a
+# sound may be the subject ("Replace um with uh", "звуке эм") or a literal ("'um'"). It does so on
+# any quote or backtick character, an apostrophe that is not inside a word, or a word starting with
+# one of META_STEMS. 7 of the 40 test notes match (word, replace, quote, transcribe, quote marks),
+# which kept 1 of their sounds.
+META_STEMS = tuple(
+    "sound word letter filler replac transcri spell quot звук слов букв символ междомет замен "
+    "транскри цитат".split()
+)
+META_MARKS = re.compile(r'["“”«»‘`]|(?<![^\W_])[\'’]|[\'’](?![^\W_])')
+FRACTIONS = frozenset(
+    "half halves quarter quarters third thirds dozen dozens половина половину половины половиной "
+    "пол четверть четверти треть трети".split()
+)
+# Never in a note, so a text past these is passed on unstripped: the longest of the 40 test notes
+# has 1,897 characters, and 3,000 words (GS_PUNCT_MAX_WORDS) of speech are about 20,000.
+STRIP_MAX_CHARS = 50_000
+STRIP_MAX_SPACE = 1_000
 APOSTROPHES = str.maketrans(dict.fromkeys("\u2018\u2019\u02bc\u02b9\u00b4\u0060\u2032\uff07", "'"))
 HYPHENS = re.compile("[-\u2010-\u2015\u2212\ufe63\uff0d]")
 DIGIT_NAMES = frozenset({"k3s"})  # names in SYSTEM_CORRECT with a digit: a fix to one is no number
@@ -278,12 +327,17 @@ def correction_message(text: str, context: str) -> str:
 
 def _bare(token: str) -> str:
     """A token for comparing wordings: lower case, without punctuation or symbols at its ends."""
+    return _trim(token).lower()
+
+
+def _trim(token: str) -> str:
+    """The token without punctuation or symbols at its ends."""
     i, j = 0, len(token)
     while i < j and unicodedata.category(token[i])[0] in "PS":
         i += 1
     while j > i and unicodedata.category(token[j - 1])[0] in "PS":
         j -= 1
-    return token[i:j].lower()
+    return token[i:j]
 
 
 def _key(token: str) -> str:
@@ -314,15 +368,184 @@ def same_numbers(src: list[str], got: list[str]) -> bool:
     )
 
 
-def _dropped_ok(src: list[str], i1: int, i2: int) -> bool:
-    """Whether src[i1:i2] may be dropped: fillers, or a repeat of the words just before or after."""
+def _is_sound(
+    tokens: list[str], i: int, seps: list[str] | None = None, sounds: frozenset[str] = SOUNDS
+) -> bool:
+    """Whether tokens[i] is one of `sounds` that may go (see SOUNDS); the note is no meta note."""
+    m = SOUND_SHAPE.fullmatch(tokens[i])
+    core = m.group(2) if m else ""
+    if _sound_key(core) not in sounds or core not in (core.lower(), core.lower().capitalize()):
+        return False
+    if core != core.lower():  # "Um, we merge." only: at a sentence's start, with its own pause
+        start = i == 0 or (seps is not None and "\n" in seps[i])
+        start = start or (_stops(tokens[i - 1]) and tokens[i - 1].lower() not in ABBREVIATIONS)
+        if not start or not m.group(4).startswith((",", "..", "…")):
+            return False
+    return not any(_number(t) for t in tokens[max(0, i - 1) : i] + tokens[i + 1 : i + 2])
+
+
+def _sound_key(word: str) -> str:
+    """The word as SOUNDS lists it: lower case, "м" three times or more as "ммм"."""
+    word = word.lower()
+    return "ммм" if len(word) >= 3 and set(word) == {"м"} else word
+
+
+def _number(token: str) -> bool:
+    """A number in digits (not a name like k3s) or in words, "twenty-five", "half" and "½"
+    included."""
+    bare = _bare(token).replace("ё", "е")
+    if any(c.isnumeric() for c in bare):
+        return bare not in DIGIT_NAMES
+    return any(part in NUMBER_WORDS or part in FRACTIONS for part in HYPHENS.split(bare))
+
+
+def _stops(token: str) -> bool:
+    """Whether the token ends a sentence (. ? !), brackets aside; an ellipsis does not."""
+    end = token.rstrip(")]")
+    return end.endswith(("?", "!")) or (end.endswith(".") and not end.endswith(".."))
+
+
+def _keeps_sounds(text: str) -> bool:
+    """Whether no sound may go from this note: it quotes something or talks about sounds or words
+    (see META_STEMS), or writes a sound as a name ("UM", "@um", "Ask Um"): a sound there that
+    _is_sound would keep."""
+    if META_MARKS.search(text):
+        return True
+    found = list(re.finditer(r"\S+", text))
+    tokens = [m.group() for m in found]
+    seps = [text[(found[k - 1].end() if k else 0) : m.start()] for k, m in enumerate(found)]
+    for i, token in enumerate(tokens):
+        bare = _bare(token)
+        if bare.startswith(META_STEMS):
+            return True
+        bare = _sound_key(bare)
+        if bare in SOUNDS and _bare(token) != _trim(token) and not _is_sound(tokens, i, seps):
+            return True  # not in lower case, and not a removable "Um,"
+        if bare in SOUNDS and not SOUND_SHAPE.fullmatch(token):
+            return True
+    return False
+
+
+def note_sounds(payload: dict) -> frozenset[str]:
+    """The sounds that may go from this answer: by its "language" (verbose_json), none if it has
+    none or another one."""
+    return SOUNDS_BY_LANGUAGE.get(
+        LANGUAGES.get(str(payload.get("language", "")).lower(), ""), frozenset()
+    )
+
+
+def _ends(token: str, marks: str) -> bool:
+    end = token.rstrip(")]")
+    return bool(end) and end[-1] in marks
+
+
+def _dropped_ok(src: list[str], i1: int, i2: int, sounds: frozenset[str]) -> bool:
+    """Whether src[i1:i2] may be dropped: all of it `sounds` (none in a meta note), or a repeat
+    of the words just before or after."""
+    if sounds and all(_is_sound(src, i, sounds=sounds) for i in range(i1, i2)):
+        return True
     run = [_bare(t) for t in src[i1:i2]]
     k = len(run)
-    if all(t in FILLERS for t in run):
-        return True
-    before = [_bare(t) for t in src[max(0, i1 - k) : i1]]
-    after = [_bare(t) for t in src[i2 : i2 + k]]
-    return run in (before, after)
+    return run in (
+        [_bare(t) for t in src[max(0, i1 - k) : i1]],
+        [_bare(t) for t in src[i2 : i2 + k]],
+    )
+
+
+def strip_sounds(text: str, sounds: frozenset[str] = SOUNDS) -> tuple[str, int]:
+    """`text` without its hesitation sounds (SOUNDS), and how many were removed. Every other token
+    stays. Text that is sounds only, a meta note (_keeps_sounds), longer than STRIP_MAX_CHARS or
+    with a space of over STRIP_MAX_SPACE is left as it is. Linear in the text's length.
+
+    Each removed token's own punctuation: a comma after it goes with it, but one before it stays,
+    as dropping it could join a word to the next clause ("No, um, do it." is not "No do it."); a
+    sentence mark after it (. ? !) moves to the word before unless that one ends a sentence
+    already, and so does a ; or : (in place of a comma there), while an ellipsis goes with it (a
+    ? or ! after it still moves);
+    brackets opened and closed within the removed words go with them, as do the marks inside
+    them, others move to the word they belong to; the larger line break before it moves to the
+    next word; and when it started a sentence with a capital, the next word takes the capital (a
+    plain lower-case word only, so `k3s` stays as written).
+    """
+    if len(text) > STRIP_MAX_CHARS:
+        logger.info("punct: sounds not stripped, %d characters", len(text))
+        return text, 0
+    found = list(re.finditer(r"\S+", text))
+    tokens = [m.group() for m in found]
+    seps = [text[(found[k - 1].end() if k else 0) : m.start()] for k, m in enumerate(found)]
+    if any(len(sep) > STRIP_MAX_SPACE for sep in seps):
+        logger.info("punct: sounds not stripped, a space of over %d characters", STRIP_MAX_SPACE)
+        return text, 0
+    n = len(tokens)
+    gone = [_is_sound(tokens, i, seps, sounds) for i in range(n)]
+    kept = None  # a sound with ; : ? or ! after a word ending in "." ("p.m. um;") stays
+    for i in range(n):
+        if gone[i] and kept is not None and tokens[kept].rstrip(")]").endswith("."):
+            gone[i] = not re.search(r"[;:?!]", SOUND_SHAPE.fullmatch(tokens[i]).group(4))
+        kept = kept if gone[i] else i
+    if not any(gone) or all(gone):
+        return text, 0
+    if _keeps_sounds(text):
+        logger.info("punct: sounds not stripped, the note quotes or talks about words")
+        return text, 0
+    caps, last, i = set(), None, 0  # last: the last token kept so far
+    lines = [sep.count("\n") for sep in seps]
+    while i < n:
+        if not gone[i]:
+            last, i = i, i + 1
+            continue
+        j = i
+        while j < n and gone[j]:
+            j += 1
+        r = j if j < n else None  # the next token kept
+        opened, closed, inside = [], "", []  # brackets the removed words leave open or close
+        for k in range(i, j):
+            m = SOUND_SHAPE.fullmatch(tokens[k])
+            for c in m.group(1) if m else "":
+                opened.append(c)
+            for c in m.group(3) if m else "":
+                if opened and PAIRS[opened[-1]] == c:
+                    opened.pop()
+                else:
+                    closed += c
+            inside.append(bool(opened))  # its marks are inside the brackets: they go too
+        if (closed and last is None) or (opened and r is None):
+            gone[i:j] = [False] * (j - i)  # a bracket with no word to go to: keep the words
+            last, i = j - 1, j
+            continue
+        if closed:
+            tokens[last] += closed
+        if opened:
+            tokens[r] = "".join(opened) + tokens[r]
+        stops = last is not None and _stops(tokens[last])  # kept up to date, not rescanned
+        for k in range(i, j):
+            marks = SOUND_SHAPE.fullmatch(tokens[k]).group(4)  # every removed token has this shape
+            # An ellipsis is the hesitation and goes; a ? or ! after it ends the sentence ("um…?").
+            ellipsis = ".." in marks or "…" in marks
+            stop = re.search(r"[?!]+\Z" if ellipsis else r"[.?!]+", marks)
+            pause = re.search(r"[;:]", marks)  # a clause break: kept, with no capital after it
+            stop, pause = (None, None) if inside[k - i] else (stop, pause)
+            if stop and last is not None and not stops:
+                tokens[last] = tokens[last].rstrip(",;:") + stop.group()
+                stops = True
+            elif pause and last is not None and not stops and not _ends(tokens[last], ";:"):
+                tokens[last] = tokens[last].rstrip(",") + pause.group()
+            if r is not None and lines[k] > lines[r]:
+                seps[r], lines[r] = seps[k], lines[k]
+            starts = last is None or "\n" in seps[k] or stops
+            if r is not None and starts and (_trim(tokens[k])[:1].isupper() or stop):
+                caps.add(r)
+        i = j
+    for r in caps:
+        word = _trim(tokens[r])
+        if word.isalpha() and word.islower():
+            at = tokens[r].find(word)
+            tokens[r] = tokens[r][:at] + word[0].upper() + tokens[r][at + 1 :]
+    kept = [k for k in range(n) if not gone[k]]
+    if len(kept) == n:
+        return text, 0
+    seps[kept[0]] = seps[0]
+    return "".join(seps[k] + tokens[k] for k in kept) + text[found[-1].end() :], sum(gone)
 
 
 def _moved(sm: difflib.SequenceMatcher, src: list[str], got: list[str]) -> bool:
@@ -351,9 +574,11 @@ def _moved(sm: difflib.SequenceMatcher, src: list[str], got: list[str]) -> bool:
     return False
 
 
-def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
+def is_correction(
+    src: list[str], got: list[str], sounds: frozenset[str] = SOUNDS
+) -> tuple[bool, int, int, str]:
     """Whether `got` corrects `src` rather than rewriting it; tokens dropped and added; and the
-    reason for a refusal ("" when accepted).
+    reason for a refusal ("" when accepted). `sounds` may be dropped (see note_sounds).
 
     Lengths that cannot pass are refused before the alignment, whose cost grows with both; the
     counts are then the length difference only.
@@ -364,7 +589,7 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
     sm = difflib.SequenceMatcher(
         None, [_key(t) for t in src], [_key(t) for t in got], autojunk=False
     )
-    kept, reason = 0, ""
+    kept, reason, droppable = 0, "", None
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             kept += i2 - i1
@@ -374,8 +599,10 @@ def is_correction(src: list[str], got: list[str]) -> tuple[bool, int, int, str]:
             reason = "number or negation"
         elif tag == "insert" and j2 - j1 > 1:
             reason = "insertion"
-        elif tag == "delete" and not _dropped_ok(src, i1, i2):
-            reason = "deletion"
+        elif tag == "delete":
+            if droppable is None:  # once, and only if needed
+                droppable = frozenset() if _keeps_sounds(" ".join(src)) else sounds
+            reason = "" if _dropped_ok(src, i1, i2, droppable) else "deletion"
         elif tag == "replace" and max(i2 - i1, j2 - j1) > MAX_REPLACE:
             reason = "replacement"
     dropped, added = len(src) - kept, len(got) - kept
@@ -681,11 +908,15 @@ class Punctuate:
                 outcome, out = await self._ask(payload, tokens, body, begin, context)
             finally:
                 self.inflight -= 1
+        removed = 0
+        if context is not None and outcome in STRIPPED:
+            out, removed = _without_sounds(out, text)
         logger.info(
-            "punct: %s, %d words, longest unpunctuated %d, %.0f ms",
+            "punct: %s, %d words, longest unpunctuated %d, %d sounds removed, %.0f ms",
             outcome,
             len(tokens),
             longest_unpunctuated(tokens),
+            removed,
             (time.perf_counter() - begin) * 1000,
         )
         return outcome, out
@@ -741,7 +972,7 @@ class Punctuate:
         self, payload: dict, tokens: list[str], body: bytes, text: str, with_context: bool
     ) -> tuple[str, bytes]:
         """A correction that changed words: the new top-level text, or the fallback if refused."""
-        ok, dropped, added, reason = is_correction(tokens, text.split())
+        ok, dropped, added, reason = is_correction(tokens, text.split(), note_sounds(payload))
         logger.info(
             "punct: correction %s, %d words, %d dropped, %d added, count ratio %.2f, context %s",
             "accepted" if ok else f"refused ({reason})",
@@ -754,6 +985,39 @@ class Punctuate:
         if ok:
             return "corrected", json.dumps({**payload, "text": text}, ensure_ascii=False).encode()
         return "rejected", body
+
+
+# Correction mode removes hesitation sounds from the top-level text after the guard, so the guard
+# sees the model's answer as it came: from a corrected, applied or unchanged answer, and from
+# Whisper's own text when the answer was refused (rejected). Nothing goes if Whisper's transcript
+# or the text itself keeps its sounds (_keeps_sounds): an answer may have dropped the quotes or
+# capitals that made a sound a literal or a name, and only the sounds of the answer's "language"
+# go (verbose_json carries it; claude-tools always asks for it), none without one. Busy, timeout,
+# error and skipped keep
+# Whisper's answer byte for byte. strip_sounds is linear in the
+# text and skips one past STRIP_MAX_CHARS, so it runs on the event loop: well under a millisecond
+# for a note, about 50 ms at the bound. Any error in it sends the answer as it was.
+STRIPPED = ("corrected", "applied", "unchanged", "rejected")
+
+
+def _without_sounds(body: bytes, transcript: str) -> tuple[bytes, int]:
+    """The answer with sounds removed from its top-level `text`; segments and words unchanged."""
+    try:
+        payload = json.loads(body)
+        sounds = note_sounds(payload)
+        if not sounds:
+            logger.info("punct: sounds not stripped, language %s", payload.get("language"))
+            return body, 0
+        if _keeps_sounds(transcript):  # what Whisper heard decides too, not only the answer
+            logger.info("punct: sounds not stripped, the transcript quotes or names them")
+            return body, 0
+        text, removed = strip_sounds(payload["text"], sounds)
+        if not removed:
+            return body, 0
+        return json.dumps({**payload, "text": text}, ensure_ascii=False).encode(), removed
+    except Exception as e:  # noqa: BLE001 - the answer as it was
+        logger.warning("punct: sounds: %s", type(e).__name__)
+        return body, 0
 
 
 async def _send_error(send, status: int, detail: bytes) -> None:  # noqa: ANN001

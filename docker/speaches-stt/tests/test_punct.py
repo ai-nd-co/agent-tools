@@ -856,13 +856,47 @@ class Correction(unittest.TestCase):
             ("i mean stop stop the track", "I mean, stop the track."),
             ("integrate it to our to our workflow", "Integrate it to our workflow."),
             ("uh so we merge", "So we merge."),
-            ("ну давай проверим", "Давай проверим."),
             ("when i close topic", "When I close a topic."),
             ("double check it", "Double-check it."),
             # person names are not policed: the owner chose free correction
             ("rustam said wait", "Ruslan said wait."),
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], "", (src, got))
+
+    def test_guard_drops_only_sounds_and_repeats(self) -> None:
+        for src, got, why in (
+            ("the the tests pass", "The tests pass.", ""),
+            ("uh um the tests pass", "The tests pass.", ""),
+            ("do uh you know the answer", "Do you know the answer?", ""),
+            ("Um, we merge it today.", "We merge it today.", ""),
+            ("uh the the tests pass", "The tests pass.", "deletion"),  # a sound and a repeat: no
+            # word fillers are no sounds; the prompt keeps them
+            ("so, you know, we merge it today", "So, we merge it today.", "deletion"),
+            ("ну давай проверим", "Давай проверим.", "deletion"),  # main took "ну" as a sound
+            ("i like the new layout", "I the new layout.", "deletion"),
+            ("так вот мы закончили", "Так мы закончили.", "deletion"),
+            # Codex review: units, names, letters, lines, numbers
+            ("I trust you. Know your limits.", "I trust your limits.", "deletion"),
+            ("use 5 mm screws now", "Use 5 screws now.", "deletion"),
+            ("use five um screws now", "Use five screws now.", "deletion"),
+            ("use half um filters", "Use half filters.", "deletion"),
+            ("send ER the report", "Send the report.", "deletion"),
+            ("message @um tomorrow", "Message tomorrow.", "deletion"),
+            ("Call Alice. Um, Alice needs the report.", "Call Alice needs the report.", "deletion"),
+            (
+                "Call Alice\n\num Alice needs the report.",
+                "Call Alice needs the report.",
+                "deletion",
+            ),
+            ("Book a hotel in Umm Al Quwain", "Book a hotel in Al Quwain.", "deletion"),
+            ("замени э на е", "Замени на е.", "deletion"),
+            # a meta note: no sound may go
+            ("replace um with uh throughout", "Replace with uh throughout.", "deletion"),
+            ("keep the sounds um and uh here", "Keep the sounds and here.", "deletion"),
+            ("оставь звуки эм и ммм в тексте", "Оставь звуки и в тексте.", "deletion"),
+            ("search for “well um actually” here", "Search for “well actually” here.", "deletion"),
+        ):
+            self.assertEqual(punct.is_correction(src.split(), got.split())[3], why, (src, got))
 
     def test_bad_context_never_fails_the_request(self) -> None:
         for raw in (b"%%%", b"A" * (punct.MAX_CONTEXT_HEADER + 4), b64("x" * 9000)):
@@ -1035,6 +1069,337 @@ class Correction(unittest.TestCase):
             complete = punct.make_complete("http://llm/v1", "m", transport=t, system=system)
             asyncio.run(complete("hi", 10, 5))
         self.assertEqual(seen, [punct.SYSTEM, punct.SYSTEM_CORRECT])
+
+
+class Fillers(unittest.TestCase):
+    def check(self, cases: tuple) -> None:
+        for text, want in cases:
+            self.assertEqual(punct.strip_sounds(text)[0], want, text)
+
+    def keep(self, *texts: str) -> None:
+        for text in texts:
+            self.assertEqual(punct.strip_sounds(text), (text, 0), text)
+
+    def test_sounds_are_removed(self) -> None:
+        for sound in "uh um uhm erm hmm ммм мммм".split():
+            self.check(
+                (
+                    (f"we {sound} merge", "we merge"),
+                    (f"{sound.capitalize()}, we merge.", "We merge."),
+                )
+            )
+        self.assertEqual(punct.SOUNDS, frozenset("uh um uhm erm hmm ммм".split()))
+
+    def test_words_units_names_and_numbers_are_no_sounds(self) -> None:  # Codex review
+        self.keep(
+            "Use 5 mm screws.",
+            "Send ER the report.",
+            "UM is a school.",  # capitals: an abbreviation
+            "Use five um screws.",
+            "The 5 um screws.",
+            "It is twenty-five um wide.",
+            "Use half um filters.",
+            "Use ½ um filters.",
+            "Add a quarter uh cup.",
+            "Ah, I see.",
+            "Eh, fine.",
+            "um-hmm, yes",
+            "Message @um tomorrow.",
+            "Tag #um here.",
+            "Umm Al Quwain is cheaper than Dubai.",
+            "Book a hotel in Umm Al Quwain.",
+            "Замени э на е в этом слове.",
+            "Э, давай.",
+            "(Um.) We merge.",
+        )
+        self.keep("Uh, Um, we merge.")  # a capital mid-sentence: a name, maybe; the note stays
+
+    def test_word_fillers_all_stay(self) -> None:
+        self.keep(
+            "So, you know, we merge.",
+            "If you know, you know, but don't spoil it for the others.",
+            "You know the password.",
+            "Transfer fifty, I mean, fifteen dollars.",
+            "Send it to Alice, I mean, Bob.",
+            "We merge, like, today.",
+            "It costs, like, a hundred dollars.",
+            "Remember to comment, like, then subscribe.",
+            "Like, share, and subscribe.",
+            "Like I said, we merge.",
+            "Мы, типа, закончили.",
+            "Это, как бы, готово.",
+            "Как бы ты решил эту задачу?",
+            "Ну, давай.",
+            "Не, ну, давай.",
+            "Да, вот, мерджим.",
+            "Этот маршрут дешевле, короче, безопаснее.",
+        )
+
+    def test_a_note_that_quotes_or_talks_about_words_is_left_alone(self) -> None:  # Codex review
+        self.keep(
+            # quotes and code
+            'Replace "um" with "uh".',
+            "Search for “well um actually” in the transcript.",
+            'Search for "well um actually" in it, uh, now.',
+            "Search for «эм» in it.",
+            "Search for ‘I’m um stuck’ in the transcript.",
+            "Search for 'I'm um stuck' in the transcript.",
+            "Search for 'the users' um requests' in the transcript.",
+            "Run `git um status` now.",
+            "We merge uh the dogs' toys.",  # an apostrophe after a word: a quote, maybe
+            # talk about sounds and words
+            "Replace um with uh throughout the transcript.",
+            "Замени эм на эн в названии.",
+            "Мы говорим о звуке эм в начале фразы.",
+            "Keep the sounds er, um and uh in the transcript.",
+            "Keep the sounds um and uh in the transcript.",
+            "Оставь звуки эм и ммм в тексте.",
+            "Remove the fillers um, uh, and hmm.",
+            "Say the words um or uh.",
+            "It is the letter um.",
+            "Напиши букву эм в начале слова.",
+            "Убери междометия эм и ммм.",
+            "Spell um backwards.",
+        )
+        # apostrophes inside words are no quotes
+        self.check((("I'm um stuck, don't uh go.", "I'm stuck, don't go."),))
+
+    def test_no_word_or_line_is_joined(self) -> None:
+        self.keep("I trust you.\n\nKnow your limits.")
+
+    def test_each_removed_token_keeps_its_boundaries(self) -> None:  # Codex review
+        self.check(
+            (
+                ("No uh. Um, deploy now.", "No. Deploy now."),
+                ("First. Uh,\n\nUm, second.", "First.\n\nSecond."),
+                ("First.\n\nUm,\nsecond.", "First.\n\nSecond."),  # the blank line wins
+                ("We merge.\n\nUm, then we test.", "We merge.\n\nThen we test."),
+                ("Um,\n\nwe merge.", "We merge."),
+                ("Hmm, okay.", "Okay."),
+                ("We merge uh.", "We merge."),
+            )
+        )
+
+    def test_brackets_stay_balanced(self) -> None:  # Codex review
+        self.check(
+            (
+                ("We (um) agree.", "We agree."),
+                ("We (uh um) agree.", "We agree."),
+                ("We (uh. um) agree.", "We agree."),  # the stop inside the brackets goes too
+                ("We merge, (um) today.", "We merge, today."),
+                ("We (um, so) agree.", "We (so) agree."),
+                ("(uh. we agree)", "(we agree)"),
+                ("x (um y", "x (y"),
+                ("a um) b", "a) b"),
+            )
+        )
+        self.keep("x (um", "um) x", "(um uh)")  # no word for the bracket to go to
+
+    def test_the_comma_before_a_removed_sound_stays(self) -> None:  # review: no joined clauses
+        self.check(
+            (
+                ("No, um, do it.", "No, do it."),
+                ("Нет, ммм, не надо.", "Нет, не надо."),
+                ("Yes, uh, deploy it.", "Yes, deploy it."),
+                ("Да, ммм, мерджим.", "Да, мерджим."),
+                ("Stop, uh, deploying.", "Stop, deploying."),
+                ("I, uh, like it.", "I, like it."),
+            )
+        )
+
+    def test_a_clause_break_on_a_sound_moves_to_the_word_before(self) -> None:  # Codex round 7
+        self.check(
+            (
+                (
+                    "Do not deploy um; restart the database instead.",
+                    "Do not deploy; restart the database instead.",
+                ),
+                ("Note um: deploy now.", "Note: deploy now."),
+                ("We deploy, um; restart.", "We deploy; restart."),  # in place of the comma
+                ("We deploy; um, restart.", "We deploy; restart."),
+            )
+        )
+
+    def test_a_sound_never_hides_the_words_around_it(self) -> None:  # review
+        self.check(
+            (
+                ("Do uh you know the answer?", "Do you know the answer?"),
+                ("I um like the new layout.", "I like the new layout."),
+                ("Looks uh like rain.", "Looks like rain."),
+                ("What, um, I mean is this.", "What, I mean is this."),
+                ("It is, uh, like a bug.", "It is, like a bug."),
+                ("Сделай ммм короче.", "Сделай короче."),
+                ("Как ммм бы не сломать.", "Как бы не сломать."),
+                ("Uh, I like it.", "I like it."),
+                ("Uh, you know, we merge.", "You know, we merge."),
+                ("We uh merge, um, today.", "We merge, today."),
+            )
+        )
+
+    def test_capitals_and_whitespace(self) -> None:
+        self.check(
+            (
+                ("Um, so we merge it.", "So we merge it."),
+                ("Um, k3s is down.", "k3s is down."),  # names keep their case
+                (" uh we merge", " we merge"),  # Whisper's leading space stays
+                ("we uh merge  \n", "we merge  \n"),
+                ("Ммм, давай.", "Давай."),
+            )
+        )
+        self.keep("um", "Uh, um.", " Hmm")
+
+    def test_a_capitalised_sound_goes_only_as_a_pause_at_a_start(self) -> None:  # Codex r8
+        self.keep(
+            "Please ask Dr. Um to review the report.",
+            "Ask Um to send the report.",
+            "Um we merge.",
+            "Um. We merge.",
+            "Hmm. Okay.",
+        )
+        self.check(
+            (
+                ("Um, we merge.", "We merge."),
+                ("Um... we merge.", "We merge."),
+                ("Done. Uh, then we test.", "Done. Then we test."),
+            )
+        )
+
+    def test_only_the_notes_own_language_loses_sounds(self) -> None:  # Codex round 8
+        en, ru = punct.SOUNDS_BY_LANGUAGE["en"], punct.SOUNDS_BY_LANGUAGE["ru"]
+        self.assertEqual(punct.strip_sounds("we um merge, ммм, now", en)[0], "we merge, ммм, now")
+        self.assertEqual(punct.strip_sounds("we um merge, ммм, now", ru)[0], "we um merge, now")
+        for language, want in (("en", en), ("english", en), ("ru", ru), ("Russian", ru)):
+            self.assertEqual(punct.note_sounds({"language": language}), want, language)
+        for payload in ({"language": "pt"}, {"language": None}, {}):
+            self.assertEqual(punct.note_sounds(payload), frozenset(), payload)
+
+    def test_codex_round_9(self) -> None:
+        self.keep(
+            "Нажми эм, чтобы открыть карту.",  # the letter М
+            "Отрежь 5 мм ленты.",
+            "Отрежь мм ленты.",  # millimetres
+            "Эм, давай.",
+        )
+        self.check(
+            (
+                ("Can we deploy, um…? I need to know.", "Can we deploy? I need to know."),
+                ("Can we deploy, um...? I need to know.", "Can we deploy? I need to know."),
+                ("Stop, um…! Now.", "Stop! Now."),
+                ("We wait, um… then go.", "We wait, then go."),
+                ("Это мммм вкусно.", "Это вкусно."),
+            )
+        )
+
+    def test_a_mark_after_an_abbreviation_keeps_its_sound(self) -> None:  # Codex round 10
+        self.keep(
+            "Meet me at five p.m. um; bring the report.",
+            "Use a tool, e.g. um: this one.",
+            "Is it at 5 p.m. uh?",
+        )
+        self.check((("Meet me at five p.m. um, then go.", "Meet me at five p.m. then go."),))
+
+    def test_numbers_and_negations_are_never_removed(self) -> None:
+        for word in sorted(punct.NEGATIONS) + ["15", "1.5", "fifty", "пять", "don't"]:
+            for template in ("uh, {}, um,", "{}, um, hmm,", "Um, {} uh"):
+                got = punct.strip_sounds(template.format(word))[0]
+                self.assertEqual(_words(got).count(word), 1, template.format(word))
+
+    def test_long_or_odd_text_is_left_alone(self) -> None:  # Codex review
+        for text in (
+            "ok " + "um " * 2997 + " " * 8_000_000 + "done",
+            "(" * 1_000_000 + "ok" + ")" * 1_000_000 + " um" * 2999,
+            "we um merge " * 5_000,  # 60,000 characters
+            "we um" + " " * 1_001 + "merge",
+            "Um " * 2999 + "a" * 8_000_000,
+        ):
+            t0 = time.perf_counter()
+            self.assertEqual(punct.strip_sounds(text), (text, 0), text[:20])
+            self.assertLess(time.perf_counter() - t0, 1, text[:20])
+
+    def test_linear_time(self) -> None:  # Codex review
+        for text, removed in (
+            ("we uh agree" + " " * 999, 1),
+            ("um " * 16_000 + "x", 16_000),
+            ("um " * 2999 + "a" * 40_000, 2999),
+            ("ok " + "um " * 2997 + " " * 999 + "done", 2997),
+        ):
+            t0 = time.perf_counter()
+            self.assertEqual(punct.strip_sounds(text)[1], removed, text[:20])
+            self.assertLess(time.perf_counter() - t0, 1, text[:20])
+
+
+def _words(text: str) -> list[str]:
+    return [punct._bare(t) for t in text.split()]
+
+
+class FillersInThePass(unittest.TestCase):
+    PAYLOAD = verbose("uh we should um merge the codec branch you know today")
+
+    def run_pass(self, answer: str | Exception, payload: dict | None = None):  # noqa: ANN201
+        app = punct.Punctuate(whisper_app(payload or self.PAYLOAD), Fake(), correct=Fake(answer))
+        return call_correct(app, b64(CONTEXT))
+
+    def test_corrected_text_loses_fillers_after_the_guard(self) -> None:
+        r = self.run_pass("Uh, we should, um, merge the Codex branch, you know, today.")
+        self.assertEqual(r.headers["x-gs-punctuated"], "corrected")
+        self.assertEqual(r.json()["text"], "We should, merge the Codex branch, you know, today.")
+        self.assertEqual(r.json()["segments"], self.PAYLOAD["segments"])
+        self.assertEqual(r.json()["words"], self.PAYLOAD["words"])
+
+    def test_applied_and_unchanged_lose_fillers_in_text_only(self) -> None:
+        r = self.run_pass("Uh, we should um merge the codec branch, you know, today.")
+        self.assertEqual(r.headers["x-gs-punctuated"], "applied")
+        self.assertEqual(r.json()["text"], "We should merge the codec branch, you know, today.")
+        self.assertEqual(r.json()["segments"][0]["text"].split()[0], "Uh,")  # punctuated only
+        payload = {"text": "Uh, we merge it, you know, today.", "language": "en"}
+        r = self.run_pass(payload["text"], payload)
+        self.assertEqual(r.headers["x-gs-punctuated"], "unchanged")
+        self.assertEqual(r.json(), {**payload, "text": "We merge it, you know, today."})
+
+    def test_refused_answer_loses_its_sounds(self) -> None:
+        r = self.run_pass("A short summary of the note.")
+        self.assertEqual(r.headers["x-gs-punctuated"], "rejected")
+        out = r.json()
+        self.assertEqual(out["text"], " we should merge the codec branch you know today")
+        self.assertEqual({**out, "text": None}, {**self.PAYLOAD, "text": None})
+
+    def test_the_transcript_keeps_its_sounds_too(self) -> None:  # Codex round 7
+        for whisper, model in (
+            ("UM sent the report yesterday.", "Um sent the report yesterday."),
+            ('Search for "um" in the transcript.', "Search for um in the transcript."),
+            ("Replace um with uh.", "Replace um with uh."),
+            ("Ask @um about it.", "Ask um about it."),
+        ):
+            r = self.run_pass(model, {"text": whisper, "language": "en"})
+            self.assertEqual(
+                r.json()["text"], model, whisper
+            )  # the model's own text, no sound gone
+        r = self.run_pass("Um, we merge it.", {"text": "um we merge it", "language": "en"})
+        self.assertEqual(r.json()["text"], "We merge it.")
+
+    def test_no_language_or_another_keeps_the_sounds(self) -> None:  # Codex round 8
+        for payload in (
+            {"text": "Envie um euro para Maria.", "language": "pt"},
+            {"text": "we um merge it today"},  # plain json: no language
+        ):
+            r = self.run_pass(payload["text"], payload)
+            self.assertEqual(r.json(), payload, payload)
+        # nor may the model drop a sound of another language
+        payload = {"text": "envie um euro para maria", "language": "pt"}
+        r = self.run_pass("Envie euro para Maria.", payload)
+        self.assertEqual(r.headers["x-gs-punctuated"], "rejected")
+        r = self.run_pass(
+            "Ask um to send the report.", {"text": "Ask Um to send the report.", "language": "en"}
+        )
+        self.assertEqual(r.json()["text"], "Ask um to send the report.")
+
+    def test_failures_and_the_normal_pass_keep_the_answer(self) -> None:
+        r = self.run_pass(RuntimeError("down"))
+        self.assertEqual(r.headers["x-gs-punctuated"], "error")
+        self.assertEqual(r.content, json.dumps(self.PAYLOAD).encode())
+        bare = BARE.replace("word3 ", "um word3 ")
+        r = call(punct.Punctuate(whisper_app({"text": bare}), Fake(bare.replace("um ", "um, "))))
+        self.assertIn("um,", r.json()["text"])  # no correction mode: nothing removed
 
 
 if __name__ == "__main__":

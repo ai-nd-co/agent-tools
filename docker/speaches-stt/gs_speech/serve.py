@@ -55,10 +55,11 @@ def bind(host: str, port: int) -> socket.socket:
 def main() -> None:
     from speaches.main import create_app
 
-    from gs_speech import ext, langid, punct
+    from gs_speech import ext, langid, punct, tts
 
     app = create_app()  # sets up logging; the wrappers below act on the classes, used per request
     state = ext.install()
+    tts.install()  # before serving: Kokoro's session is built on its first load
 
     host = os.environ.get("UVICORN_HOST", "127.0.0.1")
     port = int(os.environ.get("UVICORN_PORT", "8000"))

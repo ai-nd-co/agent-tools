@@ -9,7 +9,8 @@
 #    (2026-10-21): large-v3 int8 takes 2,575 MiB against 4,217 at float16, same speed, 1.4% of
 #    words differ from float16. The compute type itself is the deployment's WHISPER__COMPUTE_TYPE.
 # 3. gs_speech (this directory): admission control, a model allowlist, a language-ID-only
-#    listener on a second port and an opt-in LLM punctuation pass (punct.py), started by `python -m gs_speech.serve`. It wraps Speaches'
+#    listener on a second port, an opt-in LLM punctuation pass (punct.py) and Kokoro TTS on the
+#    CPU (tts.py), started by `python -m gs_speech.serve`. It wraps Speaches'
 #    classes at runtime and edits no Speaches file, so patch 433's hash guard on whisper.py holds.
 ARG BASE=ghcr.io/speaches-ai/speaches@sha256:5c6206a349e90b9a6782342917e72f84fc7cb60e8afd540f6aa625831ac1fd0f
 

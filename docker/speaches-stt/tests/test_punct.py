@@ -864,6 +864,78 @@ class Correction(unittest.TestCase):
         ):
             self.assertEqual(punct.is_correction(src.split(), got.split())[3], "", (src, got))
 
+    def test_filler_words_and_phrases_may_be_dropped(self) -> None:
+        for src, got in (
+            ("you know we should merge it today", "We should merge it today."),
+            ("i mean the build is green", "The build is green."),
+            ("the node is like down again", "The node is down again."),
+            ("um so you know i mean we merge it now", "So we merge it now."),
+            ("uh like the the tests pass", "The tests pass."),  # fillers and a repeat in one run
+            ("it is uh you know broken", "It is broken."),
+            ("ну короче давай проверим", "Давай проверим."),
+            ("это как бы уже готово", "Это уже готово."),
+            ("и вот мы э закончили типа", "И мы закончили."),
+        ):
+            self.assertEqual(punct.is_correction(src.split(), got.split())[3], "", (src, got))
+
+    def test_meaningful_words_are_not_fillers(self) -> None:
+        for src, got in (
+            ("so we merge it", "We merge it."),
+            ("well it works now", "It works now."),
+            ("just restart the node", "Restart the node."),
+            ("actually the build failed", "The build failed."),
+            # filler words where they carry meaning
+            ("i like the new layout", "I the new layout."),
+            ("it looks like rain today", "It looks rain today."),
+            ("do it like this please", "Do it this please."),
+            ("do you know the answer", "Do the answer."),
+            ("that is what i mean here", "That is what here."),
+            ("сделай короче пожалуйста", "Сделай пожалуйста."),
+            ("какого типа это поле", "Какого это поле."),
+            ("вот так и сделаем", "Так и сделаем."),
+            ("смотри как бы то ни было", "Смотри то ни было."),
+            # a filler next to other dropped words is no excuse for them
+            ("you know the deploy step we skip", "The step we skip."),
+        ):
+            ok, _, _, why = punct.is_correction(src.split(), got.split())
+            self.assertFalse(ok, (src, got))
+            self.assertIn(why, ("deletion", "replacement"), (src, got))
+        # a negation next to a filler stays protected
+        self.assertEqual(
+            punct.is_correction("like don't deploy it".split(), "Deploy it.".split())[3],
+            "number or negation",
+        )
+
+    def test_dropped_fillers_do_not_count_to_the_share(self) -> None:
+        words = [f"w{chr(97 + i // 26)}{chr(97 + i % 26)}" for i in range(30)]  # share: 3
+        src = list(words)
+        for i in (25, 20, 15, 10, 5, 0):  # 6 fillers, 8 tokens
+            src[i:i] = ["you", "know"] if i % 2 else ["um"]
+        self.assertEqual(punct.is_correction(src, words), (True, 9, 0, ""))
+        for fixes, ok in ((3, True), (4, False)):  # the other changes keep their budget
+            got = [t + "x" if i % 7 == 3 and i // 7 < fixes else t for i, t in enumerate(words)]
+            self.assertEqual(punct.is_correction(src, got)[0], ok, fixes)
+        self.assertEqual(punct.is_correction(src, got)[3], "share")
+
+    def test_fillers_next_to_a_fix(self) -> None:
+        for src, got, counts in (
+            ("um cloud code is down", "Claude Code is down.", (2, 1)),
+            ("you know cloud code is down", "Claude Code is down.", (3, 1)),
+            ("ask the codec like now", "Ask the Codex now.", (2, 1)),
+            ("ask codec you know uh to merge", "Ask Codex to merge.", (4, 1)),
+            ("ну кодекс э проверит", "Codex проверит.", (3, 1)),
+            ("uh you know deploy now", "Please deploy now.", (3, 1)),  # one inserted token
+        ):
+            self.assertEqual(
+                punct.is_correction(src.split(), got.split()), (True, *counts, ""), (src, got)
+            )
+        # what the fillers leave beside the fix is still bounded
+        for src, got, why in (
+            ("you know deploy now", "Please do deploy now.", "insertion"),
+            ("um ask the codec now", "Tell all of the Codex now.", "replacement"),
+        ):
+            self.assertEqual(punct.is_correction(src.split(), got.split())[3], why, (src, got))
+
     def test_bad_context_never_fails_the_request(self) -> None:
         for raw in (b"%%%", b"A" * (punct.MAX_CONTEXT_HEADER + 4), b64("x" * 9000)):
             correct = Fake(answer(fix=1))

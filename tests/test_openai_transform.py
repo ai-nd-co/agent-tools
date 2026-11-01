@@ -231,3 +231,37 @@ def test_ttsify_openai_provider_does_not_inherit_the_codex_model(
     result = ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
     assert captured["model"] == "gemma"
     assert result.model == "gemma"
+
+
+def test_transform_with_openai_redacts_an_echoed_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_API_KEY", "sk-test-secret")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "bad key sk-test-secret"}})
+
+    with pytest.raises(OpenAITransportError) as excinfo:
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert "sk-test-secret" not in str(excinfo.value)
+    assert "bad key ***" in str(excinfo.value)
+
+
+def test_transport_error_hides_the_key_and_its_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_API_KEY", "sk-test-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers["authorization"]
+        raise httpx.LocalProtocolError(f"Illegal header value {auth!r}")
+
+    with pytest.raises(OpenAITransportError) as excinfo:
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert "sk-test-secret" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True

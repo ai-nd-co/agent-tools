@@ -78,11 +78,13 @@ def transform_with_openai(
         with httpx.Client(timeout=timeout, transport=transport, follow_redirects=True) as client:
             response = client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
     except httpx.HTTPError as exc:
-        raise OpenAITransportError(f"OpenAI-compatible request failed: {exc}") from exc
+        # No chaining: an invalid header makes h11 quote the Authorization value in its message.
+        message = _redact(str(exc), api_key)
+        raise OpenAITransportError(f"OpenAI-compatible request failed: {message}") from None
     if response.status_code >= 400:
         raise OpenAITransportError(
             f"OpenAI-compatible request failed with {response.status_code}: "
-            f"{_safe_error_text(response)}"
+            f"{_redact(_safe_error_text(response), api_key)[:MAX_ERROR_TEXT_CHARS]}"
         )
 
     try:
@@ -124,6 +126,12 @@ def _first_choice_content(body: object) -> str | None:
     return content if isinstance(content, str) else None
 
 
+def _redact(text: str, secret: str | None) -> str:
+    if secret:
+        text = text.replace(secret, "***")
+    return text
+
+
 def _coerce_int(value: object) -> int | None:
     if isinstance(value, bool):
         return None
@@ -144,4 +152,4 @@ def _safe_error_text(response: httpx.Response) -> str:
             text = error["message"].strip()
         elif isinstance(error, str) and error.strip():
             text = error.strip()
-    return text[:MAX_ERROR_TEXT_CHARS] or "<empty response body>"
+    return text or "<empty response body>"

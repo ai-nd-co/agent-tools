@@ -59,6 +59,8 @@ class TransformOptions:
     timeout_seconds: float = 120.0
     temperature: float | None = None
     top_p: float | None = None
+    # Demonstration turns; only the openai provider sends them.
+    examples: tuple[tuple[str, str], ...] = ()
 
 
 def transform_text(input_text: str, options: TransformOptions) -> TransformResult:
@@ -99,6 +101,7 @@ def transform_text(input_text: str, options: TransformOptions) -> TransformResul
                 timeout_seconds=options.timeout_seconds,
                 temperature=options.temperature,
                 top_p=options.top_p,
+                examples=options.examples,
             )
         )
 

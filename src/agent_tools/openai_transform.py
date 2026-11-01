@@ -33,6 +33,8 @@ class OpenAITransformOptions:
     timeout_seconds: float = 120.0
     temperature: float | None = None
     top_p: float | None = None
+    # (user, assistant) demonstration turns sent between the system prompt and the input.
+    examples: tuple[tuple[str, str], ...] = ()
 
 
 def resolve_openai_base_url(base_url: str | None = None) -> str | None:
@@ -63,13 +65,12 @@ def transform_with_openai(
             f"No OpenAI-compatible server configured. Pass --base-url or set {ENV_OPENAI_BASE_URL}."
         )
     model = resolve_openai_model(options.model)
-    payload: dict[str, Any] = {
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": options.system_prompt},
-            {"role": "user", "content": options.input_text},
-        ],
-    }
+    messages = [{"role": "system", "content": options.system_prompt}]
+    for user_text, assistant_text in options.examples:
+        messages.append({"role": "user", "content": user_text})
+        messages.append({"role": "assistant", "content": assistant_text})
+    messages.append({"role": "user", "content": options.input_text})
+    payload: dict[str, Any] = {"stream": False, "messages": messages}
     # A single-model server such as llama-server answers without a model name.
     if model is not None:
         payload["model"] = model

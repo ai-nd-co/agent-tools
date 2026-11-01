@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from importlib import resources
@@ -136,9 +137,11 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         openai_model = resolve_openai_model(options.model)
         openai_temperature: float | None = None
         openai_top_p: float | None = None
+        openai_examples: tuple[tuple[str, str], ...] = ()
         if provider == "openai":
             # Only the local-model path gets the tuned prompt; Codex and Claude keep the original.
             prompt_text = load_ttsify_prompt(local_model=True)
+            openai_examples = load_ttsify_local_examples()
             openai_temperature = _env_float_or(
                 ENV_OPENAI_TEMPERATURE, DEFAULT_TTSIFY_OPENAI_TEMPERATURE
             )
@@ -181,6 +184,7 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
             timeout_seconds=timeout_seconds,
             temperature=openai_temperature,
             top_p=openai_top_p,
+            examples=openai_examples,
         )
         transform_started = perf_counter()
         transform_result = transform_text(input_text, transform_options)
@@ -255,13 +259,17 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
 
 
 def load_ttsify_prompt(*, local_model: bool = False) -> str:
-    prompts = resources.files("agent_tools.prompts")
-    prompt = prompts.joinpath("ttsify.md").read_text(encoding="utf-8")
-    if not local_model:
-        return prompt
-    # A small local model needs worked examples and a checklist to keep names and counters.
-    addendum = prompts.joinpath("ttsify_local_addendum.md").read_text(encoding="utf-8")
-    return prompt.rstrip("\n") + "\n" + addendum
+    # The local model gets its own prompt, chosen by a measured search against haiku;
+    # ttsify.md stays the Codex and Claude Code prompt.
+    name = "ttsify_local.md" if local_model else "ttsify.md"
+    return resources.files("agent_tools.prompts").joinpath(name).read_text(encoding="utf-8")
+
+
+def load_ttsify_local_examples() -> tuple[tuple[str, str], ...]:
+    """Demonstration turns the local model sees before the real message."""
+    raw = resources.files("agent_tools.prompts").joinpath("ttsify_local_examples.json")
+    examples = json.loads(raw.read_text(encoding="utf-8"))["examples"]
+    return tuple((item["user"], item["assistant"]) for item in examples)
 
 
 def _env_float_or(name: str, default: float) -> float:

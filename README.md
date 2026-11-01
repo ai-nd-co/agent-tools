@@ -154,8 +154,10 @@ AGENT_TOOLS_OPENAI_TEMPERATURE=0.2                                  # ttsify def
 AGENT_TOOLS_OPENAI_TOP_P=0.9                                        # ttsify default; transform: server's
 ```
 
-With this provider, `ttsify` appends `prompts/ttsify_local_addendum.md` (a checklist and worked
-examples) to its prompt. The Codex and Claude Code paths keep the original prompt.
+With this provider, `ttsify` uses its own prompt, `prompts/ttsify_local.md`, and sends the
+invented demonstrations in `prompts/ttsify_local_examples.json` as chat turns before the message.
+Both were chosen by a measured prompt search against Claude haiku. The Codex and Claude Code paths
+keep the original `prompts/ttsify.md` and send no examples or sampling values.
 
 CLI flags override env vars.
 

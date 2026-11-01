@@ -320,17 +320,49 @@ def test_transform_with_openai_sends_sampling_from_options_then_env(
     assert (payloads[1]["temperature"], payloads[1]["top_p"]) == (0.7, 0.8)
 
 
-def test_local_model_prompt_extends_the_original_unchanged() -> None:
-    from agent_tools.ttsify import load_ttsify_prompt
+def test_local_model_prompt_is_separate_and_the_original_is_unchanged() -> None:
+    from agent_tools.ttsify import load_ttsify_local_examples, load_ttsify_prompt
 
     original = load_ttsify_prompt()
     tuned = load_ttsify_prompt(local_model=True)
+    examples = load_ttsify_local_examples()
 
     assert original.startswith("Rewrite the user input")
-    assert "Checklist before you answer" not in original
-    assert tuned.startswith(original.rstrip("\n"))
-    assert "Checklist before you answer" in tuned
-    assert "Worked examples" in tuned
+    assert "Russian output policy" in original
+    assert tuned.startswith("Rewrite the final user message")
+    assert tuned != original
+    assert len(examples) >= 4
+    assert all(user.strip() and assistant.strip() for user, assistant in examples)
+    # English and Russian demonstrations, so neither language is taught by rules alone.
+    assert any(any("а" <= ch <= "я" for ch in user) for user, _ in examples)
+    assert any(user.isascii() for user, _ in examples)
+
+
+def test_examples_are_sent_as_turns_between_system_and_input() -> None:
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    transform_with_openai(
+        OpenAITransformOptions(
+            system_prompt="p",
+            input_text="t",
+            base_url="http://llm",
+            examples=(("u1", "a1"), ("u2", "a2")),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert payloads[0]["messages"] == [
+        {"role": "system", "content": "p"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "t"},
+    ]
 
 
 def _capture_ttsify_transform(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
@@ -344,6 +376,7 @@ def _capture_ttsify_transform(monkeypatch: pytest.MonkeyPatch) -> dict[str, obje
             prompt=options.system_prompt_text,
             temperature=options.temperature,
             top_p=options.top_p,
+            examples=options.examples,
         )
         return TransformResult(text="spoken", response_id=None, usage=None, session_id="s")
 
@@ -363,11 +396,12 @@ def _capture_ttsify_transform(monkeypatch: pytest.MonkeyPatch) -> dict[str, obje
 def test_ttsify_openai_gets_the_tuned_prompt_and_low_temperature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agent_tools.ttsify import load_ttsify_prompt
+    from agent_tools.ttsify import load_ttsify_local_examples, load_ttsify_prompt
 
     captured = _capture_ttsify_transform(monkeypatch)
     ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
     assert captured["prompt"] == load_ttsify_prompt(local_model=True)
+    assert captured["examples"] == load_ttsify_local_examples()
     assert (captured["temperature"], captured["top_p"]) == (0.2, 0.9)
 
     monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "0")
@@ -383,6 +417,11 @@ def test_ttsify_claude_code_keeps_the_original_prompt(monkeypatch: pytest.Monkey
     ttsify_text("raw", TtsifyOptions(provider="claude-code", claude_model="haiku"))
     assert captured["prompt"] == load_ttsify_prompt()
     assert (captured["temperature"], captured["top_p"]) == (None, None)
+    assert captured["examples"] == ()
+
+    ttsify_text("raw", TtsifyOptions(provider="codex"))
+    assert captured["prompt"] == load_ttsify_prompt()
+    assert (captured["temperature"], captured["top_p"], captured["examples"]) == (None, None, ())
 
 
 def test_explicit_sampling_ignores_a_malformed_env(monkeypatch: pytest.MonkeyPatch) -> None:

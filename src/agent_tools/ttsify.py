@@ -31,6 +31,7 @@ from agent_tools.codex_config import (
     read_string_env,
 )
 from agent_tools.codex_private_api import TransformResult
+from agent_tools.openai_transform import resolve_openai_model
 from agent_tools.transformer import (
     TransformOptions,
     TransformProvider,
@@ -128,6 +129,7 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         )
         codex_model = options.model or read_string_env(ENV_CODEX_MODEL) or DEFAULT_TTSIFY_MODEL
         ollama_model = options.model or read_string_env(ENV_OLLAMA_MODEL) or DEFAULT_OLLAMA_MODEL
+        openai_model = resolve_openai_model(options.model)
         codex_reasoning = (
             options.reasoning_effort
             or read_string_env(ENV_CODEX_REASONING_EFFORT)
@@ -154,7 +156,7 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         transform_options = TransformOptions(
             system_prompt_text=prompt_text,
             provider=provider,
-            model=codex_model,
+            model=openai_model if provider == "openai" else codex_model,
             reasoning_effort=codex_reasoning,
             fast=options.fast,
             codex_home=options.codex_home,
@@ -168,16 +170,18 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         transform_started = perf_counter()
         transform_result = transform_text(input_text, transform_options)
         transform_ms = (perf_counter() - transform_started) * 1000.0
-        effective_model = (
-            claude_model
-            if provider == "claude-code"
-            else ollama_model if provider == "ollama" else codex_model
-        )
-        effective_reasoning = (
-            claude_effort
-            if provider == "claude-code"
-            else None if provider == "ollama" else codex_reasoning
-        )
+        if provider == "claude-code":
+            effective_model = claude_model
+            effective_reasoning = claude_effort
+        elif provider == "ollama":
+            effective_model = ollama_model
+            effective_reasoning = None
+        elif provider == "openai":
+            effective_model = openai_model or "server-default"
+            effective_reasoning = None
+        else:
+            effective_model = codex_model
+            effective_reasoning = codex_reasoning
     requested_tts_engine = options.tts_engine or read_string_env(ENV_TTS_ENGINE) or "auto"
     resolved_tts_engine = resolve_tts_engine(
         transform_result.text,

@@ -18,7 +18,7 @@ from agent_tools.hook_install import (
 )
 
 AgentIntegrationInstallState = Literal["installed", "missing", "broken"]
-TransformProvider = Literal["codex", "claude-code", "ollama"]
+TransformProvider = Literal["codex", "claude-code", "ollama", "openai"]
 
 
 @dataclass(frozen=True)
@@ -245,4 +245,6 @@ def _provider_label(provider: TransformProvider) -> str:
         return "Claude Code"
     if provider == "ollama":
         return "Ollama"
+    if provider == "openai":
+        return "OpenAI-compatible server"
     return "Codex"

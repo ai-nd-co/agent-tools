@@ -143,6 +143,15 @@ Claude Code transform models are intentionally limited to:
 
 `opus` is rejected by the CLI and runtime wrapper.
 
+`--provider openai` sends the same prompt to any OpenAI-compatible chat completions server, such
+as llama-server. No key is required:
+
+```bash
+AGENT_TOOLS_OPENAI_BASE_URL=http://local-llm.local-llm.svc:8080/v1  # or --base-url
+AGENT_TOOLS_OPENAI_MODEL=gemma-4-31b-it-ud-iq2_m                    # or --model; optional
+AGENT_TOOLS_OPENAI_API_KEY=...                                      # optional, sent as Bearer
+```
+
 CLI flags override env vars.
 
 Queue for playback on Windows:

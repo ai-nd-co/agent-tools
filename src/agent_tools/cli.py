@@ -85,6 +85,7 @@ from agent_tools.worklog import generate_worklog_report, render_worklog_table
 from agent_tools.zcode_bridge import main as run_zcode
 
 REASONING_EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh", "none")
+TRANSFORM_PROVIDER_CHOICES = ("codex", "claude-code", "ollama", "openai")
 OUTPUT_MODE_CHOICES = ("write", "play")
 CLI_ERROR_TEXT_LIMIT = 1024
 
@@ -173,10 +174,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     transform_parser = subparsers.add_parser(
         "transform",
-        help="Transform text through Codex or Claude Code.",
+        help="Transform text through Codex, Claude Code, Ollama or an OpenAI-compatible server.",
     )
     transform_parser.add_argument("--system-prompt-file", required=True, type=Path)
-    transform_parser.add_argument("--provider", choices=("codex", "claude-code", "ollama"))
+    transform_parser.add_argument("--provider", choices=TRANSFORM_PROVIDER_CHOICES)
     transform_parser.add_argument("--model")
     transform_parser.add_argument("--reasoning-effort", choices=REASONING_EFFORT_CHOICES)
     transform_parser.add_argument("--fast", action="store_true")
@@ -212,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         "ttsify",
         help="Transform raw text into TTS-friendly text and synthesize it in one step.",
     )
-    ttsify_parser.add_argument("--provider", choices=("codex", "claude-code", "ollama"))
+    ttsify_parser.add_argument("--provider", choices=TRANSFORM_PROVIDER_CHOICES)
     ttsify_parser.add_argument("--model")
     ttsify_parser.add_argument("--reasoning-effort", choices=REASONING_EFFORT_CHOICES)
     ttsify_parser.add_argument("--fast", action="store_true")

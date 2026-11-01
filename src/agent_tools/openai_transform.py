@@ -10,6 +10,9 @@ from agent_tools.codex_config import (
     ENV_OPENAI_API_KEY,
     ENV_OPENAI_BASE_URL,
     ENV_OPENAI_MODEL,
+    ENV_OPENAI_TEMPERATURE,
+    ENV_OPENAI_TOP_P,
+    read_float_env,
     read_string_env,
 )
 from agent_tools.codex_private_api import TransformResult
@@ -28,6 +31,8 @@ class OpenAITransformOptions:
     model: str | None = None
     base_url: str | None = None
     timeout_seconds: float = 120.0
+    temperature: float | None = None
+    top_p: float | None = None
 
 
 def resolve_openai_base_url(base_url: str | None = None) -> str | None:
@@ -68,6 +73,13 @@ def transform_with_openai(
     # A single-model server such as llama-server answers without a model name.
     if model is not None:
         payload["model"] = model
+    # Unset means the server's own sampling defaults.
+    temperature = _first_set(options.temperature, read_float_env(ENV_OPENAI_TEMPERATURE))
+    if temperature is not None:
+        payload["temperature"] = temperature
+    top_p = _first_set(options.top_p, read_float_env(ENV_OPENAI_TOP_P))
+    if top_p is not None:
+        payload["top_p"] = top_p
     headers: dict[str, str] = {}
     api_key = read_string_env(ENV_OPENAI_API_KEY)
     if api_key is not None:
@@ -129,6 +141,13 @@ def _first_choice_content(body: object) -> str | None:
         return None
     content = message.get("content")
     return content if isinstance(content, str) else None
+
+
+def _first_set(*values: float | None) -> float | None:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _redact(text: str, secret: str | None) -> str:

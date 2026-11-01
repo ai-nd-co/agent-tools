@@ -21,6 +21,8 @@ ENV_NAMES = (
     "AGENT_TOOLS_OPENAI_BASE_URL",
     "AGENT_TOOLS_OPENAI_MODEL",
     "AGENT_TOOLS_OPENAI_API_KEY",
+    "AGENT_TOOLS_OPENAI_TEMPERATURE",
+    "AGENT_TOOLS_OPENAI_TOP_P",
 )
 
 
@@ -75,6 +77,8 @@ def test_transform_with_openai_sends_prompt_and_reads_usage() -> None:
     payload = json.loads(request.content)
     assert payload["model"] == "gemma-4-31b-it-ud-iq2_m"
     assert payload["stream"] is False
+    assert "temperature" not in payload
+    assert "top_p" not in payload
     assert payload["messages"] == [
         {"role": "system", "content": "rewrite"},
         {"role": "user", "content": "hello"},
@@ -287,3 +291,95 @@ def test_transform_with_openai_rejects_a_key_unfit_for_a_header(
     for fragment in ("sk-first", "second", "sk-tab", "sk-ключ"):
         assert fragment not in rendered
     assert "AGENT_TOOLS_OPENAI_API_KEY" in str(excinfo.value)
+
+
+def test_transform_with_openai_sends_sampling_from_options_then_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    transport = httpx.MockTransport(handler)
+    transform_with_openai(
+        OpenAITransformOptions(
+            system_prompt="p", input_text="t", base_url="http://llm", temperature=0.0, top_p=0.5
+        ),
+        transport=transport,
+    )
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "0.7")
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TOP_P", "0.8")
+    transform_with_openai(
+        OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+        transport=transport,
+    )
+
+    assert (payloads[0]["temperature"], payloads[0]["top_p"]) == (0.0, 0.5)
+    assert (payloads[1]["temperature"], payloads[1]["top_p"]) == (0.7, 0.8)
+
+
+def test_local_model_prompt_extends_the_original_unchanged() -> None:
+    from agent_tools.ttsify import load_ttsify_prompt
+
+    original = load_ttsify_prompt()
+    tuned = load_ttsify_prompt(local_model=True)
+
+    assert original.startswith("Rewrite the user input")
+    assert "Checklist before you answer" not in original
+    assert tuned.startswith(original.rstrip("\n"))
+    assert "Checklist before you answer" in tuned
+    assert "Worked examples" in tuned
+
+
+def _capture_ttsify_transform(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+
+    def fake_transform_text(_input_text: str, options: TransformOptions) -> TransformResult:
+        captured.update(
+            provider=options.provider,
+            prompt=options.system_prompt_text,
+            temperature=options.temperature,
+            top_p=options.top_p,
+        )
+        return TransformResult(text="spoken", response_id=None, usage=None, session_id="s")
+
+    def fake_synthesize_wav(_text: str, **_kwargs: object) -> TtsResult:
+        return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
+
+    monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
+    monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
+    )
+    return captured
+
+
+def test_ttsify_openai_gets_the_tuned_prompt_and_low_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_tools.ttsify import load_ttsify_prompt
+
+    captured = _capture_ttsify_transform(monkeypatch)
+    ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
+    assert captured["prompt"] == load_ttsify_prompt(local_model=True)
+    assert (captured["temperature"], captured["top_p"]) == (0.2, 0.9)
+
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "0")
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TOP_P", "1.0")
+    ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
+    assert (captured["temperature"], captured["top_p"]) == (0.0, 1.0)
+
+
+def test_ttsify_claude_code_keeps_the_original_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_tools.ttsify import load_ttsify_prompt
+
+    captured = _capture_ttsify_transform(monkeypatch)
+    ttsify_text("raw", TtsifyOptions(provider="claude-code", claude_model="haiku"))
+    assert captured["prompt"] == load_ttsify_prompt()
+    assert (captured["temperature"], captured["top_p"]) == (None, None)

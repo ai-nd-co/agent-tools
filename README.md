@@ -150,7 +150,12 @@ as llama-server. No key is required:
 AGENT_TOOLS_OPENAI_BASE_URL=http://local-llm.local-llm.svc:8080/v1  # or --base-url
 AGENT_TOOLS_OPENAI_MODEL=gemma-4-31b-it-ud-iq2_m                    # or --model; optional
 AGENT_TOOLS_OPENAI_API_KEY=...                                      # optional, sent as Bearer
+AGENT_TOOLS_OPENAI_TEMPERATURE=0.2                                  # ttsify default; transform: server's
+AGENT_TOOLS_OPENAI_TOP_P=0.9                                        # ttsify default; transform: server's
 ```
+
+With this provider, `ttsify` appends `prompts/ttsify_local_addendum.md` (a checklist and worked
+examples) to its prompt. The Codex and Claude Code paths keep the original prompt.
 
 CLI flags override env vars.
 

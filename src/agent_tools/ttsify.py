@@ -11,6 +11,8 @@ from agent_tools.codex_config import (
     DEFAULT_CLAUDE_CODE_MODEL,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_TTSIFY_MODEL,
+    DEFAULT_TTSIFY_OPENAI_TEMPERATURE,
+    DEFAULT_TTSIFY_OPENAI_TOP_P,
     DEFAULT_TTSIFY_REASONING_EFFORT,
     ENV_CLAUDE_CODE_BARE,
     ENV_CLAUDE_CODE_EFFORT,
@@ -22,6 +24,8 @@ from agent_tools.codex_config import (
     ENV_KOKORO_SPEED,
     ENV_KOKORO_VOICE,
     ENV_OLLAMA_MODEL,
+    ENV_OPENAI_TEMPERATURE,
+    ENV_OPENAI_TOP_P,
     ENV_SILERO_VOICE,
     ENV_TTS_ENGINE,
     normalize_claude_code_model,
@@ -130,6 +134,15 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         codex_model = options.model or read_string_env(ENV_CODEX_MODEL) or DEFAULT_TTSIFY_MODEL
         ollama_model = options.model or read_string_env(ENV_OLLAMA_MODEL) or DEFAULT_OLLAMA_MODEL
         openai_model = resolve_openai_model(options.model)
+        openai_temperature: float | None = None
+        openai_top_p: float | None = None
+        if provider == "openai":
+            # Only the local-model path gets the tuned prompt; Codex and Claude keep the original.
+            prompt_text = load_ttsify_prompt(local_model=True)
+            openai_temperature = _env_float_or(
+                ENV_OPENAI_TEMPERATURE, DEFAULT_TTSIFY_OPENAI_TEMPERATURE
+            )
+            openai_top_p = _env_float_or(ENV_OPENAI_TOP_P, DEFAULT_TTSIFY_OPENAI_TOP_P)
         codex_reasoning = (
             options.reasoning_effort
             or read_string_env(ENV_CODEX_REASONING_EFFORT)
@@ -166,6 +179,8 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
             claude_effort=claude_effort,
             claude_bare=claude_bare,
             timeout_seconds=timeout_seconds,
+            temperature=openai_temperature,
+            top_p=openai_top_p,
         )
         transform_started = perf_counter()
         transform_result = transform_text(input_text, transform_options)
@@ -239,10 +254,19 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
     )
 
 
-def load_ttsify_prompt() -> str:
-    return resources.files("agent_tools.prompts").joinpath("ttsify.md").read_text(
-        encoding="utf-8"
-    )
+def load_ttsify_prompt(*, local_model: bool = False) -> str:
+    prompts = resources.files("agent_tools.prompts")
+    prompt = prompts.joinpath("ttsify.md").read_text(encoding="utf-8")
+    if not local_model:
+        return prompt
+    # A small local model needs worked examples and a checklist to keep names and counters.
+    addendum = prompts.joinpath("ttsify_local_addendum.md").read_text(encoding="utf-8")
+    return prompt.rstrip("\n") + "\n" + addendum
+
+
+def _env_float_or(name: str, default: float) -> float:
+    value = read_float_env(name)
+    return default if value is None else value
 
 
 def _validate_no_transform_options(options: TtsifyOptions) -> None:

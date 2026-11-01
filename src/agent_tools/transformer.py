@@ -57,6 +57,8 @@ class TransformOptions:
     claude_effort: str | None = None
     claude_bare: bool = False
     timeout_seconds: float = 120.0
+    temperature: float | None = None
+    top_p: float | None = None
 
 
 def transform_text(input_text: str, options: TransformOptions) -> TransformResult:
@@ -95,6 +97,8 @@ def transform_text(input_text: str, options: TransformOptions) -> TransformResul
                 model=options.model,
                 base_url=options.base_url,
                 timeout_seconds=options.timeout_seconds,
+                temperature=options.temperature,
+                top_p=options.top_p,
             )
         )
 

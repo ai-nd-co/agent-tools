@@ -383,3 +383,22 @@ def test_ttsify_claude_code_keeps_the_original_prompt(monkeypatch: pytest.Monkey
     ttsify_text("raw", TtsifyOptions(provider="claude-code", claude_model="haiku"))
     assert captured["prompt"] == load_ttsify_prompt()
     assert (captured["temperature"], captured["top_p"]) == (None, None)
+
+
+def test_explicit_sampling_ignores_a_malformed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "invalid")
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TOP_P", "invalid")
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    transform_with_openai(
+        OpenAITransformOptions(
+            system_prompt="p", input_text="t", base_url="http://llm", temperature=0.0, top_p=1.0
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert (payloads[0]["temperature"], payloads[0]["top_p"]) == (0.0, 1.0)

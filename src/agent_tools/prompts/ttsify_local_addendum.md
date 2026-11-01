@@ -1,6 +1,6 @@
 
 Checklist before you answer:
-- Do not drop names, repository names, counters such as "2/3", or numbers that the input states.
+- Do not drop names, repository names, counters such as "2/3", or numbers that matter to the meaning. The table, numbers and logs policies above still decide which details to compress.
 - Keep the speaker's person: "I", "my" and "me" stay first person; "you" stays the listener. Never swap them.
 - Do not merge separate steps or instructions into one.
 - Do not repeat jargon or labels such as "Codex-clean" or "CI-green" verbatim; say what they mean.

@@ -74,10 +74,10 @@ def transform_with_openai(
     if model is not None:
         payload["model"] = model
     # Unset means the server's own sampling defaults.
-    temperature = _first_set(options.temperature, read_float_env(ENV_OPENAI_TEMPERATURE))
+    temperature = _option_or_env(options.temperature, ENV_OPENAI_TEMPERATURE)
     if temperature is not None:
         payload["temperature"] = temperature
-    top_p = _first_set(options.top_p, read_float_env(ENV_OPENAI_TOP_P))
+    top_p = _option_or_env(options.top_p, ENV_OPENAI_TOP_P)
     if top_p is not None:
         payload["top_p"] = top_p
     headers: dict[str, str] = {}
@@ -143,11 +143,9 @@ def _first_choice_content(body: object) -> str | None:
     return content if isinstance(content, str) else None
 
 
-def _first_set(*values: float | None) -> float | None:
-    for value in values:
-        if value is not None:
-            return value
-    return None
+def _option_or_env(value: float | None, env_name: str) -> float | None:
+    # The env is read only when needed, so an explicit option survives a malformed env value.
+    return value if value is not None else read_float_env(env_name)
 
 
 def _redact(text: str, secret: str | None) -> str:

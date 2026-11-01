@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 
 import httpx
 import pytest
@@ -265,3 +266,24 @@ def test_transport_error_hides_the_key_and_its_cause(monkeypatch: pytest.MonkeyP
     assert "sk-test-secret" not in str(excinfo.value)
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize("key", ["sk-first\nsecond", "sk-tab\tkey", "sk-ключ"])
+def test_transform_with_openai_rejects_a_key_unfit_for_a_header(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_API_KEY", key)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("a malformed key must not reach the transport")
+
+    with pytest.raises(OpenAITransportError) as excinfo:
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+    rendered = "".join(traceback.format_exception(excinfo.value))
+    for fragment in ("sk-first", "second", "sk-tab", "sk-ключ"):
+        assert fragment not in rendered
+    assert "AGENT_TOOLS_OPENAI_API_KEY" in str(excinfo.value)

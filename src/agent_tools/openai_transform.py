@@ -71,6 +71,11 @@ def transform_with_openai(
     headers: dict[str, str] = {}
     api_key = read_string_env(ENV_OPENAI_API_KEY)
     if api_key is not None:
+        # h11 would quote a malformed value back in its error; refuse it without echoing it.
+        if any(not "\x21" <= char <= "\x7e" for char in api_key):
+            raise OpenAITransportError(
+                f"{ENV_OPENAI_API_KEY} contains characters not allowed in an HTTP header."
+            )
         headers["Authorization"] = f"Bearer {api_key}"
 
     timeout = httpx.Timeout(options.timeout_seconds)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from importlib import resources
@@ -141,7 +142,7 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         if provider == "openai":
             # Only the local-model path gets the tuned prompt; Codex and Claude keep the original.
             prompt_text = load_ttsify_prompt(local_model=True)
-            openai_examples = load_ttsify_local_examples()
+            openai_examples = load_ttsify_local_examples(ttsify_local_language(input_text))
             openai_temperature = _env_float_or(
                 ENV_OPENAI_TEMPERATURE, DEFAULT_TTSIFY_OPENAI_TEMPERATURE
             )
@@ -265,11 +266,37 @@ def load_ttsify_prompt(*, local_model: bool = False) -> str:
     return resources.files("agent_tools.prompts").joinpath(name).read_text(encoding="utf-8")
 
 
-def load_ttsify_local_examples() -> tuple[tuple[str, str], ...]:
-    """Demonstration turns the local model sees before the real message."""
+def load_ttsify_local_examples(language: str | None = None) -> tuple[tuple[str, str], ...]:
+    """Demonstration turns the local model sees before the real message.
+
+    With a language ("en" or "ru"), only that language's turns: Russian turns sent with an
+    English message made the local model write English acronyms in Cyrillic, Arabic, Thai or
+    Devanagari letters, or translate the whole message (2026-11-02). The agent-hub Listen
+    route selects the same way.
+    """
     raw = resources.files("agent_tools.prompts").joinpath("ttsify_local_examples.json")
     examples = json.loads(raw.read_text(encoding="utf-8"))["examples"]
-    return tuple((item["user"], item["assistant"]) for item in examples)
+    return tuple(
+        (item["user"], item["assistant"])
+        for item in examples
+        if language is None or item["lang"] == language
+    )
+
+
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
+_CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
+
+
+def ttsify_local_language(text: str) -> str:
+    """Return "ru" when Cyrillic letters are a quarter or more of all Latin and Cyrillic letters.
+
+    Otherwise "en". A quarter, not a half: Russian agent messages carry many English names and
+    commands. The agent-hub Listen route uses the same rule, so both pick the same demonstration
+    turns for the same message.
+    """
+    cyrillic = len(_CYRILLIC_LETTER.findall(text))
+    latin = len(_LATIN_LETTER.findall(text))
+    return "ru" if cyrillic > 0 and cyrillic * 4 >= cyrillic + latin else "en"
 
 
 def _env_float_or(name: str, default: float) -> float:

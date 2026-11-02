@@ -401,7 +401,7 @@ def test_ttsify_openai_gets_the_tuned_prompt_and_low_temperature(
     captured = _capture_ttsify_transform(monkeypatch)
     ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
     assert captured["prompt"] == load_ttsify_prompt(local_model=True)
-    assert captured["examples"] == load_ttsify_local_examples()
+    assert captured["examples"] == load_ttsify_local_examples("en")
     assert (captured["temperature"], captured["top_p"]) == (0.2, 0.9)
 
     monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "0")
@@ -441,3 +441,62 @@ def test_explicit_sampling_ignores_a_malformed_env(monkeypatch: pytest.MonkeyPat
     )
 
     assert (payloads[0]["temperature"], payloads[0]["top_p"]) == (0.0, 1.0)
+
+
+def test_local_examples_are_selected_by_the_message_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (2026-11-02): with the Russian turns in front of an English message the local
+    # model wrote English acronyms in Cyrillic, Arabic, Thai or Devanagari letters, or translated
+    # the message to Russian.
+    from agent_tools.ttsify import load_ttsify_local_examples, ttsify_local_language
+
+    captured = _capture_ttsify_transform(monkeypatch)
+    ttsify_text(
+        "**1/3 · Ledger.** Nia: 4 CRM PRs waiting for review.",
+        TtsifyOptions(provider="openai", base_url="http://llm"),
+    )
+    english = captured["examples"]
+    assert english == load_ttsify_local_examples("en") and len(english) == 3
+    assert not any(_has_cyrillic(user + assistant) for user, assistant in english)
+
+    ttsify_text(
+        "Я поправил README в agent-tools; ты проверь PR и запусти tests.",
+        TtsifyOptions(provider="openai", base_url="http://llm"),
+    )
+    russian = captured["examples"]
+    assert russian == load_ttsify_local_examples("ru") and len(russian) == 3
+    assert all(_has_cyrillic(user) for user, _ in russian)
+
+    # Every demonstration is tagged with the language the rule gives its own text.
+    for language in ("en", "ru"):
+        for user, _ in load_ttsify_local_examples(language):
+            assert ttsify_local_language(user) == language
+
+
+def test_local_language_rule() -> None:
+    from agent_tools.ttsify import ttsify_local_language
+
+    assert ttsify_local_language("Nia: 4 CRM PRs, QA-1234.") == "en"
+    assert ttsify_local_language("") == "en"
+    # Russian with many English names stays Russian: a quarter of the letters is enough.
+    assert ttsify_local_language("ты проверь agent-hub send и whoami") == "ru"
+    assert ttsify_local_language("ok, I fixed the deploy script and the tests (спасибо)") == "en"
+    # The boundary, as in agent-hub's rewriteLanguage: exactly a quarter is Russian.
+    assert ttsify_local_language("я abc") == "ru"
+    assert ttsify_local_language("я abcd") == "en"
+
+
+def test_local_prompt_demands_one_language_and_alphabet() -> None:
+    from agent_tools.ttsify import load_ttsify_prompt
+
+    tuned = load_ttsify_prompt(local_model=True)
+    head = tuned[: tuned.index("FACTS AND VOICE")]
+    assert "Write ONLY in the language of the final message's prose" in head
+    assert "Latin letters only" in head and "Cyrillic only" in head
+    assert "Never use any other alphabet" in head
+    assert "English output contains only Latin letters" in tuned[tuned.index("FINAL CHECK") :]
+
+
+def _has_cyrillic(text: str) -> bool:
+    return any("\u0400" <= ch <= "\u04ff" for ch in text)

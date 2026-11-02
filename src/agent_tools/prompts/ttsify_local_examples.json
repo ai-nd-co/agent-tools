@@ -1,0 +1,35 @@
+{
+  "_comment": "Few-shot turns sent before the real message on the openai (local model) path; invented messages, measured in the 2026-11-01 prompt search. Only the turns whose lang matches the message's language are sent (Cyrillic letters at least a quarter of the Latin and Cyrillic letters means ru, otherwise en): Russian turns sent with an English message made the model write English acronyms in Cyrillic, Arabic, Thai or Devanagari letters, or translate the message (2026-11-02).",
+  "examples": [
+    {
+      "lang": "ru",
+      "user": "Вам доступны варианты печати.\n- C (рекомендую): сначала я меняю масштаб, потом вы утверждаете пробный лист.\n- D: оставляю макет как есть.\nВыберите C или D в Print Queue.",
+      "assistant": "Вам доступны варианты печати. Вариант си, рекомендую: сначала я меняю масштаб, потом вы утверждаете пробный лист. Вариант ди: оставляю макет как есть. Выберите си или ди в Принт Кью."
+    },
+    {
+      "lang": "ru",
+      "user": "В твоём редакторе Magic Desk режимы такие.\n\n| Режим | Условие |\n|---|---|\n| Preview | Макет виден только тебе |\n| Shared | Коллеги могут читать, правка закрыта |\n| Locked | Файл нельзя менять, но комментарии доступны |\n\nВ Magic Desk открой Draft View, сравни подписи, затем сохрани копию. На цвет рамки не полагайся: он обновляется с задержкой.",
+      "assistant": "В твоём редакторе Мэджик Деск режимы такие. В режиме Превью макет виден только тебе. В режиме Шэрд коллеги могут читать, правка закрыта. В режиме Локт файл нельзя менять, но комментарии доступны.\n\nВ Мэджик Деск открой Драфт Вью, сравни подписи, затем сохрани копию. На цвет рамки не полагайся: он обновляется с задержкой."
+    },
+    {
+      "lang": "en",
+      "user": "**7/13 · Orchard survey.** My drone photographed about 28 rows; I have not checked them yet. Label: `marn`.",
+      "assistant": "Part seven of thirteen. Orchard survey. My drone photographed about twenty-eight rows; I have not checked them yet. Label: marn."
+    },
+    {
+      "lang": "en",
+      "user": "I exported the guide at e4c7a9b. The [visitor map](https://cedar.example/print/maps/map.pdf) opens on f8a6c2d. I sent my notes to desk-r8; you still need to check the index.",
+      "assistant": "I exported the guide. The visitor map opens. I sent my notes to desk-r-eight; you still need to check the index."
+    },
+    {
+      "lang": "ru",
+      "user": "Я поправил каталог Ginger Garden в Page Studio. Ты сохрани PDF рядом с QR-кодом и снова открой Ginger Garden; я пока не проверял ссылки.",
+      "assistant": "Я поправил каталог Джинджер Гарден в Пейдж Студио. Ты сохрани пи-ди-эф рядом с кью-ар-кодом и снова открой Джинджер Гарден; я пока не проверял ссылки."
+    },
+    {
+      "lang": "en",
+      "user": "Sensor readout: `8/12/16`. Device r8 reported at 22:46:38Z, firmware 4.7.26. The repair is in commit b8e4d29. Nia approved it without findings.",
+      "assistant": "Sensor readout: eight, twelve, sixteen. Device r-eight reported at twenty-two forty-six and thirty-eight seconds UTC, firmware four point seven point twenty-six. The repair is in the commit. Nia approved it without findings."
+    }
+  ]
+}

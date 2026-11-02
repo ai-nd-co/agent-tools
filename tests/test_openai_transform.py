@@ -1,0 +1,502 @@
+from __future__ import annotations
+
+import json
+import traceback
+
+import httpx
+import pytest
+
+from agent_tools.codex_private_api import TransformResult
+from agent_tools.openai_transform import (
+    OpenAITransformOptions,
+    OpenAITransportError,
+    resolve_openai_base_url,
+    transform_with_openai,
+)
+from agent_tools.transformer import TransformOptions
+from agent_tools.tts import TtsResult
+from agent_tools.ttsify import TtsifyOptions, ttsify_text
+
+ENV_NAMES = (
+    "AGENT_TOOLS_OPENAI_BASE_URL",
+    "AGENT_TOOLS_OPENAI_MODEL",
+    "AGENT_TOOLS_OPENAI_API_KEY",
+    "AGENT_TOOLS_OPENAI_TEMPERATURE",
+    "AGENT_TOOLS_OPENAI_TOP_P",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _completion(content: str = "rewritten") -> dict[str, object]:
+    return {
+        "id": "chatcmpl-1",
+        "model": "gemma-4-31b-it-ud-iq2_m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 5, "total_tokens": 17},
+    }
+
+
+def test_resolve_openai_base_url_normalizes_to_v1() -> None:
+    assert resolve_openai_base_url("http://llm:8080") == "http://llm:8080/v1"
+    assert resolve_openai_base_url("http://llm:8080/v1/") == "http://llm:8080/v1"
+    assert resolve_openai_base_url("http://llm:8080/v1/chat/completions") == "http://llm:8080/v1"
+    assert resolve_openai_base_url(None) is None
+
+
+def test_resolve_openai_base_url_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_BASE_URL", "http://env-llm:8080/v1")
+    assert resolve_openai_base_url() == "http://env-llm:8080/v1"
+    assert resolve_openai_base_url("http://flag:1") == "http://flag:1/v1"
+
+
+def test_transform_with_openai_sends_prompt_and_reads_usage() -> None:
+    requests_seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        return httpx.Response(200, json=_completion())
+
+    result = transform_with_openai(
+        OpenAITransformOptions(
+            system_prompt="rewrite",
+            input_text="hello",
+            model="gemma-4-31b-it-ud-iq2_m",
+            base_url="http://llm:8080/v1",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    request = requests_seen[0]
+    assert request.url == httpx.URL("http://llm:8080/v1/chat/completions")
+    assert "authorization" not in request.headers
+    payload = json.loads(request.content)
+    assert payload["model"] == "gemma-4-31b-it-ud-iq2_m"
+    assert payload["stream"] is False
+    assert "temperature" not in payload
+    assert "top_p" not in payload
+    assert payload["messages"] == [
+        {"role": "system", "content": "rewrite"},
+        {"role": "user", "content": "hello"},
+    ]
+    assert result.text == "rewritten"
+    assert result.response_id == "chatcmpl-1"
+    assert result.usage is not None
+    assert result.usage["provider"] == "openai"
+    assert result.usage["total_tokens"] == 17
+
+
+def test_transform_with_openai_omits_model_and_sends_key_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_BASE_URL", "http://env-llm:8080")
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_API_KEY", "test-key")
+    requests_seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        return httpx.Response(200, json=_completion())
+
+    transform_with_openai(
+        OpenAITransformOptions(system_prompt="rewrite", input_text="hello"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    request = requests_seen[0]
+    assert request.url == httpx.URL("http://env-llm:8080/v1/chat/completions")
+    assert request.headers["authorization"] == "Bearer test-key"
+    assert "model" not in json.loads(request.content)
+
+
+def test_transform_with_openai_reads_model_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_MODEL", "env-model")
+    requests_seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        return httpx.Response(200, json=_completion())
+
+    transform_with_openai(
+        OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert json.loads(requests_seen[0].content)["model"] == "env-model"
+
+
+def test_transform_with_openai_requires_a_base_url() -> None:
+    with pytest.raises(OpenAITransportError, match="AGENT_TOOLS_OPENAI_BASE_URL"):
+        transform_with_openai(OpenAITransformOptions(system_prompt="p", input_text="t"))
+
+
+def test_transform_with_openai_raises_on_http_error() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"message": "Loading model", "code": 503}})
+
+    with pytest.raises(OpenAITransportError, match="503: Loading model"):
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+
+def test_transform_with_openai_raises_on_missing_content() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": []})
+
+    with pytest.raises(OpenAITransportError, match="message content"):
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+
+def test_transform_with_openai_wraps_transport_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    with pytest.raises(OpenAITransportError, match="refused"):
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+
+def test_explicit_openai_provider_needs_a_base_url() -> None:
+    from agent_tools.transformer import resolve_effective_transform_provider
+
+    with pytest.raises(RuntimeError, match="openai is not available"):
+        resolve_effective_transform_provider("openai")
+    assert resolve_effective_transform_provider("openai", base_url="http://llm") == "openai"
+
+
+def test_transform_text_routes_openai_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_tools.transformer as transformer_module
+
+    captured: dict[str, object] = {}
+
+    def fake_transform_with_openai(options: OpenAITransformOptions) -> TransformResult:
+        captured["options"] = options
+        return TransformResult(text="spoken", response_id=None, usage=None, session_id="s")
+
+    monkeypatch.setattr(transformer_module, "transform_with_openai", fake_transform_with_openai)
+
+    result = transformer_module.transform_text(
+        "raw",
+        TransformOptions(
+            system_prompt_text="prompt",
+            provider="openai",
+            model="m",
+            base_url="http://llm",
+            timeout_seconds=30.0,
+        ),
+    )
+
+    options = captured["options"]
+    assert isinstance(options, OpenAITransformOptions)
+    assert (options.system_prompt, options.input_text, options.model) == ("prompt", "raw", "m")
+    assert (options.base_url, options.timeout_seconds) == ("http://llm", 30.0)
+    assert result.text == "spoken"
+
+
+def test_ttsify_openai_provider_does_not_inherit_the_codex_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_tools.ttsify as ttsify_module
+
+    monkeypatch.setenv("AGENT_TOOLS_CODEX_MODEL", "gpt-5.4-mini")
+    captured: dict[str, object] = {}
+
+    def fake_transform_text(_input_text: str, options: TransformOptions) -> TransformResult:
+        captured["provider"] = options.provider
+        captured["model"] = options.model
+        return TransformResult(text="spoken", response_id=None, usage=None, session_id="s")
+
+    def fake_synthesize_wav(_text: str, **_kwargs: object) -> TtsResult:
+        return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
+
+    monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
+    monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
+    )
+
+    result = ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
+    assert captured == {"provider": "openai", "model": None}
+    assert result.model == "server-default"
+    assert result.reasoning_effort is None
+
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_MODEL", "gemma")
+    result = ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
+    assert captured["model"] == "gemma"
+    assert result.model == "gemma"
+
+
+def test_transform_with_openai_redacts_an_echoed_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_API_KEY", "sk-test-secret")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "bad key sk-test-secret"}})
+
+    with pytest.raises(OpenAITransportError) as excinfo:
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert "sk-test-secret" not in str(excinfo.value)
+    assert "bad key ***" in str(excinfo.value)
+
+
+def test_transport_error_hides_the_key_and_its_cause(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_API_KEY", "sk-test-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers["authorization"]
+        raise httpx.LocalProtocolError(f"Illegal header value {auth!r}")
+
+    with pytest.raises(OpenAITransportError) as excinfo:
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert "sk-test-secret" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize("key", ["sk-first\nsecond", "sk-tab\tkey", "sk-ключ"])
+def test_transform_with_openai_rejects_a_key_unfit_for_a_header(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_API_KEY", key)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("a malformed key must not reach the transport")
+
+    with pytest.raises(OpenAITransportError) as excinfo:
+        transform_with_openai(
+            OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+            transport=httpx.MockTransport(handler),
+        )
+
+    rendered = "".join(traceback.format_exception(excinfo.value))
+    for fragment in ("sk-first", "second", "sk-tab", "sk-ключ"):
+        assert fragment not in rendered
+    assert "AGENT_TOOLS_OPENAI_API_KEY" in str(excinfo.value)
+
+
+def test_transform_with_openai_sends_sampling_from_options_then_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    transport = httpx.MockTransport(handler)
+    transform_with_openai(
+        OpenAITransformOptions(
+            system_prompt="p", input_text="t", base_url="http://llm", temperature=0.0, top_p=0.5
+        ),
+        transport=transport,
+    )
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "0.7")
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TOP_P", "0.8")
+    transform_with_openai(
+        OpenAITransformOptions(system_prompt="p", input_text="t", base_url="http://llm"),
+        transport=transport,
+    )
+
+    assert (payloads[0]["temperature"], payloads[0]["top_p"]) == (0.0, 0.5)
+    assert (payloads[1]["temperature"], payloads[1]["top_p"]) == (0.7, 0.8)
+
+
+def test_local_model_prompt_is_separate_and_the_original_is_unchanged() -> None:
+    from agent_tools.ttsify import load_ttsify_local_examples, load_ttsify_prompt
+
+    original = load_ttsify_prompt()
+    tuned = load_ttsify_prompt(local_model=True)
+    examples = load_ttsify_local_examples()
+
+    assert original.startswith("Rewrite the user input")
+    assert "Russian output policy" in original
+    assert tuned.startswith("Rewrite the final user message")
+    assert tuned != original
+    assert len(examples) >= 4
+    assert all(user.strip() and assistant.strip() for user, assistant in examples)
+    # English and Russian demonstrations, so neither language is taught by rules alone.
+    assert any(any("а" <= ch <= "я" for ch in user) for user, _ in examples)
+    assert any(user.isascii() for user, _ in examples)
+
+
+def test_examples_are_sent_as_turns_between_system_and_input() -> None:
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    transform_with_openai(
+        OpenAITransformOptions(
+            system_prompt="p",
+            input_text="t",
+            base_url="http://llm",
+            examples=(("u1", "a1"), ("u2", "a2")),
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert payloads[0]["messages"] == [
+        {"role": "system", "content": "p"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+        {"role": "assistant", "content": "a2"},
+        {"role": "user", "content": "t"},
+    ]
+
+
+def _capture_ttsify_transform(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    import agent_tools.ttsify as ttsify_module
+
+    captured: dict[str, object] = {}
+
+    def fake_transform_text(_input_text: str, options: TransformOptions) -> TransformResult:
+        captured.update(
+            provider=options.provider,
+            prompt=options.system_prompt_text,
+            temperature=options.temperature,
+            top_p=options.top_p,
+            examples=options.examples,
+        )
+        return TransformResult(text="spoken", response_id=None, usage=None, session_id="s")
+
+    def fake_synthesize_wav(_text: str, **_kwargs: object) -> TtsResult:
+        return TtsResult(wav=b"WAV", sample_rate=24_000, chunks=1)
+
+    monkeypatch.setattr(ttsify_module, "transform_text", fake_transform_text)
+    monkeypatch.setattr(ttsify_module, "synthesize_wav", fake_synthesize_wav)
+    monkeypatch.setattr(
+        ttsify_module,
+        "resolve_effective_transform_provider",
+        lambda provider, *, codex_home=None, base_url=None: provider or "codex",
+    )
+    return captured
+
+
+def test_ttsify_openai_gets_the_tuned_prompt_and_low_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_tools.ttsify import load_ttsify_local_examples, load_ttsify_prompt
+
+    captured = _capture_ttsify_transform(monkeypatch)
+    ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
+    assert captured["prompt"] == load_ttsify_prompt(local_model=True)
+    assert captured["examples"] == load_ttsify_local_examples("en")
+    assert (captured["temperature"], captured["top_p"]) == (0.2, 0.9)
+
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "0")
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TOP_P", "1.0")
+    ttsify_text("raw", TtsifyOptions(provider="openai", base_url="http://llm"))
+    assert (captured["temperature"], captured["top_p"]) == (0.0, 1.0)
+
+
+def test_ttsify_claude_code_keeps_the_original_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_tools.ttsify import load_ttsify_prompt
+
+    captured = _capture_ttsify_transform(monkeypatch)
+    ttsify_text("raw", TtsifyOptions(provider="claude-code", claude_model="haiku"))
+    assert captured["prompt"] == load_ttsify_prompt()
+    assert (captured["temperature"], captured["top_p"]) == (None, None)
+    assert captured["examples"] == ()
+
+    ttsify_text("raw", TtsifyOptions(provider="codex"))
+    assert captured["prompt"] == load_ttsify_prompt()
+    assert (captured["temperature"], captured["top_p"], captured["examples"]) == (None, None, ())
+
+
+def test_explicit_sampling_ignores_a_malformed_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TEMPERATURE", "invalid")
+    monkeypatch.setenv("AGENT_TOOLS_OPENAI_TOP_P", "invalid")
+    payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=_completion())
+
+    transform_with_openai(
+        OpenAITransformOptions(
+            system_prompt="p", input_text="t", base_url="http://llm", temperature=0.0, top_p=1.0
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert (payloads[0]["temperature"], payloads[0]["top_p"]) == (0.0, 1.0)
+
+
+def test_local_examples_are_selected_by_the_message_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression (2026-11-02): with the Russian turns in front of an English message the local
+    # model wrote English acronyms in Cyrillic, Arabic, Thai or Devanagari letters, or translated
+    # the message to Russian.
+    from agent_tools.ttsify import load_ttsify_local_examples, ttsify_local_language
+
+    captured = _capture_ttsify_transform(monkeypatch)
+    ttsify_text(
+        "**1/3 · Ledger.** Nia: 4 CRM PRs waiting for review.",
+        TtsifyOptions(provider="openai", base_url="http://llm"),
+    )
+    english = captured["examples"]
+    assert english == load_ttsify_local_examples("en") and len(english) == 3
+    assert not any(_has_cyrillic(user + assistant) for user, assistant in english)
+
+    ttsify_text(
+        "Я поправил README в agent-tools; ты проверь PR и запусти tests.",
+        TtsifyOptions(provider="openai", base_url="http://llm"),
+    )
+    russian = captured["examples"]
+    assert russian == load_ttsify_local_examples("ru") and len(russian) == 3
+    assert all(_has_cyrillic(user) for user, _ in russian)
+
+    # Every demonstration is tagged with the language the rule gives its own text.
+    for language in ("en", "ru"):
+        for user, _ in load_ttsify_local_examples(language):
+            assert ttsify_local_language(user) == language
+
+
+def test_local_language_rule() -> None:
+    from agent_tools.ttsify import ttsify_local_language
+
+    assert ttsify_local_language("Nia: 4 CRM PRs, QA-1234.") == "en"
+    assert ttsify_local_language("") == "en"
+    # Russian with many English names stays Russian: a quarter of the letters is enough.
+    assert ttsify_local_language("ты проверь agent-hub send и whoami") == "ru"
+    assert ttsify_local_language("ok, I fixed the deploy script and the tests (спасибо)") == "en"
+    # The boundary, as in agent-hub's rewriteLanguage: exactly a quarter is Russian.
+    assert ttsify_local_language("я abc") == "ru"
+    assert ttsify_local_language("я abcd") == "en"
+
+
+def test_local_prompt_demands_one_language_and_alphabet() -> None:
+    from agent_tools.ttsify import load_ttsify_prompt
+
+    tuned = load_ttsify_prompt(local_model=True)
+    head = tuned[: tuned.index("FACTS AND VOICE")]
+    assert "Write ONLY in the language of the final message's prose" in head
+    assert "Latin letters only" in head and "Cyrillic only" in head
+    assert "Never use any other alphabet" in head
+    assert "English output contains only Latin letters" in tuned[tuned.index("FINAL CHECK") :]
+
+
+def _has_cyrillic(text: str) -> bool:
+    return any("\u0400" <= ch <= "\u04ff" for ch in text)

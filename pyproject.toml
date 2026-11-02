@@ -66,6 +66,7 @@ include = [
   "src/agent_tools/*.ps1",
   "src/agent_tools/*.pyw",
   "src/agent_tools/prompts/*.md",
+  "src/agent_tools/prompts/*.json",
   "src/agent_tools/codex_hooks/*.json",
   "src/agent_tools/codex_hooks/*.sh",
   "src/agent_tools/claude_hooks/*.sh",

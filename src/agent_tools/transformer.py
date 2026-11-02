@@ -33,8 +33,13 @@ from agent_tools.ollama_transform import (
     ollama_available,
     transform_with_ollama,
 )
+from agent_tools.openai_transform import (
+    OpenAITransformOptions,
+    resolve_openai_base_url,
+    transform_with_openai,
+)
 
-TransformProvider = Literal["codex", "claude-code", "ollama"]
+TransformProvider = Literal["codex", "claude-code", "ollama", "openai"]
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,10 @@ class TransformOptions:
     claude_effort: str | None = None
     claude_bare: bool = False
     timeout_seconds: float = 120.0
+    temperature: float | None = None
+    top_p: float | None = None
+    # Demonstration turns; only the openai provider sends them.
+    examples: tuple[tuple[str, str], ...] = ()
 
 
 def transform_text(input_text: str, options: TransformOptions) -> TransformResult:
@@ -80,6 +89,19 @@ def transform_text(input_text: str, options: TransformOptions) -> TransformResul
                 model=options.model or read_string_env(ENV_OLLAMA_MODEL) or DEFAULT_OLLAMA_MODEL,
                 base_url=options.base_url,
                 timeout_seconds=options.timeout_seconds,
+            )
+        )
+    if provider == "openai":
+        return transform_with_openai(
+            OpenAITransformOptions(
+                system_prompt=_read_system_prompt(options),
+                input_text=input_text,
+                model=options.model,
+                base_url=options.base_url,
+                timeout_seconds=options.timeout_seconds,
+                temperature=options.temperature,
+                top_p=options.top_p,
+                examples=options.examples,
             )
         )
 
@@ -119,6 +141,13 @@ def resolve_effective_transform_provider(
         if value is not None:
             message = issue or "Ollama server is not reachable."
             raise RuntimeError(f"ollama is not available. {message}")
+    if requested_provider == "openai":
+        if resolve_openai_base_url(base_url) is not None:
+            return "openai"
+        if value is not None:
+            raise RuntimeError(
+                "openai is not available. Pass --base-url or set AGENT_TOOLS_OPENAI_BASE_URL."
+            )
     integration_status = load_agent_integration_status(
         codex_home=codex_home,
     )
@@ -136,7 +165,7 @@ def resolve_transform_provider(value: TransformProvider | None) -> TransformProv
         or read_string_env(ENV_TRANSFORM_PROVIDER)
         or DEFAULT_TRANSFORM_PROVIDER
     )
-    if provider not in {"codex", "claude-code", "ollama"}:
+    if provider not in {"codex", "claude-code", "ollama", "openai"}:
         raise ValueError(f"Unsupported transform provider {provider!r}.")
     return cast(TransformProvider, provider)
 

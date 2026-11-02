@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from importlib import resources
@@ -11,6 +13,8 @@ from agent_tools.codex_config import (
     DEFAULT_CLAUDE_CODE_MODEL,
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_TTSIFY_MODEL,
+    DEFAULT_TTSIFY_OPENAI_TEMPERATURE,
+    DEFAULT_TTSIFY_OPENAI_TOP_P,
     DEFAULT_TTSIFY_REASONING_EFFORT,
     ENV_CLAUDE_CODE_BARE,
     ENV_CLAUDE_CODE_EFFORT,
@@ -22,6 +26,8 @@ from agent_tools.codex_config import (
     ENV_KOKORO_SPEED,
     ENV_KOKORO_VOICE,
     ENV_OLLAMA_MODEL,
+    ENV_OPENAI_TEMPERATURE,
+    ENV_OPENAI_TOP_P,
     ENV_SILERO_VOICE,
     ENV_TTS_ENGINE,
     normalize_claude_code_model,
@@ -31,6 +37,7 @@ from agent_tools.codex_config import (
     read_string_env,
 )
 from agent_tools.codex_private_api import TransformResult
+from agent_tools.openai_transform import resolve_openai_model
 from agent_tools.transformer import (
     TransformOptions,
     TransformProvider,
@@ -128,6 +135,18 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         )
         codex_model = options.model or read_string_env(ENV_CODEX_MODEL) or DEFAULT_TTSIFY_MODEL
         ollama_model = options.model or read_string_env(ENV_OLLAMA_MODEL) or DEFAULT_OLLAMA_MODEL
+        openai_model = resolve_openai_model(options.model)
+        openai_temperature: float | None = None
+        openai_top_p: float | None = None
+        openai_examples: tuple[tuple[str, str], ...] = ()
+        if provider == "openai":
+            # Only the local-model path gets the tuned prompt; Codex and Claude keep the original.
+            prompt_text = load_ttsify_prompt(local_model=True)
+            openai_examples = load_ttsify_local_examples(ttsify_local_language(input_text))
+            openai_temperature = _env_float_or(
+                ENV_OPENAI_TEMPERATURE, DEFAULT_TTSIFY_OPENAI_TEMPERATURE
+            )
+            openai_top_p = _env_float_or(ENV_OPENAI_TOP_P, DEFAULT_TTSIFY_OPENAI_TOP_P)
         codex_reasoning = (
             options.reasoning_effort
             or read_string_env(ENV_CODEX_REASONING_EFFORT)
@@ -154,7 +173,7 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
         transform_options = TransformOptions(
             system_prompt_text=prompt_text,
             provider=provider,
-            model=codex_model,
+            model=openai_model if provider == "openai" else codex_model,
             reasoning_effort=codex_reasoning,
             fast=options.fast,
             codex_home=options.codex_home,
@@ -164,20 +183,25 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
             claude_effort=claude_effort,
             claude_bare=claude_bare,
             timeout_seconds=timeout_seconds,
+            temperature=openai_temperature,
+            top_p=openai_top_p,
+            examples=openai_examples,
         )
         transform_started = perf_counter()
         transform_result = transform_text(input_text, transform_options)
         transform_ms = (perf_counter() - transform_started) * 1000.0
-        effective_model = (
-            claude_model
-            if provider == "claude-code"
-            else ollama_model if provider == "ollama" else codex_model
-        )
-        effective_reasoning = (
-            claude_effort
-            if provider == "claude-code"
-            else None if provider == "ollama" else codex_reasoning
-        )
+        if provider == "claude-code":
+            effective_model = claude_model
+            effective_reasoning = claude_effort
+        elif provider == "ollama":
+            effective_model = ollama_model
+            effective_reasoning = None
+        elif provider == "openai":
+            effective_model = openai_model or "server-default"
+            effective_reasoning = None
+        else:
+            effective_model = codex_model
+            effective_reasoning = codex_reasoning
     requested_tts_engine = options.tts_engine or read_string_env(ENV_TTS_ENGINE) or "auto"
     resolved_tts_engine = resolve_tts_engine(
         transform_result.text,
@@ -235,10 +259,49 @@ def ttsify_text(input_text: str, options: TtsifyOptions) -> TtsifyResult:
     )
 
 
-def load_ttsify_prompt() -> str:
-    return resources.files("agent_tools.prompts").joinpath("ttsify.md").read_text(
-        encoding="utf-8"
+def load_ttsify_prompt(*, local_model: bool = False) -> str:
+    # The local model gets its own prompt, chosen by a measured search against haiku;
+    # ttsify.md stays the Codex and Claude Code prompt.
+    name = "ttsify_local.md" if local_model else "ttsify.md"
+    return resources.files("agent_tools.prompts").joinpath(name).read_text(encoding="utf-8")
+
+
+def load_ttsify_local_examples(language: str | None = None) -> tuple[tuple[str, str], ...]:
+    """Demonstration turns the local model sees before the real message.
+
+    With a language ("en" or "ru"), only that language's turns: Russian turns sent with an
+    English message made the local model write English acronyms in Cyrillic, Arabic, Thai or
+    Devanagari letters, or translate the whole message (2026-11-02). The agent-hub Listen
+    route selects the same way.
+    """
+    raw = resources.files("agent_tools.prompts").joinpath("ttsify_local_examples.json")
+    examples = json.loads(raw.read_text(encoding="utf-8"))["examples"]
+    return tuple(
+        (item["user"], item["assistant"])
+        for item in examples
+        if language is None or item["lang"] == language
     )
+
+
+_LATIN_LETTER = re.compile(r"[A-Za-z]")
+_CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
+
+
+def ttsify_local_language(text: str) -> str:
+    """Return "ru" when Cyrillic letters are a quarter or more of all Latin and Cyrillic letters.
+
+    Otherwise "en". A quarter, not a half: Russian agent messages carry many English names and
+    commands. The agent-hub Listen route uses the same rule, so both pick the same demonstration
+    turns for the same message.
+    """
+    cyrillic = len(_CYRILLIC_LETTER.findall(text))
+    latin = len(_LATIN_LETTER.findall(text))
+    return "ru" if cyrillic > 0 and cyrillic * 4 >= cyrillic + latin else "en"
+
+
+def _env_float_or(name: str, default: float) -> float:
+    value = read_float_env(name)
+    return default if value is None else value
 
 
 def _validate_no_transform_options(options: TtsifyOptions) -> None:

@@ -143,6 +143,22 @@ Claude Code transform models are intentionally limited to:
 
 `opus` is rejected by the CLI and runtime wrapper.
 
+`--provider openai` sends the same prompt to any OpenAI-compatible chat completions server, such
+as llama-server. No key is required:
+
+```bash
+AGENT_TOOLS_OPENAI_BASE_URL=http://local-llm.local-llm.svc:8080/v1  # or --base-url
+AGENT_TOOLS_OPENAI_MODEL=gemma-4-31b-it-ud-iq2_m                    # or --model; optional
+AGENT_TOOLS_OPENAI_API_KEY=...                                      # optional, sent as Bearer
+AGENT_TOOLS_OPENAI_TEMPERATURE=0.2                                  # ttsify default; transform: server's
+AGENT_TOOLS_OPENAI_TOP_P=0.9                                        # ttsify default; transform: server's
+```
+
+With this provider, `ttsify` uses its own prompt, `prompts/ttsify_local.md`, and sends the
+invented demonstrations in `prompts/ttsify_local_examples.json` as chat turns before the message.
+Both were chosen by a measured prompt search against Claude haiku. The Codex and Claude Code paths
+keep the original `prompts/ttsify.md` and send no examples or sampling values.
+
 CLI flags override env vars.
 
 Queue for playback on Windows:

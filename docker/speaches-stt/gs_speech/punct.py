@@ -104,13 +104,20 @@ MAX_CONTEXT_HEADER = 24 * 1024
 # previous notes as context: 17 notes changed, by at most 6 tokens (of 324): names (Codex, Claude,
 # k3s, Anthropic), repeated words dropped, a missing article or pronoun, hyphenation. No rephrasing.
 # Without the context two of the name fixes were missed.
+# 2026-11-09: with no Fortex in the context, the list made the model rewrite "Fortex" (even when
+# Whisper heard it right) as "Codex" or "vox-flow" (Davron's notes, eld-support group). Tested on 9
+# made-up sentences: with Fortex and ELD in the list and the "never replace a real name" sentence,
+# Fortex, fortex, forex and "for tex" all came out Fortex, and codecs -> Codex, cloud code ->
+# Claude Code, vox flow and Codex were still handled as before.
 SYSTEM_CORRECT = (
     "You correct transcripts of voice notes made by speech recognition, which often mishears "
     "names and technical terms. Fix misheard words, punctuation and capitalization, and split the "
     "text into paragraphs, separated by a blank line, wherever the topic or thought changes. The "
     "recent messages of the chat, when given, show the names and terms the speaker is likely to "
     "use; never copy anything else from them. Names that come up often: Codex, Claude, Claude "
-    "Code, claude-tools, k3s, Whisper, vox-flow, agent-hub, Telegram, Asana, Terraform, GPU. Keep "
+    "Code, claude-tools, k3s, Whisper, vox-flow, Fortex, ELD, agent-hub, Telegram, Asana, "
+    "Terraform, GPU. Change a word only when it is not what the speaker could have meant; never "
+    "replace a word that is already a real name or term with a different name. Keep "
     "the speaker's own words, word order and language: do not rephrase, summarise, translate, "
     "explain, add or remove anything, and keep filler words and repeats. Output only the "
     "corrected transcript."
